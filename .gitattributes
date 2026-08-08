@@ -1,0 +1,30 @@
+# Unity YAML系はテキストとして差分管理(Force Text推奨: ProjectSettings/EditorSettings.assetで設定)
+*.unity text
+*.prefab text
+*.asset text
+*.mat text
+*.controller text
+*.anim text
+*.meta text
+
+# ===== Git LFSで管理するバイナリ資産 =====
+# 3Dモデル
+*.fbx filter=lfs diff=lfs merge=lfs -text
+*.blend filter=lfs diff=lfs merge=lfs -text
+*.obj filter=lfs diff=lfs merge=lfs -text
+
+# テクスチャ・画像
+*.png filter=lfs diff=lfs merge=lfs -text
+*.psd filter=lfs diff=lfs merge=lfs -text
+*.tga filter=lfs diff=lfs merge=lfs -text
+*.tif filter=lfs diff=lfs merge=lfs -text
+*.exr filter=lfs diff=lfs merge=lfs -text
+*.hdr filter=lfs diff=lfs merge=lfs -text
+
+# 音声
+*.wav filter=lfs diff=lfs merge=lfs -text
+*.mp3 filter=lfs diff=lfs merge=lfs -text
+*.ogg filter=lfs diff=lfs merge=lfs -text
+
+# 動画
+*.mp4 filter=lfs diff=lfs merge=lfs -text

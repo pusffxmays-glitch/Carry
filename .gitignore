@@ -1,0 +1,51 @@
+# ===== Unity =====
+# これらはUnityが開いた瞬間に自動再生成されるので除外してOK。
+# 逆にこれ以外(Assets, ProjectSettings, Packages/manifest.json等)は
+# 全部残す。除外しすぎるとクローンしても正しく開けなくなる。
+
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
+/[Uu]serSettings/
+/[Uu]ser[Ss]ettings/
+
+# IDE/エディタが自動生成するもの
+.vs/
+.vscode/
+.idea/
+*.csproj
+*.sln
+*.slnx
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# ビルド成果物・クラッシュログ
+*.apk
+*.aab
+*.unitypackage
+*.app
+crashlytics-build.txt
+
+# OSが生成するゴミファイル
+.DS_Store
+Thumbs.db
+
+# ==== 注意 ====
+# 以下は "除外しない"(コメントアウトのまま残すためのメモ)
+# /Assets/          → 資産本体。.metaファイルも含めて全部コミットする
+# /ProjectSettings/ → 丸ごとコミット。ビルド設定・タグ・レイヤー等が失われる
+# /Packages/manifest.json          → 依存パッケージ一覧。これがないと復元不可
+# /Packages/packages-lock.json     → バージョン固定用。あると再現性が上がる
