@@ -1,6 +1,14 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
 
+// Movement scheme per 設計図.png "操作方法(キーボード)": Arrow keys drive movement
+// (Up/Down = forward/back, Left/Right = turn-in-place), NOT WASD. This is a deliberate choice:
+// the arm-balance controls need Q/A/E/D (see ArmBalanceController), and 設計図.png's own worked
+// example ("Q+D = 右腕を下げながら左腕を上げる") only makes sense if D is never also a movement
+// key. アニメーション遷移図.png's summary box lists WASD+strafe instead, which collides with
+// the arm keys (A/D used for both "strafe" and "lower arm") -- see WORKLOG.md for the full
+// reasoning. Strafe Left/Right animator states still exist (see CarrySetupBalanceGame) for
+// spec fidelity but are unreachable from this input scheme; flagged in the worklog.
 [RequireComponent(typeof(CharacterController))]
 [RequireComponent(typeof(Animator))]
 public class GoblinLocomotion : MonoBehaviour
@@ -10,8 +18,9 @@ public class GoblinLocomotion : MonoBehaviour
     // since movement is code-driven and not root-motion) the foot-slide look; too low and
     // it reads as "not moving" in a big room. Tune by eye in Play Mode.
     public float walkSpeed = 1.0f;
-    public float runSpeed = 5.0f;
-    public float turnSmoothTime = 0.12f;
+    public float runSpeed = 3.0f;
+    public float backStepSpeedMultiplier = 0.6f;
+    public float turnSpeed = 110f; // deg/sec while Left/Right arrow held
     public float gravity = -20f;
     public float terminalVelocity = -20f;
 
@@ -20,15 +29,23 @@ public class GoblinLocomotion : MonoBehaviour
 
     CharacterController controller;
     Animator animator;
-    float turnSmoothVelocity;
     float verticalVelocity;
     // Horizontal speed is locked in at takeoff so tapping Space mid-air (after the jump
     // already committed to the walk- or run-jump animation) can't speed the character up
     // while it's still airborne / mid-animation.
     float jumpHorizontalSpeed;
 
+    static readonly int JumpFromIdleHash = Animator.StringToHash("JumpFromIdle");
     static readonly int JumpFromWalkHash = Animator.StringToHash("JumpFromWalk");
     static readonly int JumpFromRunHash = Animator.StringToHash("JumpFromRun");
+
+    // Read by ArmBalanceController / PotRigController / BalanceWobbleController so every
+    // system agrees on "are we moving / how fast" without re-reading Keyboard state itself.
+    public bool IsMoving { get; private set; }
+    public bool IsRunning { get; private set; }
+    public bool IsMovingBackward { get; private set; }
+    public float CurrentSpeed { get; private set; }
+    public float TurnInputThisFrame { get; private set; } // -1..1, for wobble-on-direction-change
 
     void Awake()
     {
@@ -49,34 +66,46 @@ public class GoblinLocomotion : MonoBehaviour
         }
 
         var kb = Keyboard.current;
-        float h = 0f, v = 0f;
+        float moveZ = 0f;   // +1 forward (Up), -1 backward (Down)
+        float turnX = 0f;   // +1 turn right, -1 turn left
+        // SWAPPED AGAIN 2026-08-12 per explicit request ("走りとジャンプのキーを入れ替えたい。
+        // シフトとスペース"): run is now held Shift, jump is now pressed Space (reverse of the
+        // previous swap earlier the same day).
+        bool runHeld = false;
         if (kb != null)
         {
-            if (kb.aKey.isPressed) h -= 1f;
-            if (kb.dKey.isPressed) h += 1f;
-            if (kb.sKey.isPressed) v -= 1f;
-            if (kb.wKey.isPressed) v += 1f;
+            if (kb.upArrowKey.isPressed) moveZ += 1f;
+            if (kb.downArrowKey.isPressed) moveZ -= 1f;
+            if (kb.rightArrowKey.isPressed) turnX += 1f;
+            if (kb.leftArrowKey.isPressed) turnX -= 1f;
+            runHeld = kb.leftShiftKey.isPressed || kb.rightShiftKey.isPressed;
         }
 
-        Vector3 inputDir = new Vector3(h, 0f, v);
-        bool isMoving = inputDir.sqrMagnitude > 0.0001f;
-        bool isRunning = isMoving && kb != null && kb.spaceKey.isPressed;
+        TurnInputThisFrame = turnX;
+        if (Mathf.Abs(turnX) > 0.001f)
+        {
+            transform.Rotate(0f, turnX * turnSpeed * Time.deltaTime, 0f, Space.World);
+        }
 
-        // "Are we still mid-jump" is read directly from the Animator instead of a separate
-        // timer, so it can never drift out of sync with when the JumpFromWalk/JumpFromRun
-        // clip actually hands control back to Walk/Run (a fixed-duration timer previously
-        // let the Animator switch to Run slightly before the code did, so for ~0.1s the
-        // run animation was playing while movement speed was still locked to the takeoff
-        // speed -- looked like running in place).
+        bool movingForward = moveZ > 0.001f;
+        bool movingBackward = moveZ < -0.001f;
+        IsMoving = movingForward || movingBackward;
+        IsMovingBackward = movingBackward && !movingForward;
+        // Dash/Run (Shift, held) only applies to forward movement; back-stepping always
+        // uses the slower dedicated back-step speed per the anim transition spec.
+        IsRunning = movingForward && runHeld;
+
         bool inJumpState = IsInJumpState();
 
-        // Jump: Left Shift. Only from the ground and only when not already mid-jump.
+        // Jump: Space. Only from the ground and only when not already mid-jump.
         bool canJump = controller.isGrounded && !inJumpState;
-        bool jumpTriggered = kb != null && kb.leftShiftKey.wasPressedThisFrame && canJump;
+        bool jumpTriggered = kb != null
+            && kb.spaceKey.wasPressedThisFrame
+            && canJump;
         if (jumpTriggered)
         {
             animator.SetTrigger("Jump");
-            jumpHorizontalSpeed = isRunning ? runSpeed : walkSpeed;
+            jumpHorizontalSpeed = IsRunning ? runSpeed : (IsMoving ? walkSpeed : 0f);
             inJumpState = true; // about to transition this frame; treat as locked immediately
         }
 
@@ -87,38 +116,52 @@ public class GoblinLocomotion : MonoBehaviour
         else ApplyVerticalVelocity();
 
         Vector3 horizontalMove = Vector3.zero;
-        if (isMoving)
+        if (inJumpState)
         {
-            float camYaw = CarryCameraRig.Instance != null ? CarryCameraRig.Instance.Yaw : transform.eulerAngles.y;
-            float targetAngle = Mathf.Atan2(inputDir.x, inputDir.z) * Mathf.Rad2Deg + camYaw;
-            float smoothAngle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref turnSmoothVelocity, turnSmoothTime);
-            transform.rotation = Quaternion.Euler(0f, smoothAngle, 0f);
-
-            Vector3 moveDir = Quaternion.Euler(0f, targetAngle, 0f) * Vector3.forward;
-            float speed = inJumpState ? jumpHorizontalSpeed : (isRunning ? runSpeed : walkSpeed);
-            horizontalMove = moveDir.normalized * speed;
+            // Keep the takeoff direction/speed locked for the whole jump so late Space taps
+            // (or releasing the arrow key mid-air) can't alter it.
+            horizontalMove = transform.forward * jumpHorizontalSpeed;
         }
+        else if (IsMoving)
+        {
+            float speed = movingForward ? (IsRunning ? runSpeed : walkSpeed) : walkSpeed * backStepSpeedMultiplier;
+            horizontalMove = transform.forward * Mathf.Sign(moveZ) * speed;
+        }
+
+        CurrentSpeed = horizontalMove.magnitude;
 
         Vector3 fullMove = horizontalMove;
         fullMove.y = verticalVelocity;
         controller.Move(fullMove * Time.deltaTime);
 
-        // Stopping should freeze on the current pose (Walk or Run), not jump to a
-        // separate idle animation -- so we gate playback speed instead of switching state.
-        // While a jump is in flight keep the animator playing regardless of movement input
-        // so the one-shot jump clip isn't frozen mid-air.
-        animator.speed = (isMoving || inJumpState) ? 1f : 0f;
-        animator.SetBool("IsRunning", isRunning);
+        // Stopping should freeze on the current pose, not jump to a separate idle animation --
+        // so playback speed is gated instead of switching state for idle. While a jump is in
+        // flight keep the animator playing regardless of movement input so the one-shot jump
+        // clip isn't frozen mid-air.
+        animator.speed = (IsMoving || inJumpState) ? 1f : 0f;
+        animator.SetBool("IsMoving", IsMoving);
+        animator.SetBool("IsRunning", IsRunning);
+        animator.SetBool("IsMovingBackward", IsMovingBackward);
+        // Always false from keyboard in the arrow-key movement scheme (see class comment);
+        // kept as Animator params so the Strafe states exist and can be driven by another
+        // input source later without touching the Animator Controller again.
+        animator.SetBool("StrafeLeftInput", false);
+        animator.SetBool("StrafeRightInput", false);
+    }
+
+    static bool IsJumpHash(int hash)
+    {
+        return hash == JumpFromIdleHash || hash == JumpFromWalkHash || hash == JumpFromRunHash;
     }
 
     bool IsInJumpState()
     {
         var current = animator.GetCurrentAnimatorStateInfo(0);
-        bool currentIsJump = current.shortNameHash == JumpFromWalkHash || current.shortNameHash == JumpFromRunHash;
+        bool currentIsJump = IsJumpHash(current.shortNameHash);
         if (animator.IsInTransition(0))
         {
             var next = animator.GetNextAnimatorStateInfo(0);
-            bool nextIsJump = next.shortNameHash == JumpFromWalkHash || next.shortNameHash == JumpFromRunHash;
+            bool nextIsJump = IsJumpHash(next.shortNameHash);
             return currentIsJump || nextIsJump;
         }
         return currentIsJump;

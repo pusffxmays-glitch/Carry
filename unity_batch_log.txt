@@ -1,0 +1,23 @@
+[Licensing::Module] Trying to connect to existing licensing client channel...
+Built from '6000.5/staging' branch; Version is '6000.5.4f1 (d550df8bd089) revision 13979871'; Using compiler version '194234433'; Build Type 'Release'
+OS: 'Windows 11  (10.0.26200) Core' Language: 'ja' Physical Memory: 15446 MB
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1
+System  architecture: x64
+Process architecture: x64
+Date: 2026-08-12T07:43:28Z
+[Licensing::IpcConnector] Successfully connected to: "LicenseClient-kazud" at "2026-08-12T07:43:28.7151336Z"
+
+COMMAND LINE ARGUMENTS:
+C:\Program Files\Unity\Hub\Editor\6000.5.4f1\Editor\Unity.exe
+-batchmode
+-nographics
+-projectPath
+C:\work\Git\Carry
+-executeMethod
+GoblinRigVerifier.RunCheck
+-quit
+-logFile
+C:\work\Git\Carry\unity_batch_log.txt
+Successfully changed project path to: C:\work\Git\Carry
+C:/work/Git/Carry
+Exiting without the bug reporter. Application will terminate with return code 1
