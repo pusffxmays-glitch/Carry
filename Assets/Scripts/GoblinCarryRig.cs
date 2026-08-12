@@ -29,7 +29,9 @@ public class GoblinCarryRig : MonoBehaviour
     // "Carry_Balance_Neutral" pose exactly (both arms at their captured neutral); +1 = left fully
     // up/right fully down; -1 = right fully up/left fully down.
     [Header("Arm input: Q raises left (lowers right), E raises right (lowers left)")]
-    public float armInputSpeed = 1.2f;
+    // Raised 2026-08-12 per request ("Q/Eキー入力時の変化量をもう少し大きく"), twice: 1.2->2.2
+    // was still judged too slow, raised further to 4.0 (full -1..1 range in ~0.5s).
+    public float armInputSpeed = 4.0f;
     [Range(-1f, 1f)] public float armBalance = 0f;
     // REDESIGNED 2026-08-10 per explicit request: the palm's front-back/left-right position must
     // stay fixed while only its HEIGHT changes, achieved through natural shoulder
@@ -82,6 +84,7 @@ public class GoblinCarryRig : MonoBehaviour
     CharacterController controller;
     GoblinLocomotion locomotion;
     float staggerPhase, staggerIntensity;
+    bool staggerLeanRight;
     float walkPhase, walkIntensity;
 
     // REDESIGNED 2026-08-10 per explicit request: the pot is no longer placed at a fixed
@@ -450,7 +453,25 @@ public class GoblinCarryRig : MonoBehaviour
     void ApplyStagger()
     {
         float tiltAbs = Mathf.Abs(armBalance);
-        float targetIntensity = Mathf.Clamp01((tiltAbs - staggerThreshold) / Mathf.Max(0.001f, staggerRampRange));
+
+        // FIXED 2026-08-12 (bug report: holding Q then E, or vice versa, produces a momentary
+        // "freeze/snap" -- 一瞬硬直する -- right at the reversal). Root cause: `leanRight` used to
+        // be `armBalance < 0f`, a raw sign check that flips the INSTANT armBalance crosses zero.
+        // But staggerIntensity (the blend weight applied to the whole baked hip/leg stagger pose,
+        // AND to the sideways stagger-move direction below) only decays gradually via
+        // MoveTowards -- with armInputSpeed raised to 4 for Q/E sensitivity, armBalance can cross
+        // zero well before staggerIntensity has decayed back to 0, so the entire pose (and move
+        // direction) would mirror-flip in a single frame while still substantially blended in.
+        // Fix: latch the lean side, only adopting a new side once the previous stagger pose has
+        // actually blended out to ~0, and force the target intensity to 0 while a reversal is
+        // pending so it's guaranteed to reach that latch point instead of racing the crossing.
+        bool requestedSideRight = armBalance < 0f;
+        if (staggerIntensity <= 0.001f)
+            staggerLeanRight = requestedSideRight;
+        bool reversalPending = requestedSideRight != staggerLeanRight;
+
+        float rawTargetIntensity = Mathf.Clamp01((tiltAbs - staggerThreshold) / Mathf.Max(0.001f, staggerRampRange));
+        float targetIntensity = reversalPending ? 0f : rawTargetIntensity;
         staggerIntensity = Mathf.MoveTowards(staggerIntensity, targetIntensity, staggerBlendSpeed * Time.deltaTime);
 
         if (staggerIntensity > 0.001f)
@@ -460,7 +481,7 @@ public class GoblinCarryRig : MonoBehaviour
 
         if (staggerIntensity <= 0.001f || hipsBone == null) return;
 
-        bool leanRight = armBalance < 0f;
+        bool leanRight = staggerLeanRight;
 
         GoblinStagger.SampleHips(staggerPhase, leanRight, out Vector3 hy, out Vector3 hx);
         GoblinStagger.SampleLeftUpLeg(staggerPhase, out Vector3 luy, out Vector3 lux);

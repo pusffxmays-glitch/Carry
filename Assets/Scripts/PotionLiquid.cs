@@ -11,16 +11,32 @@ using UnityEngine;
 // actually rising above the rim, in world-gravity terms) drains it. Liquid SHAPE (surface height +
 // tilt + waves) is fully separate from liquid AMOUNT and is recomputed every frame from the current
 // PotionVolume plus the pot's instantaneous motion.
+//
+// REWORKED 2026-08-12 ("粘性のある液体としての表現に達していない" -- the flat sin-phase surface and
+// line-particle overflow were rejected outright as a "green plane", not a liquid). Two structural
+// changes from the previous version:
+//   1) The wave model is now a pool of discrete, DIRECTIONAL "wave impulses" (see StepImpulses/
+//      ImpulseHeightAt below) spawned from real motion events (accel spikes, hard turns, landings)
+//      instead of one continuous fixed-phase sin field. Each impulse is a Ricker ("Mexican hat")
+//      wavelet -- a single rounded mountain flanked by two shallow valleys -- that visibly
+//      propagates outward from the pot's center and decays over its own lifetime, so the mesh
+//      itself shows real traveling peaks/troughs (see the ASCII art in the request) rather than a
+//      uniform standing ripple.
+//   2) Overflow no longer talks to a particle system directly. It now feeds a mesh-based
+//      PotionOverflowStream (thick root -> tapered body -> droplet bulge, see that file) every
+//      frame while actively spilling, and only additionally triggers PotionOverflowVFX's particle
+//      burst for genuinely fast/violent spills (sudden stops etc.) -- ordinary pouring is 100% mesh,
+//      never a particle line.
 [DefaultExecutionOrder(100)]
 public class PotionLiquid : MonoBehaviour
 {
     [Header("Volume")]
     [Tooltip("Liquid amount at which the pot is considered full. Units match the pot's own measured interior volume (local-space cubic units) -- this pot's actual measured capacity is ~0.044, so values much larger than that get clamped down to it at runtime.")]
     public float maxPotionVolume = 0.044f;
-    [Tooltip("Starting liquid amount (same units as maxPotionVolume). 2026-08-12 per request (\"液体の初期量は壺満タンで\"): defaults to full -- set below maxPotionVolume in the Inspector if a less-than-full start is wanted.")]
+    [Tooltip("Starting liquid amount (same units as maxPotionVolume). Defaults to full -- set below maxPotionVolume in the Inspector if a less-than-full start is wanted.")]
     public float initialPotionVolume = 0.044f;
 
-    [Header("Inertia (spring-damper tilt)")]
+    [Header("Inertia (spring-damper tilt -- the liquid's steady lean, separate from traveling wave impulses below)")]
     [Tooltip("How strongly the liquid surface chases its target tilt (higher = snappier/stiffer).")]
     public float inertiaSpringStrength = 55f;
     [Tooltip("Per-second damping fraction applied to tilt velocity (higher = settles faster, less overshoot).")]
@@ -32,42 +48,53 @@ public class PotionLiquid : MonoBehaviour
     [Tooltip("Blend-in amount of the ground slope directly beneath the pot (independent of whether the character body itself leans) -- 0 disables.")]
     [Range(0f, 1f)] public float groundSlopeInfluence = 0.35f;
 
-    [Header("Waves (2026-08-12: more reactive but slower/heavier motion = more viscous feel)")]
-    [Tooltip("Amplitude (meters) of the always-present ambient micro-ripple.")]
+    [Header("Wave Impulses (2026-08-12 rework: discrete propagating wavelets instead of a fixed-phase sin field, so the mesh shows real traveling mountains/valleys)")]
+    [Tooltip("Combined tilt-velocity/angular-velocity/acceleration excitation above which a new wave impulse is spawned.")]
+    public float impulseSpawnThreshold = 0.05f;
+    [Tooltip("Minimum seconds between spawning new impulses, even while excitation stays high -- keeps a sustained shake to a train of distinct waves instead of one smeared blob.")]
+    public float impulseSpawnCooldown = 0.1f;
+    [Tooltip("How strongly excitation converts into a new impulse's peak height.")]
+    public float impulseAmplitudeGain = 0.06f;
+    [Tooltip("Hard cap on a single impulse's peak height (m), and the normalization reference used for the mesh's crest vertex-color signal read by the shader.")]
+    public float maxImpulseAmplitude = 0.05f;
+    [Tooltip("Outward propagation speed of a wave impulse (m/s) -- lower reads as a heavier, more viscous liquid.")]
+    public float impulseSpeed = 0.9f;
+    [Tooltip("Spatial width of a wave impulse's mountain/valley -- larger = broader, thicker-looking swells instead of a tight ripple.")]
+    public float impulseWavelength = 0.09f;
+    [Tooltip("Per-second amplitude decay of an individual impulse once spawned -- lower means waves linger longer (viscous).")]
+    public float impulseDampingPerSecond = 1.1f;
+    [Tooltip("An impulse is discarded once its age exceeds this (seconds), regardless of remaining amplitude.")]
+    public float impulseMaxLifetime = 4f;
+    [Range(1, 10)] public int maxActiveImpulses = 6;
+
+    [Header("Ambient micro-ripple (always-present fine shimmer, on top of the mesh-level waves above)")]
     public float smallWaveAmplitude = 0.004f;
     [Tooltip("Speed of the ambient micro-ripple -- lower reads as thicker/heavier liquid.")]
     public float smallWaveSpeed = 1.3f;
-    [Tooltip("How much a sudden tilt-velocity spike (accel/turn/landing) feeds into big sloshing waves -- raised so waves/spills trigger more easily.")]
-    public float largeWaveGain = 0.24f;
-    [Tooltip("How fast big-wave energy decays per second once nothing new excites it -- lower means waves linger longer, reading as heavier/more viscous.")]
-    public float waveDampingPerSecond = 0.85f;
-    [Tooltip("Propagation speed of the big slosh/ripple wave pattern -- lower reads as thicker/heavier liquid.")]
-    public float waveSpeed = 1.1f;
-    [Tooltip("Spatial frequency of the directional slosh wave -- lower = broader, thicker-looking swells instead of choppy ripples.")]
-    public float sloshFrequency = 3.2f;
-    [Tooltip("Spatial frequency of the radial impact ripple -- lower = broader, thicker-looking ripples.")]
-    public float rippleFrequency = 5f;
 
-    [Header("Overflow (2026-08-12: raised so spilling reacts more readily)")]
+    [Header("Overflow (surface rising above the rim, in world-gravity terms, drains PotionVolume)")]
     [Tooltip("How readily liquid actually drains once the surface is over the rim (higher = spills faster for the same excess).")]
     public float overflowRate = 6f;
-    [Tooltip("Spill speed (m/s of surface rise, roughly) above which splash VFX kicks in instead of just drip/stream. Also drives PotionOverflowVFX's own splash threshold.")]
+    [Tooltip("Spill speed (m/s of surface rise, roughly) above which the violent-splash particle burst also fires on top of the always-on mesh stream. Also drives PotionOverflowVFX's own splash threshold.")]
     public float overflowSplashSpeed = 0.45f;
 
     [Header("Mesh")]
-    public int radialSegments = 32;
-    public int capRings = 3;
+    public int radialSegments = 40;
+    [Tooltip("Concentric rings from center to rim on the liquid surface cap -- raised 2026-08-12 so a wave's mountain/valley shape has enough resolution to actually read as curved geometry instead of a few flat facets.")]
+    public int capRings = 6;
     [Tooltip("Vertical rings used for the static (non-wavy) side wall between the pot's floor and the liquid surface.")]
     public int sideWallRings = 4;
     public Material liquidMaterial;
 
-    [Header("Overflow VFX materials (passed to the auto-created PotionOverflowVFX child)")]
-    public Material overflowDripMaterial;
+    [Header("Overflow VFX (auto-created children)")]
+    [Tooltip("Mesh-based flowing stream + droplets -- handles ALL overflow, every frame, regardless of speed.")]
+    public PotionOverflowStream overflowStream;
+    [Tooltip("Particle burst reserved for fast/violent spills only (see overflowSplashSpeed).")]
+    public PotionOverflowVFX overflowVfx;
     public Material overflowSplashMaterial;
 
     [Header("Refs (auto-found if left empty)")]
     public Transform potMeshSource; // the GameObject whose MeshFilter defines the pot's interior profile
-    public PotionOverflowVFX overflowVfx;
 
     public float PotionVolume { get; private set; }
     public float SurfaceHeightLocal { get; private set; }
@@ -81,11 +108,29 @@ public class PotionLiquid : MonoBehaviour
     Vector3 angularVelocityLocal;
     bool kinematicsPrimed;
 
-    // -- inertia state --
+    // -- simulation clock -- driven entirely by Step(dt)'s dt, never Time.time/Time.deltaTime
+    // directly, so the whole simulation stays deterministically testable via manual Step() calls
+    // (see the class doc on Step() below).
+    float simTime;
+
+    // -- inertia (steady lean) state --
     Vector2 tiltVector;      // (x-slope, z-slope), local space, rise-per-run
     Vector2 tiltVelocity;
-    float impactEnergy;
-    float impactPhase;
+    Vector2 tiltTarget;
+
+    // -- wave impulse pool --
+    struct WaveImpulse
+    {
+        public bool active;
+        public Vector2 dir;       // local-space horizontal unit direction the wave travels
+        public float amplitude;   // peak height contribution (m) at spawn
+        public float spawnSimTime;
+        public float speed;
+        public float wavelength;
+        public float damping;
+    }
+    WaveImpulse[] impulses;
+    float impulseCooldownTimer;
 
     // -- interior profile (sampled once from the pot mesh) --
     float[] profileHeights;
@@ -100,15 +145,30 @@ public class PotionLiquid : MonoBehaviour
     MeshFilter meshFilter;
     Transform liquidTransform;
     Vector3[] vertsBuffer;
+    Color[] colorsBuffer;
+    float[] ringHeightScratch;
+    float[] ringWaveScratch;
+    float[] segExcessScratch;
 
     void Awake()
     {
         if (potMeshSource == null) potMeshSource = transform;
+        impulses = new WaveImpulse[Mathf.Max(1, maxActiveImpulses)];
         SampleInteriorProfile();
         maxPotionVolume = Mathf.Min(maxPotionVolume, cumulativeVolume[cumulativeVolume.Length - 1]);
         PotionVolume = Mathf.Clamp(initialPotionVolume, 0f, maxPotionVolume);
         SurfaceHeightLocal = HeightForVolume(PotionVolume);
         BuildLiquidMeshObject();
+
+        if (overflowStream == null) overflowStream = GetComponentInChildren<PotionOverflowStream>();
+        if (overflowStream == null)
+        {
+            var streamGo = new GameObject("PotionOverflowStream");
+            streamGo.transform.SetParent(transform, false);
+            overflowStream = streamGo.AddComponent<PotionOverflowStream>();
+        }
+        if (liquidMaterial != null) overflowStream.liquidMaterial = liquidMaterial;
+        overflowStream.EnsureBuilt(rebuildMaterialsOnly: true);
 
         if (overflowVfx == null) overflowVfx = GetComponentInChildren<PotionOverflowVFX>();
         if (overflowVfx == null)
@@ -118,7 +178,6 @@ public class PotionLiquid : MonoBehaviour
             overflowVfx = vfxGo.AddComponent<PotionOverflowVFX>();
         }
         overflowVfx.splashSpeedThreshold = overflowSplashSpeed;
-        if (overflowDripMaterial != null) overflowVfx.dripMaterial = overflowDripMaterial;
         if (overflowSplashMaterial != null) overflowVfx.splashMaterial = overflowSplashMaterial;
         overflowVfx.EnsureBuilt(rebuildMaterialsOnly: true);
     }
@@ -213,10 +272,6 @@ public class PotionLiquid : MonoBehaviour
             float a1 = Mathf.PI * profileRadii[i] * profileRadii[i];
             cumulativeVolume[i] = cumulativeVolume[i - 1] + 0.5f * (a0 + a1) * dy;
         }
-
-        // maxPotionVolume defaults to the pot's actual measured interior volume the first time this
-        // runs with the inspector value left at its default-ish 1 -- but we don't silently override
-        // an intentionally-tuned Inspector value, so only rescale if it looks untouched.
     }
 
     float RadiusAtHeight(float y)
@@ -263,15 +318,26 @@ public class PotionLiquid : MonoBehaviour
     // Split out from LateUpdate so it can be driven with an explicit dt -- both for normal per-frame
     // play (LateUpdate above) and, since Time.deltaTime can't be forced from outside the player loop,
     // for editor/automation testing that steps the simulation deterministically regardless of actual
-    // frame timing.
+    // frame timing. Every time-dependent quantity in this class derives from `simTime`/dt, never
+    // Time.time, so repeated Step(dt) calls with a synthetic dt reproduce exactly what real play
+    // would show at that elapsed time.
     public void Step(float dt)
     {
         if (dt <= 0f || !kinematicsPrimed) { prevPos = transform.position; prevRot = transform.rotation; kinematicsPrimed = true; return; }
 
+        // Defensive re-init: `impulses` is a private array of a plain (non-[Serializable]) struct,
+        // which Unity's domain-reload state preservation cannot round-trip -- recompiling scripts
+        // while already in Play mode nulls it out without Awake() running again. Real gameplay never
+        // hits this (Awake() always runs before the first Step()), but this guard makes Step() safe
+        // regardless.
+        if (impulses == null || impulses.Length != Mathf.Max(1, maxActiveImpulses))
+            impulses = new WaveImpulse[Mathf.Max(1, maxActiveImpulses)];
+
+        simTime += dt;
         UpdateKinematics(dt);
         UpdateInertiaTarget();
         StepSpringDamper(dt);
-        StepWaveEnergy(dt);
+        StepImpulses(dt);
 
         SurfaceHeightLocal = HeightForVolume(PotionVolume);
         DeformMeshAndHandleOverflow(dt);
@@ -326,7 +392,6 @@ public class PotionLiquid : MonoBehaviour
 
         tiltTarget = rawTilt;
     }
-    Vector2 tiltTarget;
 
     void StepSpringDamper(float dt)
     {
@@ -334,46 +399,96 @@ public class PotionLiquid : MonoBehaviour
         tiltVelocity += diff * inertiaSpringStrength * dt;
         tiltVelocity *= Mathf.Clamp01(1f - inertiaDamping * dt);
         tiltVector += tiltVelocity * dt;
-
-        // Sudden changes in tilt velocity (accel spikes, hard turns, landings) pump energy into the
-        // big-wave system; steady holding of a tilt does not keep re-exciting it.
-        float excitation = tiltVelocity.magnitude + angularVelocityLocal.magnitude * 0.3f + Mathf.Max(0f, acceleration.magnitude - 3f) * 0.15f;
-        impactEnergy = Mathf.Min(impactEnergy + excitation * largeWaveGain * dt * 10f, 1.5f);
     }
 
-    void StepWaveEnergy(float dt)
+    // Spawns/ages/retires the traveling wave-impulse pool. A new impulse is only spawned when
+    // excitation (tilt-velocity + angular-velocity + acceleration spike) crosses a threshold AND the
+    // cooldown has elapsed -- this is what makes a sudden stop/turn read as a distinct, countable
+    // wave event instead of one continuous smear, matching "急加速・急停止・方向転換では明確に大きな
+    // 波が発生すること".
+    void StepImpulses(float dt)
     {
-        impactPhase += dt * waveSpeed;
-        impactEnergy = Mathf.Max(0f, impactEnergy - waveDampingPerSecond * dt);
+        impulseCooldownTimer -= dt;
+
+        float excitation = tiltVelocity.magnitude + angularVelocityLocal.magnitude * 0.3f + Mathf.Max(0f, acceleration.magnitude - 3f) * 0.15f;
+
+        if (excitation > impulseSpawnThreshold && impulseCooldownTimer <= 0f)
+        {
+            Vector2 dir = tiltVelocity.sqrMagnitude > 0.0001f ? tiltVelocity.normalized : Vector2.up;
+            SpawnImpulse(dir, Mathf.Min(excitation * impulseAmplitudeGain, maxImpulseAmplitude));
+            impulseCooldownTimer = impulseSpawnCooldown;
+        }
+
+        for (int i = 0; i < impulses.Length; i++)
+        {
+            if (!impulses[i].active) continue;
+            float age = simTime - impulses[i].spawnSimTime;
+            float remaining = impulses[i].amplitude * Mathf.Exp(-impulses[i].damping * age);
+            if (age > impulseMaxLifetime || remaining < 0.0005f)
+                impulses[i].active = false;
+        }
     }
 
-    float SurfaceHeightAt(float x, float z)
+    void SpawnImpulse(Vector2 dirLocal, float amplitude)
+    {
+        int slot = -1;
+        float weakestRemaining = float.MaxValue;
+        for (int i = 0; i < impulses.Length; i++)
+        {
+            if (!impulses[i].active) { slot = i; break; }
+            float remaining = impulses[i].amplitude * Mathf.Exp(-impulses[i].damping * (simTime - impulses[i].spawnSimTime));
+            if (remaining < weakestRemaining) { weakestRemaining = remaining; slot = i; }
+        }
+        if (slot < 0) slot = 0;
+
+        impulses[slot] = new WaveImpulse
+        {
+            active = true,
+            dir = dirLocal,
+            amplitude = amplitude,
+            spawnSimTime = simTime,
+            speed = impulseSpeed,
+            wavelength = Mathf.Max(0.02f, impulseWavelength),
+            damping = Mathf.Max(0.05f, impulseDampingPerSecond),
+        };
+    }
+
+    // One impulse's contribution at local point (x,z): a Ricker ("Mexican hat") wavelet centered on
+    // a wavefront that moves outward from the pot's center at `speed` as the impulse ages -- a single
+    // rounded mountain flanked by two shallow valleys that visibly travels and fades, rather than an
+    // infinite standing sine train.
+    float ImpulseHeightAt(in WaveImpulse imp, float x, float z)
+    {
+        float age = simTime - imp.spawnSimTime;
+        if (age < 0f) return 0f;
+
+        float dist = x * imp.dir.x + z * imp.dir.y;
+        float front = imp.speed * age;
+        float u = dist - front;
+        float sigma = imp.wavelength;
+        float u2 = (u * u) / (sigma * sigma);
+        float ricker = (1f - u2) * Mathf.Exp(-u2 * 0.5f);
+
+        float ampNow = imp.amplitude * Mathf.Exp(-imp.damping * age);
+        return ampNow * ricker;
+    }
+
+    float ImpulsesHeightAt(float x, float z)
+    {
+        float h = 0f;
+        for (int i = 0; i < impulses.Length; i++)
+            if (impulses[i].active) h += ImpulseHeightAt(impulses[i], x, z);
+        return h;
+    }
+
+    // waveOnly is the impulse-only contribution (excludes steady tilt/ambient), used to paint the
+    // mesh's per-vertex crest/trough color so the shader can add a highlight right at wave peaks.
+    float SurfaceHeightAt(float x, float z, out float waveOnly)
     {
         float tilt = tiltVector.x * x + tiltVector.y * z;
-
-        // 2026-08-12: lower spatial frequencies (sloshFrequency/rippleFrequency, tunable) + lower
-        // waveSpeed = broader, slower-moving swells instead of choppy short ripples -- reads as a
-        // thicker/heavier liquid ("もう少しとろみがある感じに") while impactEnergy's amplitude
-        // (fed by largeWaveGain, raised for sensitivity) still responds readily to motion.
-        float tiltDirAngle = Mathf.Atan2(tiltVector.y, tiltVector.x);
-        float alongTiltAxis = x * Mathf.Cos(tiltDirAngle) + z * Mathf.Sin(tiltDirAngle);
-        // Amplitude coefficients raised 2026-08-12 ("波打ちやこぼれはもう少し過敏に"), twice: the
-        // first pass (0.028->0.05, 0.02->0.038) still couldn't reliably reach the rim in practice --
-        // the ripple's exp(-r*falloff) term was measured to cut its amplitude by ~27% by the time it
-        // reaches this pot's actual rim radius (~0.195 local units), so the real achievable combined
-        // amplitude at the rim was only ~0.078/unit energy against a ~0.095 headroom gap at a
-        // typical fill level -- technically possible only at near-max energy with perfect phase
-        // alignment, which is why sudden-stop tests kept measuring zero spill even at
-        // impactEnergy>1.4. Amplitudes raised further AND the falloff slowed so a strong impact
-        // reliably clears the rim instead of needing a lucky phase alignment at the ceiling.
-        float slosh = impactEnergy * Mathf.Sin(alongTiltAxis * sloshFrequency - impactPhase * waveSpeed * 1.4f) * 0.075f;
-
-        float r = Mathf.Sqrt(x * x + z * z);
-        float ripple = impactEnergy * Mathf.Sin(r * rippleFrequency - impactPhase * waveSpeed * 1.8f) * Mathf.Exp(-r * 0.8f) * 0.055f;
-
-        float ambient = smallWaveAmplitude * 0.5f * (Mathf.Sin(x * 6f + Time.time * smallWaveSpeed) + Mathf.Sin(z * 4.3f - Time.time * smallWaveSpeed * 0.77f));
-
-        return SurfaceHeightLocal + tilt + slosh + ripple + ambient;
+        waveOnly = ImpulsesHeightAt(x, z);
+        float ambient = smallWaveAmplitude * 0.5f * (Mathf.Sin(x * 6f + simTime * smallWaveSpeed) + Mathf.Sin(z * 4.3f - simTime * smallWaveSpeed * 0.77f));
+        return SurfaceHeightLocal + tilt + waveOnly + ambient;
     }
 
     // ---------------------------------------------------------------------
@@ -398,6 +513,10 @@ public class PotionLiquid : MonoBehaviour
         int capVertCount = (capRings + 1) * radialSegments + 1;
         int sideVertCount = (sideWallRings + 1) * radialSegments;
         vertsBuffer = new Vector3[capVertCount + sideVertCount];
+        colorsBuffer = new Color[capVertCount + sideVertCount];
+        ringHeightScratch = new float[capRings + 1];
+        ringWaveScratch = new float[capRings + 1];
+        segExcessScratch = new float[radialSegments];
 
         RebuildTriangles(capVertCount, sideVertCount);
         DeformMeshAndHandleOverflow(0f);
@@ -464,8 +583,6 @@ public class PotionLiquid : MonoBehaviour
         cachedTriangles = tris.ToArray();
     }
 
-    float pendingOverflowVolume;
-
     void DeformMeshAndHandleOverflow(float dt)
     {
         int capVertCount = (capRings + 1) * radialSegments + 1;
@@ -475,21 +592,36 @@ public class PotionLiquid : MonoBehaviour
         float wedgeAngle = Mathf.PI * 2f / radialSegments;
 
         float maxSurfaceSpillSpeed = 0f;
+        float maxImpulseAmpSafe = Mathf.Max(0.001f, maxImpulseAmplitude);
 
-        // 2026-08-12 (bug report: "spilling from several unrelated points, not from the wave crest
-        // -- looks like unrelated straight lines, no reality to it"): previously every overflowing
-        // segment (up to `radialSegments`=32 of them) independently called NotifySpillPoint every
-        // frame. Real liquid pours from roughly ONE place at a time -- wherever the surface is
-        // currently highest above the rim -- not from a dozen scattered points simultaneously. Now
-        // this loop only RECORDS which single segment has the most excess; the actual VFX call
-        // happens once, after the loop, at that one dominant point, carrying the FULL accumulated
-        // totalOverflowVolume (so the visual amount still reflects the whole spill, just
-        // concentrated where the wave is actually cresting instead of scattered).
+        // Real liquid pours from a small number of places at a time -- wherever the surface is
+        // currently highest above the rim -- not from a dozen scattered points simultaneously. This
+        // loop only RECORDS the single best (dominant) and second-best excess segments; the actual
+        // overflow feed happens once, after the loop, splitting the FULL accumulated
+        // totalOverflowVolume between them proportionally to how much each is actually overflowing
+        // (a narrow crest feeds one point only -- the second slot never qualifies -- while a wide
+        // crest spanning a broad arc of the rim visibly pours from two points at once, reading as
+        // proportionally bigger instead of always funneling through one thin point regardless of how
+        // much of the rim is actually overflowing).
         int dominantSeg = -1;
         float dominantExcess = 0f;
         Vector3 dominantDir = Vector3.zero;
+        int secondSeg = -1;
+        float secondExcess = 0f;
+        Vector3 secondDir = Vector3.zero;
 
-        // Cap rings (0 = innermost .. capRings = outer/rim ring)
+        // Cap rings (0 = innermost .. capRings = outer/rim ring). Three passes per segment:
+        //  1) raw (unclamped) wave height at every ring -- a traveling wave impulse can crest well
+        //     inland, not just right at the wall, so height has to be sampled everywhere first.
+        //  2) integrate excess-above-rim volume across the WHOLE disk via trapezoidal annuli (not
+        //     just the outer edge -- an earlier version only counted the outer ring's own excess,
+        //     which let an inland crest sit indefinitely above the rim line without draining
+        //     PotionVolume or ever being flattened, i.e. liquid visibly mounded up above the opening
+        //     with nothing accounted for). Every ring whose raw height exceeds the rim gets flattened
+        //     back down here -- the excess becomes Overflow instead.
+        //  3) write out the (now-flattened) heights, with the outer ring additionally radius-clamped
+        //     to the wall's true interior radius at its own height (the hard "never pokes through the
+        //     pot" containment rule -- spec section 4/7).
         for (int seg = 0; seg < radialSegments; seg++)
         {
             float theta = seg * wedgeAngle;
@@ -498,55 +630,116 @@ public class PotionLiquid : MonoBehaviour
             for (int ring = 0; ring <= capRings; ring++)
             {
                 float t = (ring + 1) / (float)(capRings + 1); // >0, reaches 1 at the outer/rim ring
-                // Outer ring sits exactly at the wall; interior rings scale toward the center.
+                float nominalRadius = ring == capRings ? rimRadiusLocal : rimRadiusLocal * t;
+                float h = SurfaceHeightAt(dirX * nominalRadius, dirZ * nominalRadius, out float waveOnly);
+                ringHeightScratch[ring] = h;
+                ringWaveScratch[ring] = waveOnly;
+            }
+
+            float prevR = 0f;
+            float prevExcess = Mathf.Max(0f, ringHeightScratch[0] - rimHeightLocal);
+            for (int ring = 0; ring <= capRings; ring++)
+            {
+                float r = ring == capRings ? rimRadiusLocal : rimRadiusLocal * ((ring + 1) / (float)(capRings + 1));
+                float excess = Mathf.Max(0f, ringHeightScratch[ring] - rimHeightLocal);
+
+                if (ring > 0)
+                {
+                    float avgExcess = 0.5f * (excess + prevExcess);
+                    float area = 0.5f * wedgeAngle * (r * r - prevR * prevR);
+                    totalOverflowVolume += avgExcess * area;
+                }
+                prevR = r; prevExcess = excess;
+
+                if (excess > 0f)
+                {
+                    // Clamped: excess/dt is unbounded and a single unusually large dt (a stutter
+                    // frame, or many manual dt steps applied back-to-back during testing) could
+                    // otherwise produce an absurd "speed". A real single-frame spill speed has no
+                    // business being much faster than this regardless.
+                    float spillSpeed = Mathf.Min(excess / Mathf.Max(dt, 0.0001f), 2.5f);
+                    maxSurfaceSpillSpeed = Mathf.Max(maxSurfaceSpillSpeed, spillSpeed);
+                    ringHeightScratch[ring] = rimHeightLocal + 0.002f; // flatten the bulge back down
+                }
+
+                if (ring == capRings) segExcessScratch[seg] = excess;
+            }
+
+            for (int ring = 0; ring <= capRings; ring++)
+            {
+                float t = (ring + 1) / (float)(capRings + 1);
                 float nominalRadius = ring == capRings ? rimRadiusLocal : rimRadiusLocal * t;
                 float x = dirX * nominalRadius;
                 float z = dirZ * nominalRadius;
-                float h = SurfaceHeightAt(x, z);
+                float h = ringHeightScratch[ring];
 
                 if (ring == capRings)
                 {
-                    // Clamp to the wall's actual interior radius AT this deformed height so the mesh
-                    // can never poke through the taper -- this is the hard "stay inside the pot" rule.
+                    // Clamp to the wall's actual interior radius AT this (already-flattened) height
+                    // so the outer edge can never poke through the taper.
                     float wallR = RadiusAtHeight(Mathf.Min(h, rimHeightLocal));
                     x = dirX * wallR; z = dirZ * wallR;
-
-                    if (h > rimHeightLocal)
-                    {
-                        float excess = h - rimHeightLocal;
-                        float wedgeArea = 0.5f * rimRadiusLocal * rimRadiusLocal * wedgeAngle;
-                        float wedgeVolume = excess * wedgeArea;
-                        totalOverflowVolume += wedgeVolume;
-                        // Clamped 2026-08-12: excess/dt is unbounded and a single unusually large
-                        // dt (a stutter frame, or -- as found during testing -- many manual dt=0.02
-                        // steps applied back-to-back to simulate a fast tilt ramp) could produce an
-                        // absurdly large "speed", launching drip/splash particles fast enough to
-                        // rocket into the sky instead of falling like liquid. A real single-frame
-                        // spill speed has no business being much faster than this regardless.
-                        float spillSpeed = Mathf.Min(excess / Mathf.Max(dt, 0.0001f), 2.5f);
-                        maxSurfaceSpillSpeed = Mathf.Max(maxSurfaceSpillSpeed, spillSpeed);
-
-                        if (excess > dominantExcess)
-                        {
-                            dominantExcess = excess;
-                            dominantSeg = seg;
-                            dominantDir = new Vector3(dirX, 0f, dirZ);
-                        }
-                    }
-
-                    h = Mathf.Min(h, rimHeightLocal + 0.002f); // visually never rises meaningfully above the rim; the excess became Overflow instead
                 }
 
                 int idx = ring * radialSegments + seg;
                 vertsBuffer[idx] = new Vector3(x, h, z);
+                colorsBuffer[idx] = new Color(Mathf.Clamp01(0.5f + ringWaveScratch[ring] / (2f * maxImpulseAmpSafe)), 0f, 0f, 1f);
+            }
+        }
+
+        // Pick the dominant overflow point, then a second point ONLY if it's both a comparable
+        // excess (so a wide crest genuinely pours from two places) and angularly well separated from
+        // the first (so two adjacent segments of the same single crest never get treated as two
+        // separate pour points, which would just be the old scattered-line bug again in miniature).
+        for (int seg = 0; seg < radialSegments; seg++)
+        {
+            if (segExcessScratch[seg] > dominantExcess)
+            {
+                dominantExcess = segExcessScratch[seg];
+                dominantSeg = seg;
+            }
+        }
+        if (dominantSeg >= 0)
+        {
+            float theta = dominantSeg * wedgeAngle;
+            dominantDir = new Vector3(Mathf.Cos(theta), 0f, Mathf.Sin(theta));
+
+            int minSeparation = Mathf.Max(2, radialSegments / 8);
+            for (int seg = 0; seg < radialSegments; seg++)
+            {
+                if (seg == dominantSeg) continue;
+                int diff = Mathf.Abs(seg - dominantSeg);
+                diff = Mathf.Min(diff, radialSegments - diff);
+                if (diff < minSeparation) continue;
+                if (segExcessScratch[seg] > secondExcess)
+                {
+                    secondExcess = segExcessScratch[seg];
+                    secondSeg = seg;
+                }
+            }
+            if (secondSeg >= 0 && secondExcess >= dominantExcess * 0.4f)
+            {
+                float theta2 = secondSeg * wedgeAngle;
+                secondDir = new Vector3(Mathf.Cos(theta2), 0f, Mathf.Sin(theta2));
+            }
+            else
+            {
+                secondSeg = -1;
             }
         }
 
         // center vertex: average of innermost ring for a smooth apex
         Vector3 centerAvg = Vector3.zero;
-        for (int seg = 0; seg < radialSegments; seg++) centerAvg += vertsBuffer[0 * radialSegments + seg];
+        Color centerColorAvg = Color.clear;
+        for (int seg = 0; seg < radialSegments; seg++)
+        {
+            centerAvg += vertsBuffer[0 * radialSegments + seg];
+            centerColorAvg += colorsBuffer[0 * radialSegments + seg];
+        }
         centerAvg /= radialSegments;
+        centerColorAvg /= radialSegments;
         vertsBuffer[centerIndex] = new Vector3(0f, centerAvg.y, 0f);
+        colorsBuffer[centerIndex] = centerColorAvg;
 
         // Side wall: static profile rings from floor up to (just under) the surface -- always
         // strictly following the measured interior wall, so it can never bulge outside the pot.
@@ -562,10 +755,12 @@ public class PotionLiquid : MonoBehaviour
                 float wallR = RadiusAtHeight(y);
                 int idx = sideBase + ring * radialSegments + seg;
                 vertsBuffer[idx] = new Vector3(dirX * wallR, y, dirZ * wallR);
+                colorsBuffer[idx] = new Color(0.5f, 0f, 0f, 1f);
             }
         }
 
         liquidMesh.vertices = vertsBuffer;
+        liquidMesh.colors = colorsBuffer;
         if (liquidMesh.triangles.Length != cachedTriangles.Length) liquidMesh.triangles = cachedTriangles;
         else liquidMesh.SetTriangles(cachedTriangles, 0);
         liquidMesh.RecalculateNormals();
@@ -576,17 +771,46 @@ public class PotionLiquid : MonoBehaviour
             float spill = Mathf.Min(totalOverflowVolume * overflowRate * dt, PotionVolume);
             PotionVolume = Mathf.Max(0f, PotionVolume - spill);
 
-            if (overflowVfx != null && dominantSeg >= 0)
+            if (dominantSeg >= 0)
             {
+                Vector3 gravityDirWorld = Physics.gravity.sqrMagnitude > 1e-6f ? Physics.gravity.normalized : Vector3.down;
                 float spillSpeedForVfx = Mathf.Min(maxSurfaceSpillSpeed, 2.5f);
+
+                // Split the FULL accumulated totalOverflowVolume between the one or two active pour
+                // points, proportional to each one's own excess -- so a wide overflow (both points
+                // active) still carries its whole true volume total between them, rather than each
+                // point acting as if it alone were the entire spill.
+                float weightSum = dominantExcess + (secondSeg >= 0 ? secondExcess : 0f);
+                float dominantShare = weightSum > 0f ? dominantExcess / weightSum : 1f;
+
                 Vector3 rimLocal = new Vector3(dominantDir.x * rimRadiusLocal, rimHeightLocal, dominantDir.z * rimRadiusLocal);
                 Vector3 worldPos = liquidTransform.TransformPoint(rimLocal);
                 Vector3 outwardWorld = liquidTransform.TransformDirection(dominantDir).normalized;
-                Vector3 spillDir = (outwardWorld * 0.5f + Vector3.down * 0.85f).normalized;
-                // Carries the FULL totalOverflowVolume (not just the dominant segment's own
-                // wedge), so a wide-arc spill still looks proportionally bigger even though it's
-                // now visually concentrated at the single highest point.
-                overflowVfx.NotifySpillPoint(worldPos, spillDir, totalOverflowVolume, spillSpeedForVfx);
+                // World-gravity-based pour direction (spec section 7): follows actual effective
+                // gravity, never a fixed local-down assumption, blended with a bit of outward push so
+                // the stream visibly clears the rim edge before falling.
+                Vector3 spillDir = (outwardWorld * 0.4f + gravityDirWorld * 0.9f).normalized;
+                float flowRate = (totalOverflowVolume * dominantShare) / dt;
+                if (overflowStream != null)
+                    overflowStream.Feed(worldPos, spillDir, flowRate);
+
+                if (secondSeg >= 0)
+                {
+                    Vector3 rimLocal2 = new Vector3(secondDir.x * rimRadiusLocal, rimHeightLocal, secondDir.z * rimRadiusLocal);
+                    Vector3 worldPos2 = liquidTransform.TransformPoint(rimLocal2);
+                    Vector3 outwardWorld2 = liquidTransform.TransformDirection(secondDir).normalized;
+                    Vector3 spillDir2 = (outwardWorld2 * 0.4f + gravityDirWorld * 0.9f).normalized;
+                    float flowRate2 = (totalOverflowVolume * (1f - dominantShare)) / dt;
+                    if (overflowStream != null)
+                        overflowStream.Feed(worldPos2, spillDir2, flowRate2);
+                }
+
+                // Splash burst reserved for genuinely violent/fast spills (sudden stop, hard impact)
+                // -- ordinary pouring/dripping is handled entirely by the mesh-based stream(s) above.
+                // Always from the single dominant point, even when two streams are pouring, so the
+                // splash itself never re-introduces the old "scattered" look.
+                if (overflowVfx != null && spillSpeedForVfx >= overflowSplashSpeed)
+                    overflowVfx.NotifySplash(worldPos, spillDir, totalOverflowVolume, spillSpeedForVfx);
             }
         }
     }

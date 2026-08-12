@@ -19,8 +19,8 @@ public class CarryCameraRig : MonoBehaviour
     public Transform target;
     [Tooltip("World-space offset added to target.position for what the camera looks at.")]
     public Vector3 lookOffset = new Vector3(0f, 1.2f, 0f);
-    [Tooltip("Fixed downward pitch (degrees) -- high enough to look down into the pot while the goblin's feet stay in frame.")]
-    public float pitch = 38f;
+    [Tooltip("Fixed downward pitch (degrees) -- high enough to look down into the pot while the goblin's feet stay in frame. Lowered 2026-08-12 per request (\"カメラをもう少し下げて\") from 38 -- less steep top-down angle.")]
+    public float pitch = 26f;
     [Tooltip("Pulled back further 2026-08-12 per request (\"カメラもっと引きじゃないと全然見えない\", then \"もっと引いていい\") -- 2.7 was too tight, cropping the character; 5.5 was still not far enough.")]
     public float distance = 8f;
     public float minDistance = 1.0f;
