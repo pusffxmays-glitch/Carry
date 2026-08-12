@@ -12,21 +12,18 @@ using UnityEngine;
 // tilt + waves) is fully separate from liquid AMOUNT and is recomputed every frame from the current
 // PotionVolume plus the pot's instantaneous motion.
 //
-// REWORKED 2026-08-12 ("粘性のある液体としての表現に達していない" -- the flat sin-phase surface and
-// line-particle overflow were rejected outright as a "green plane", not a liquid). Two structural
-// changes from the previous version:
-//   1) The wave model is now a pool of discrete, DIRECTIONAL "wave impulses" (see StepImpulses/
-//      ImpulseHeightAt below) spawned from real motion events (accel spikes, hard turns, landings)
-//      instead of one continuous fixed-phase sin field. Each impulse is a Ricker ("Mexican hat")
-//      wavelet -- a single rounded mountain flanked by two shallow valleys -- that visibly
-//      propagates outward from the pot's center and decays over its own lifetime, so the mesh
-//      itself shows real traveling peaks/troughs (see the ASCII art in the request) rather than a
-//      uniform standing ripple.
-//   2) Overflow no longer talks to a particle system directly. It now feeds a mesh-based
-//      PotionOverflowStream (thick root -> tapered body -> droplet bulge, see that file) every
-//      frame while actively spilling, and only additionally triggers PotionOverflowVFX's particle
-//      burst for genuinely fast/violent spills (sudden stops etc.) -- ordinary pouring is 100% mesh,
-//      never a particle line.
+// REWORKED 2026-08-12, three passes:
+//   1) Wave model v1: a pool of independent Ricker-wavelet "impulses" spawned from motion events.
+//   2) Overflow moved off particles onto a mesh-based PotionOverflowStream (see that file).
+//   3) Wave model v2 ("液体を粒子の集合ではなく一つの液体として動かす...Node同士の拘束" -- v1's
+//      impulses were independently-evaluated formulas with no physical connection to each other,
+//      which is NOT the same as "one coupled body" no matter how their outputs are summed). The
+//      surface's wave detail is now a StepRingNodes()-driven closed ring of spring-coupled mass
+//      nodes around the rim -- a discretized 1D wave equation. Neighboring nodes physically pull on
+//      each other (nodeCoupleStrength), so a disturbance at one point propagates around the ring and
+//      decays as one connected system, producing naturally rounded crests as an EMERGENT property of
+//      the spring coupling rather than a hand-authored wavelet shape. See RingHeightAt/StepRingNodes
+//      below, and PotionOverflowStream.cs for the matching node-chain treatment of Overflow.
 [DefaultExecutionOrder(100)]
 public class PotionLiquid : MonoBehaviour
 {
@@ -36,7 +33,7 @@ public class PotionLiquid : MonoBehaviour
     [Tooltip("Starting liquid amount (same units as maxPotionVolume). Defaults to full -- set below maxPotionVolume in the Inspector if a less-than-full start is wanted.")]
     public float initialPotionVolume = 0.044f;
 
-    [Header("Inertia (spring-damper tilt -- the liquid's steady lean, separate from traveling wave impulses below)")]
+    [Header("Inertia (spring-damper tilt -- the liquid's steady bulk lean, separate from the ring wave detail below)")]
     [Tooltip("How strongly the liquid surface chases its target tilt (higher = snappier/stiffer).")]
     public float inertiaSpringStrength = 55f;
     [Tooltip("Per-second damping fraction applied to tilt velocity (higher = settles faster, less overshoot).")]
@@ -48,24 +45,20 @@ public class PotionLiquid : MonoBehaviour
     [Tooltip("Blend-in amount of the ground slope directly beneath the pot (independent of whether the character body itself leans) -- 0 disables.")]
     [Range(0f, 1f)] public float groundSlopeInfluence = 0.35f;
 
-    [Header("Wave Impulses (2026-08-12 rework: discrete propagating wavelets instead of a fixed-phase sin field, so the mesh shows real traveling mountains/valleys)")]
-    [Tooltip("Combined tilt-velocity/angular-velocity/acceleration excitation above which a new wave impulse is spawned.")]
-    public float impulseSpawnThreshold = 0.05f;
-    [Tooltip("Minimum seconds between spawning new impulses, even while excitation stays high -- keeps a sustained shake to a train of distinct waves instead of one smeared blob.")]
-    public float impulseSpawnCooldown = 0.1f;
-    [Tooltip("How strongly excitation converts into a new impulse's peak height.")]
-    public float impulseAmplitudeGain = 0.06f;
-    [Tooltip("Hard cap on a single impulse's peak height (m), and the normalization reference used for the mesh's crest vertex-color signal read by the shader.")]
-    public float maxImpulseAmplitude = 0.05f;
-    [Tooltip("Outward propagation speed of a wave impulse (m/s) -- lower reads as a heavier, more viscous liquid.")]
-    public float impulseSpeed = 0.9f;
-    [Tooltip("Spatial width of a wave impulse's mountain/valley -- larger = broader, thicker-looking swells instead of a tight ripple.")]
-    public float impulseWavelength = 0.09f;
-    [Tooltip("Per-second amplitude decay of an individual impulse once spawned -- lower means waves linger longer (viscous).")]
-    public float impulseDampingPerSecond = 1.1f;
-    [Tooltip("An impulse is discarded once its age exceeds this (seconds), regardless of remaining amplitude.")]
-    public float impulseMaxLifetime = 4f;
-    [Range(1, 10)] public int maxActiveImpulses = 6;
+    [Header("Wave Ring (2026-08-12 rework #3: replaces the independent-wavelet impulse pool with a CLOSED RING of spring-coupled mass nodes around the rim -- a discretized 1D wave equation, not a sum of separately-evaluated formulas. Neighboring nodes physically pull on each other, so a disturbance at one point propagates around the ring and the whole surface behaves as ONE coupled body -- \"液体を粒子の集合ではなく一つの液体として動かす\" -- with naturally rounded crests (an emergent property of spring coupling, not a hand-shaped curve) instead of a flat plane with an applied waveform.")]
+    [Range(6, 32)] public int ringNodeCount = 16;
+    [Tooltip("How strongly each node is pulled back toward the flat (tilt-only) baseline -- higher = stiffer/faster-settling liquid.")]
+    public float nodeSpringStrength = 40f;
+    [Tooltip("How strongly each node is pulled toward its two neighbors' average height -- this IS the cohesion/coupling that makes the ring move as one connected body instead of independent points. Higher = a disturbance propagates faster/sharper around the ring.")]
+    public float nodeCoupleStrength = 260f;
+    [Tooltip("Per-second velocity damping on each node -- higher = settles faster, less sloshing back and forth (viscosity).")]
+    public float nodeDamping = 3.2f;
+    [Tooltip("How strongly a sudden shift in tilt (tiltVelocity -- itself already derived from world gravity + pot/character pose + acceleration) excites ring nodes on the side it's swinging toward.")]
+    public float nodeForcingGain = 3.5f;
+    [Tooltip("Hard cap on any single node's height deviation (m), and the normalization reference for the mesh's crest vertex-color signal read by the shader.")]
+    public float maxNodeAmplitude = 0.07f;
+    [Tooltip("Radial falloff exponent for how much the rim's wave height carries toward the pot's center -- 1 = linear, higher = flatter near the center with the rise concentrated near the rim (closer to how a real sloshing tank's surface behaves).")]
+    public float waveRadialFalloff = 1.5f;
 
     [Header("Ambient micro-ripple (always-present fine shimmer, on top of the mesh-level waves above)")]
     public float smallWaveAmplitude = 0.004f;
@@ -120,19 +113,10 @@ public class PotionLiquid : MonoBehaviour
     Vector2 tiltVelocity;
     Vector2 tiltTarget;
 
-    // -- wave impulse pool --
-    struct WaveImpulse
-    {
-        public bool active;
-        public Vector2 dir;       // local-space horizontal unit direction the wave travels
-        public float amplitude;   // peak height contribution (m) at spawn
-        public float spawnSimTime;
-        public float speed;
-        public float wavelength;
-        public float damping;
-    }
-    WaveImpulse[] impulses;
-    float impulseCooldownTimer;
+    // -- wave ring state -- closed loop of spring-coupled mass nodes, indices around the rim
+    // starting at local +X and going counter-clockwise (matching the mesh's own theta convention).
+    float[] nodeHeight;
+    float[] nodeVelocity;
 
     // -- interior profile (sampled once from the pot mesh) --
     float[] profileHeights;
@@ -155,7 +139,8 @@ public class PotionLiquid : MonoBehaviour
     void Awake()
     {
         if (potMeshSource == null) potMeshSource = transform;
-        impulses = new WaveImpulse[Mathf.Max(1, maxActiveImpulses)];
+        nodeHeight = new float[Mathf.Max(3, ringNodeCount)];
+        nodeVelocity = new float[Mathf.Max(3, ringNodeCount)];
         SampleInteriorProfile();
         maxPotionVolume = Mathf.Min(maxPotionVolume, cumulativeVolume[cumulativeVolume.Length - 1]);
         PotionVolume = Mathf.Clamp(initialPotionVolume, 0f, maxPotionVolume);
@@ -328,19 +313,21 @@ public class PotionLiquid : MonoBehaviour
     {
         if (dt <= 0f || !kinematicsPrimed) { prevPos = transform.position; prevRot = transform.rotation; kinematicsPrimed = true; return; }
 
-        // Defensive re-init: `impulses` is a private array of a plain (non-[Serializable]) struct,
-        // which Unity's domain-reload state preservation cannot round-trip -- recompiling scripts
-        // while already in Play mode nulls it out without Awake() running again. Real gameplay never
-        // hits this (Awake() always runs before the first Step()), but this guard makes Step() safe
-        // regardless.
-        if (impulses == null || impulses.Length != Mathf.Max(1, maxActiveImpulses))
-            impulses = new WaveImpulse[Mathf.Max(1, maxActiveImpulses)];
+        // Defensive re-init: recompiling scripts while already in Play mode can null out plain
+        // (non-[Serializable]) private arrays without Awake() running again -- see WORKLOG.md. Real
+        // gameplay never hits this (Awake() always runs before the first Step()), but this guard
+        // makes Step() safe regardless.
+        if (nodeHeight == null || nodeHeight.Length != Mathf.Max(3, ringNodeCount))
+        {
+            nodeHeight = new float[Mathf.Max(3, ringNodeCount)];
+            nodeVelocity = new float[Mathf.Max(3, ringNodeCount)];
+        }
 
         simTime += dt;
         UpdateKinematics(dt);
         UpdateInertiaTarget();
         StepSpringDamper(dt);
-        StepImpulses(dt);
+        StepRingNodes(dt);
 
         SurfaceHeightLocal = HeightForVolume(PotionVolume);
         DeformMeshAndHandleOverflow(dt);
@@ -404,92 +391,65 @@ public class PotionLiquid : MonoBehaviour
         tiltVector += tiltVelocity * dt;
     }
 
-    // Spawns/ages/retires the traveling wave-impulse pool. A new impulse is only spawned when
-    // excitation (tilt-velocity + angular-velocity + acceleration spike) crosses a threshold AND the
-    // cooldown has elapsed -- this is what makes a sudden stop/turn read as a distinct, countable
-    // wave event instead of one continuous smear, matching "急加速・急停止・方向転換では明確に大きな
-    // 波が発生すること".
-    void StepImpulses(float dt)
+    // Advances the closed ring of spring-coupled mass nodes by one discretized-wave-equation step:
+    // each node is pulled (a) back toward the flat baseline (nodeSpringStrength), (b) toward its two
+    // neighbors' average height (nodeCoupleStrength -- the actual cohesion that makes this ONE
+    // connected body instead of independent points), (c) by external forcing proportional to how
+    // aligned the node's angular position is with the CURRENT direction the effective-gravity tilt is
+    // swinging (tiltVelocity) -- a sudden stop/turn shows up as forcing concentrated on one side of
+    // the ring, which then propagates around it through the coupling term, exactly like a real slosh.
+    // Semi-implicit (symplectic) Euler: velocities are updated from a single snapshot of this step's
+    // starting heights (avoiding order-dependent bias across nodes), then heights are integrated from
+    // the new velocities -- numerically stable for the stiffness values here at normal frame dt.
+    void StepRingNodes(float dt)
     {
-        impulseCooldownTimer -= dt;
+        int n = nodeHeight.Length;
+        float twoPi = Mathf.PI * 2f;
 
-        float excitation = tiltVelocity.magnitude + angularVelocityLocal.magnitude * 0.3f + Mathf.Max(0f, acceleration.magnitude - 3f) * 0.15f;
-
-        if (excitation > impulseSpawnThreshold && impulseCooldownTimer <= 0f)
+        for (int i = 0; i < n; i++)
         {
-            Vector2 dir = tiltVelocity.sqrMagnitude > 0.0001f ? tiltVelocity.normalized : Vector2.up;
-            SpawnImpulse(dir, Mathf.Min(excitation * impulseAmplitudeGain, maxImpulseAmplitude));
-            impulseCooldownTimer = impulseSpawnCooldown;
+            float angle = i * twoPi / n;
+            float forcing = (tiltVelocity.x * Mathf.Cos(angle) + tiltVelocity.y * Mathf.Sin(angle)) * nodeForcingGain;
+
+            int prev = (i - 1 + n) % n;
+            int next = (i + 1) % n;
+            float coupling = nodeCoupleStrength * (nodeHeight[prev] + nodeHeight[next] - 2f * nodeHeight[i]);
+            float restoring = -nodeHeight[i] * nodeSpringStrength;
+
+            float accel = restoring + coupling + forcing;
+            nodeVelocity[i] += accel * dt;
+            nodeVelocity[i] *= Mathf.Clamp01(1f - nodeDamping * dt);
         }
-
-        for (int i = 0; i < impulses.Length; i++)
-        {
-            if (!impulses[i].active) continue;
-            float age = simTime - impulses[i].spawnSimTime;
-            float remaining = impulses[i].amplitude * Mathf.Exp(-impulses[i].damping * age);
-            if (age > impulseMaxLifetime || remaining < 0.0005f)
-                impulses[i].active = false;
-        }
+        for (int i = 0; i < n; i++)
+            nodeHeight[i] = Mathf.Clamp(nodeHeight[i] + nodeVelocity[i] * dt, -maxNodeAmplitude, maxNodeAmplitude);
     }
 
-    void SpawnImpulse(Vector2 dirLocal, float amplitude)
+    // Smooth (smoothstep-blended) interpolation between the two ring nodes bounding this angle --
+    // C1-continuous so the surface reads as one rounded body between control points rather than
+    // faceted linear segments.
+    float RingHeightAt(float angleRad)
     {
-        int slot = -1;
-        float weakestRemaining = float.MaxValue;
-        for (int i = 0; i < impulses.Length; i++)
-        {
-            if (!impulses[i].active) { slot = i; break; }
-            float remaining = impulses[i].amplitude * Mathf.Exp(-impulses[i].damping * (simTime - impulses[i].spawnSimTime));
-            if (remaining < weakestRemaining) { weakestRemaining = remaining; slot = i; }
-        }
-        if (slot < 0) slot = 0;
-
-        impulses[slot] = new WaveImpulse
-        {
-            active = true,
-            dir = dirLocal,
-            amplitude = amplitude,
-            spawnSimTime = simTime,
-            speed = impulseSpeed,
-            wavelength = Mathf.Max(0.02f, impulseWavelength),
-            damping = Mathf.Max(0.05f, impulseDampingPerSecond),
-        };
+        int n = nodeHeight.Length;
+        float t = angleRad / (Mathf.PI * 2f) * n;
+        t = ((t % n) + n) % n;
+        int i0 = (int)t;
+        int i1 = (i0 + 1) % n;
+        float frac = t - i0;
+        float blend = frac * frac * (3f - 2f * frac);
+        return Mathf.Lerp(nodeHeight[i0], nodeHeight[i1], blend);
     }
 
-    // One impulse's contribution at local point (x,z): a Ricker ("Mexican hat") wavelet centered on
-    // a wavefront that moves outward from the pot's center at `speed` as the impulse ages -- a single
-    // rounded mountain flanked by two shallow valleys that visibly travels and fades, rather than an
-    // infinite standing sine train.
-    float ImpulseHeightAt(in WaveImpulse imp, float x, float z)
-    {
-        float age = simTime - imp.spawnSimTime;
-        if (age < 0f) return 0f;
-
-        float dist = x * imp.dir.x + z * imp.dir.y;
-        float front = imp.speed * age;
-        float u = dist - front;
-        float sigma = imp.wavelength;
-        float u2 = (u * u) / (sigma * sigma);
-        float ricker = (1f - u2) * Mathf.Exp(-u2 * 0.5f);
-
-        float ampNow = imp.amplitude * Mathf.Exp(-imp.damping * age);
-        return ampNow * ricker;
-    }
-
-    float ImpulsesHeightAt(float x, float z)
-    {
-        float h = 0f;
-        for (int i = 0; i < impulses.Length; i++)
-            if (impulses[i].active) h += ImpulseHeightAt(impulses[i], x, z);
-        return h;
-    }
-
-    // waveOnly is the impulse-only contribution (excludes steady tilt/ambient), used to paint the
-    // mesh's per-vertex crest/trough color so the shader can add a highlight right at wave peaks.
+    // waveOnly is the ring-only contribution (excludes steady tilt/ambient), used to paint the mesh's
+    // per-vertex crest/trough color so the shader can add a highlight right at wave peaks.
     float SurfaceHeightAt(float x, float z, out float waveOnly)
     {
         float tilt = tiltVector.x * x + tiltVector.y * z;
-        waveOnly = ImpulsesHeightAt(x, z);
+
+        float r = Mathf.Sqrt(x * x + z * z);
+        float radiusFrac = rimRadiusLocal > 0.0001f ? Mathf.Clamp01(r / rimRadiusLocal) : 0f;
+        float angle = Mathf.Atan2(z, x);
+        waveOnly = RingHeightAt(angle) * Mathf.Pow(radiusFrac, waveRadialFalloff);
+
         float ambient = smallWaveAmplitude * 0.5f * (Mathf.Sin(x * 6f + simTime * smallWaveSpeed) + Mathf.Sin(z * 4.3f - simTime * smallWaveSpeed * 0.77f));
         return SurfaceHeightLocal + tilt + waveOnly + ambient;
     }
@@ -595,7 +555,7 @@ public class PotionLiquid : MonoBehaviour
         float wedgeAngle = Mathf.PI * 2f / radialSegments;
 
         float maxSurfaceSpillSpeed = 0f;
-        float maxImpulseAmpSafe = Mathf.Max(0.001f, maxImpulseAmplitude);
+        float maxNodeAmpSafe = Mathf.Max(0.001f, maxNodeAmplitude);
 
         // Real liquid pours from a small number of places at a time -- wherever the surface is
         // currently highest above the rim -- not from a dozen scattered points simultaneously. This
@@ -686,7 +646,7 @@ public class PotionLiquid : MonoBehaviour
 
                 int idx = ring * radialSegments + seg;
                 vertsBuffer[idx] = new Vector3(x, h, z);
-                colorsBuffer[idx] = new Color(Mathf.Clamp01(0.5f + ringWaveScratch[ring] / (2f * maxImpulseAmpSafe)), 0f, 0f, 1f);
+                colorsBuffer[idx] = new Color(Mathf.Clamp01(0.5f + ringWaveScratch[ring] / (2f * maxNodeAmpSafe)), 0f, 0f, 1f);
             }
         }
 
