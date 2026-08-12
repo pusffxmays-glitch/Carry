@@ -276,8 +276,11 @@ public class GoblinCarryRig : MonoBehaviour
         var kb = Keyboard.current;
         if (kb == null) return;
         float dt = Time.deltaTime;
-        if (kb.qKey.isPressed) armBalance += armInputSpeed * dt;
-        if (kb.eKey.isPressed) armBalance -= armInputSpeed * dt;
+        // SWAPPED 2026-08-12 per explicit request ("QキーとEキーの機能を逆にしたい。感覚的に
+        //逆のほうがやりやすそう"): E now raises the left arm (lowers right), Q now raises the
+        // right arm (lowers left) -- opposite of the original mapping.
+        if (kb.eKey.isPressed) armBalance += armInputSpeed * dt;
+        if (kb.qKey.isPressed) armBalance -= armInputSpeed * dt;
         armBalance = Mathf.Clamp(armBalance, -1f, 1f);
     }
 

@@ -446,7 +446,10 @@ PrefabInstance:
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
-    m_AddedComponents: []
+    m_AddedComponents:
+    - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 2131736045}
   m_SourcePrefab: {fileID: 100100000, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
 --- !u!4 &803830707 stripped
 Transform:
@@ -560,15 +563,13 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CarryCameraRig
   target: {fileID: 1578526211}
-  lookOffset: {x: 0, y: 0.8, z: 0}
-  distance: 6.5
+  lookOffset: {x: 0, y: 1.2, z: 0}
+  pitch: 38
+  distance: 8
   minDistance: 1
   maxDistance: 10
-  mouseSensitivity: 2.5
-  minPitch: -30
-  maxPitch: 60
+  yawFollowLerp: 6
   followLerp: 15
-  defaultPitch: 15
 --- !u!114 &877844940
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -898,14 +899,117 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 8ea22e981cc24b54a0728dca4d747a23, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::GoblinCarryRig
   armInputSpeed: 1.2
   armBalance: 0
   heightRange: 0.15
   leftPalmSign: -1
   rightPalmSign: 1
+  staggerThreshold: 0.6
+  staggerRampRange: 0.3
+  staggerCycleDuration: 2.5
+  staggerBlendSpeed: 3
+  staggerMoveSpeed: 1
+  invertStaggerMoveSide: 1
+  walkCycleDuration: 2.5
+  walkBlendSpeed: 4
+  walkArmBobAmplitude: 0.02
   potScale: {x: 2.366, y: 2.366, z: 2.366}
+--- !u!1 &2056031050
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2056031052}
+  - component: {fileID: 2056031051}
+  m_Layer: 0
+  m_Name: PotionGaugeUI
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &2056031051
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2056031050}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c8086cc2bf48708488d39917190afd7e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PotionGaugeUI
+  potionLiquid: {fileID: 2131736045}
+  barSize: {x: 34, y: 260}
+  screenEdgeOffset: {x: 30, y: 0}
+  anchorLeft: 1
+  frameColor: {r: 0, g: 0, b: 0, a: 0.55}
+  emptyTrackColor: {r: 1, g: 1, b: 1, a: 0.12}
+  fillColor: {r: 0.22, g: 0.75, b: 0.28, a: 0.95}
+  lowFillColor: {r: 0.85, g: 0.75, b: 0.15, a: 0.95}
+  lowThreshold: 0.2
+--- !u!4 &2056031052
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2056031050}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &2131736042 stripped
+GameObject:
+  m_CorrespondingSourceObject: {fileID: 919132149155446097, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
+  m_PrefabInstance: {fileID: 803830706}
+  m_PrefabAsset: {fileID: 0}
+--- !u!114 &2131736045
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2131736042}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5ee242642a19d02408a1299c4effffba, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PotionLiquid
+  maxPotionVolume: 0.044
+  initialPotionVolume: 0.044
+  inertiaSpringStrength: 55
+  inertiaDamping: 5.5
+  maxTiltAngle: 42
+  accelerationSensitivity: 1.15
+  groundSlopeInfluence: 0.35
+  smallWaveAmplitude: 0.004
+  smallWaveSpeed: 1.3
+  largeWaveGain: 0.24
+  waveDampingPerSecond: 0.85
+  waveSpeed: 1.1
+  sloshFrequency: 3.2
+  rippleFrequency: 5
+  overflowRate: 6
+  overflowSplashSpeed: 0.45
+  radialSegments: 32
+  capRings: 3
+  sideWallRings: 4
+  liquidMaterial: {fileID: 2100000, guid: 7621d19193d05544bb56afe72083c440, type: 2}
+  overflowDripMaterial: {fileID: 2100000, guid: 7ccc0817795c64d49bd389303de39417, type: 2}
+  overflowSplashMaterial: {fileID: 2100000, guid: a4e87d618d73cb349a4ad043f3bfe97d, type: 2}
+  potMeshSource: {fileID: 0}
+  overflowVfx: {fileID: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
@@ -915,3 +1019,4 @@ SceneRoots:
   - {fileID: 1578526208}
   - {fileID: 639932652}
   - {fileID: 215265998}
+  - {fileID: 2056031052}

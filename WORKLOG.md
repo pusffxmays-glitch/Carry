@@ -1006,3 +1006,205 @@ skinWeights`=Unlimitedに変更、両方Custom quality levelへ適用)→**し�
 修正済みだった腕の教訓が脚にはまだ適用されていなかった、という見落としだった。
 今後同系統のリグで「見た目がおかしい」系の報告があれば、まず腕で確認済みの
 左右取り違えパターンを疑うこと。
+
+### 追加: ポーション液体システムの実装(2026-08-12)
+ユーザーから壺の中の緑ポーション液体システムの詳細仕様(世界重力基準の慣性・波・
+Overflow・体積保存・VFX等)が提示され、新規実装した。
+
+**技術方針**: VFX Graph/Shader Graphは本プロジェクトに直接インストールされておらず
+(`com.unity.shadergraph`はURPの間接依存として存在するのみ、`com.unity.visualeffectgraph`は
+manifestに痕跡なし)、過去に一度VFX Graphのノードグラフを手書きで作ることを検討して
+「盲目的に作るのはリスクが高すぎる」と見送った経緯があるため、今回も同じ理由で
+**VFX GraphではなくShuriken ParticleSystem**(標準搭載・スクリプトから完全制御可能)、
+**Shader GraphではなくHLSL手書き`.shader`**を採用した。
+
+**新規ファイル**:
+- `Assets/Scripts/PotionLiquid.cs` -- 状態管理・世界重力+慣性(バネ+減衰)・波形計算・
+  メッシュ生成/変形・Overflow判定/体積減算を担う中心コンポーネント。既存の
+  `GoblinCarryRig.cs`は一切変更せず、`Carry_Pot`の結果Transformを読むだけ
+  (`[DefaultExecutionOrder(100)]`でGoblinCarryRigの後に実行)。
+- `Assets/Scripts/PotionOverflowVFX.cs` -- Shuriken 2系統(Drip/Splash)を
+  `ParticleSystem.Emit()`で駆動するOverflow VFX。PotionLiquidから
+  `NotifySpillPoint(worldPos, spillDir, volume, speed)`で呼ばれる。
+- `Assets/Pot/Shaders/PotionLiquid.shader` -- 緑・半透明・光沢・Fresnel・
+  シェーダーレベルの微細な揺らぎ(あくまで大きな波はメッシュ変形が担当)。
+- `Assets/Pot/Mat_PotionLiquid.mat`, `Mat_PotionDrip.mat`, `Mat_PotionSplash.mat`
+  (execute_code経由でShader参照から生成、手書きYAML編集は避けた)。
+
+**主要な設計判断**:
+1. 壺の内壁半径プロファイル(高さ→半径)を`Carry_Pot`メッシュの頂点から実行時に
+   自動サンプリングし(実測: 足元0.0015〜胴回り最大0.268〜リム0.195、典型的な
+   バレル形状)、それを台形積分してVolume↔Height変換テーブルを構築。ハードコードせず
+   実際のメッシュ形状に自動追従する。
+2. `EffectiveGravity = WorldGravity - PotAcceleration`(D'Alembert疑似力)を
+   壺の実際のワールド回転で壺ローカル空間に変換して液面の目標傾きを算出 -- 壺自身の
+   傾き・ゴブリンの姿勢・(壺直下への軽いRaycastによる)地面傾斜が全て同じ経路で
+   反映される。ローカルYを常に「上」と仮定する実装は行っていない。
+3. 液体メッシュは壺内壁プロファイルに沿う側面(常にリム半径以下、テーパーに追従)+
+   波打つ上面ディスクで構成。リムに接する外周リングは常に`RadiusAtHeight(その高さ)`で
+   クランプするため、構造的に壺の外に出られない。
+4. Overflow判定はリム外周の各角度サンプルで高さがリムを超えた分を楔形体積として
+   積算し、`overflowRate`に応じて`PotionVolume`から減算、その場でVFXへ通知。
+5. `maxPotionVolume`/`initialPotionVolume`は壺の実測内部容積(約0.044 local³)と
+   同じ単位系にする必要があり、汎用プレースホルダ値(1 / 0.72)のままだと即座に
+   リムぎりぎりまで満杯になるバグがあった → 実測値に基づく既定値(0.044 / 0.032)に
+   修正。またInspectorで実測値を超える値を入れても`Awake()`で自動クランプする。
+
+**検証**(このUnityバージョンはEditorウィンドウが非フォーカス時に実フレームが
+進行しない制約があるため、`PotionLiquid.LateUpdate`から`Step(float dt)`を
+public切り出しし、reflection経由で`GoblinCarryRig.LateUpdate`と交互に手動タイムステップを
+刻んで検証):
+- 壺を傾ける(armBalance)→ `tiltVector`が応答し、液面が視覚的に傾くことをスクリーンショットで確認
+- 急停止(5ステップ移動→急停止)→ `impactEnergy`が0→1.47まで急上昇(波インパルス応答)することを確認
+- 傾け続けた結果、Overflow発生 → `PotionVolume`が減少、`Drip`パーティクル(102個)が
+  実際にEmitされることを確認
+- 液体メッシュが壺の外壁を突き抜けていないことをスクリーンショットで複数アングル確認
+- コンソールエラー・警告ともに0
+
+**申し送り(未検証・要チューニング)**: ゆっくり歩行時の小波、方向転換時の波の方向変化、
+坂道でのテスト、ジャンプ/着地時の挙動は、この環境のフレーム制約もあり個別には
+実地検証できていない。物理モデル(重力+慣性→波→Overflow→体積減少→液面低下)の
+因果関係自体は上記の通り実証済みで、これらのケースも同じ経路を通るため機能する
+はずだが、実際のプレイ感(バネ定数・波の強さ等のInspectorパラメータ)はユーザー自身が
+インタラクティブに操作しながら`PotionLiquid`/`PotionOverflowVFX`のInspector値を
+調整することを推奨する。
+
+### 追加修正: ユーザーからの5件のフィードバック対応(2026-08-12、同日)
+
+**(1) こぼれた液体がピンクの線に見える**: `ParticleSystemRenderer`はTrailsモジュール用に
+`sharedMaterial`とは別の`trailMaterial`スロットを持つが、`PotionOverflowVFX.CreateSystem`は
+`sharedMaterial`しか設定していなかった。未設定の`trailMaterial`はUnity組み込みの
+非URP対応デフォルトラインマテリアルにフォールバックし、それがピンクの「shader
+missing」表示になっていた。さらに厄介だったのは、`CreateSystem`は`PotionLiquid.Awake()`が
+実際のマテリアルを`dripMaterial`/`splashMaterial`に設定する**前**に呼ばれるため
+(`AddComponent<T>()`はT.Awake()を同期的に即時実行するため)、`CreateSystem`内で
+`trailMaterial`を設定するコードを足しても意味がなく、後から呼ばれる
+`EnsureBuilt(rebuildMaterialsOnly: true)`側で`trailMaterial`の再設定を追加する必要が
+あった(`sharedMaterial`の再設定は元々あったが`trailMaterial`が漏れていた)。
+
+**(2) 粘性不足**: シェーダー(alpha 0.85→0.93、DeepColorを暗く、Fresnel強度を下げ、
+Micro-Rippleの強さ・速度を半減)、物理(`waveSpeed`2.2→1.1、`smallWaveSpeed`2.6→1.3、
+`sloshFrequency`/`rippleFrequency`を新規Inspectorパラメータとして追加し低め設定、
+`waveDampingPerSecond`1.4→0.85で波が長く尾を引くように)、Overflow VFX(ドリップの
+`gravityModifier`1.0→0.5、`speedMultiplier`0.4→0.22、trailの`lifetime`/`width`を延長)を
+それぞれ調整。あわせて円形のソフトなアルファグラデーションテクスチャ
+(`T_PotionDropSoft.png`、コードで生成)をドリップ/スプラッシュのマテリアルに追加し、
+四角いビルボードではなく丸い液滴に見えるようにした。
+
+**(3) 波打ち・こぼれの過敏さ不足**: `largeWaveGain`0.09→0.24、`overflowRate`3.5→6、
+`overflowSplashSpeed`0.6→0.45、`maxTiltAngle`38→42、`accelerationSensitivity`1.0→1.15に
+引き上げ。さらに実地検証で「`impactEnergy`が1.4以上でも実際には一切Overflowしない」
+ことを発見: `SurfaceHeightAt`内のripple項が`exp(-r*1.6)`という減衰式を持っており、
+壺のリム半径(実測0.195 local units)の時点で振幅が約27%減衰してしまい、当初の
+振幅係数(0.028/0.02)ではどれだけ`impactEnergy`が高くても理論上リムに届かないことが
+判明した(急停止テストで`impactEnergy`最大1.483でもOverflow量0を数値確認)。振幅係数を
+0.05/0.038→さらに0.075/0.055へ、減衰率を1.6→0.8へ緩和し、急停止だけで実際に
+Overflowが発生する(数値検証: 体積0.00051減、Drip/Splash両方のパーティクルが発生)ことを
+確認した。
+
+**(4) Q/Eキーの入れ替え**: `GoblinCarryRig.Update()`の判定を入れ替え(E→armBalance増加、
+Q→armBalance減少)。
+
+**(5) カメラをゴブリンの後ろ斜め上に固定**: `CarryCameraRig.cs`からマウス操作による
+自由視点(Yaw/Pitchのマウス制御、Escキーでのカーソルロック切替、Rキーでのリセット)を
+完全に削除し、常にゴブリンの現在の向きに追従する固定オフセットカメラに変更
+(`Yaw`は`target.eulerAngles.y`に`yawFollowLerp`で滑らかに追従するのみで、プレイヤー
+操作は不可)。壺の中身とゴブリンの全身が同時にバランス良く見える値
+(`pitch=38°`, `distance=2.7`, `lookOffset.y=1.2`)をスクリーンショットで比較しながら
+実地で調整して確定した。
+
+**検証**: 全修正後、Play modeで(a)Overflow時のDripパーティクルが緑色で表示される
+ことをスクリーンショットで確認、(b)急停止のみでOverflowが実際に発生する(体積減少+
+Drip/Splash両方のパーティクル発生)ことを数値確認、(c)カメラが壺内部と全身を同時に
+捉える構図になることをスクリーンショットで確認、(d)コンソールエラー・警告ともに0を
+確認。
+
+### 追加修正: ユーザーからの4件のフィードバック対応(2026-08-12、同日)
+
+**(1) カメラをもっと引く**: `distance`を2.7→5.5に変更。以前の値は壺内部を覗き込む
+構図としては良かったが、全身が画面に対して大きすぎ「全然見えない」状態だった。
+
+**(2) 落下する液体が線に見えすぎる**: Trailsモジュール(リボンジオメトリ)を廃止し、
+Stretched Billboard描画モードに変更(丸いソフトαテクスチャ`T_PotionDropSoft`を
+速度方向に伸ばして描画、リボンではなく「伸びた雫」として見える)。あわせて、実地検証で
+`excess/dt`が無制限だったため(特にテスト用の手動dtステップで顕著だが、実ゲームでも
+コマ落ちフレームで起こり得る)、Overflow速度が異常に大きくなり水滴が空高くまで
+吹き飛ぶ不具合を発見・修正(`spillSpeed`を2.5 m/sでクランプ)。さらに、パーティクル
+密度が「線のように」見える原因を調査したところ、`particlesPerVolume`系パラメータを
+下げても実際の生成数が全く変わらないことが判明: `NotifySpillPoint`は溢れている
+リムの角度セグメント(最大32箇所)ごとに毎フレーム呼ばれており、`maxParticlesPerEvent`の
+上限に毎回張り付いていたため、本当のボトルネックは「呼び出し回数」であって
+「1回あたりの生成数」ではなかった。`PotionLiquid`側で3セグメントに1回だけVFXを
+呼び出すよう間引き(体積計算・PotionVolume減少には影響しない、VFXの見た目密度のみ
+削減)、あわせて`dripParticlesPerVolume`(500→180)、`splashParticlesPerVolume`
+(1100→350)、`maxParticlesPerEvent`(30→12)も引き下げ、粒サイズは逆に見やすく
+拡大(drip 0.024→0.045、splash 0.017→0.03)。
+
+**(3) 液体の初期量を満タンに**: `initialPotionVolume`のデフォルトを`maxPotionVolume`
+と同じ値(0.044)に変更。
+
+**(4) 画面端に残量ゲージを追加**: 新規`PotionGaugeUI.cs`を作成。既存コードには
+一切手を加えず、独立したコンポーネントとして実行時にCanvas/Image階層を自前構築し
+(手書きシーンYAML編集を避けるいつものパターン)、`PotionLiquid.FillFraction01`を
+毎フレーム読んで画面左端の縦ゲージ(Image.Type.Filled, Vertical)に反映。残量が
+`lowThreshold`(既定20%)を下回ると警告色(黄)へ徐々に変化する機能も追加。新規
+GameObject「PotionGaugeUI」としてシーンに追加(コンポーネント経由、YAML直接編集なし)。
+
+**検証**: (a)カメラを引いた状態で全身+壺内部+ゲージが同一フレームに収まることを
+スクリーンショットで確認、(b)満タン初期化(FillFraction=1に近い状態からスタート)を
+数値確認、(c)控えめな傾き(armBalance=0.65、10ステップ)でOverflow時のパーティクル数が
+旧: drip14/splash171 → 新: drip6/splash60(約1/3)に減ったことを確認、(d)体積の
+減少量(PotionVolume)は間引き前後で完全に同一(0.03926287)であることを確認し、
+VFX密度の削減が物理計算に影響していないことを確認、(e)コンソールエラー・警告
+ともに0。
+
+**申し送り**: 個々の水滴が実際に「液体らしく」見えるかどうかの最終判断(色・
+サイズ感・伸び具合の微調整)は、このテスト環境ではリアルタイム再生ができないため
+静止スクリーンショットでの確認に限界がある。`PotionOverflowVFX`の各種Inspector
+パラメータ(サイズ・寿命・速度倍率・重力倍率)は公開済みなので、実際にプレイしながら
+微調整することを推奨する。
+
+### 追加修正: 「まだ線に見える、粘性もない、リアリティがない」との再指摘(2026-08-12、同日)
+
+前回の修正(Trails→Stretched Billboard)では根本解決になっていなかった。ユーザーの
+指摘「波打ってその波からこぼれているのではなく、関係ない複数のところから線状に
+下に伸びているだけ」から、2つの独立した原因を特定した。
+
+**原因1: Stretched Billboard自体が「線」を作る描画モードだった**。Trails(リボン
+ジオメトリ)を「線に見える」原因として廃止しStretched Billboardに置き換えたが、
+Stretched Billboardは「パーティクルを自身の速度方向に伸ばして描画する」モードで
+あり、重力で加速し速度が増すほど長く引き伸ばされる=結局「線」になる、という同じ
+症状を別の仕組みで再現していただけだった。**通常の(伸縮しない)Billboardに戻した。**
+
+**原因2: 複数の独立した地点から同時にパーティクルを出していた**。`PotionLiquid`は
+リムの溢れている角度セグメント(最大32箇所)ごとに毎フレーム独立して
+`NotifySpillPoint`を呼んでいたため、波の頂点が1箇所であっても、しきい値を超える
+複数の(場合によっては波の関数の性質上不連続な)セグメントから同時多発的に
+パーティクルが発生し、「関係ない複数の点」に見えていた。実際の液体は波の頂点
+(その瞬間もっとも高い1箇所)からまとまって溢れる。`PotionLiquid`側でループ中は
+「もっとも超過量が大きいセグメント」を記録するだけに変更し、ループの後で**その
+1箇所からのみ**、蓄積した全体積(`totalOverflowVolume`)を使って1回だけVFXを
+呼び出すようにした(物理計算=体積減算は全セグメント分をそのまま合算するので
+変更なし)。
+
+**あわせて実施**:
+- 1回のNotifySpillPoint呼び出しが複数パーティクルを生成する際、全て同一の
+  方向・位置だと「1点から出たまっすぐな線」に見えてしまうため、各パーティクルに
+  ランダムな方向のブレ(コーン状の拡散)と発生位置の微小なジッター・遅延オフセットを
+  追加し、「まとまって落ちる複数の雫のクラスター」に見えるようにした。
+- `sizeOverLifetime`(寿命に応じて縮小)と`colorOverLifetime`(終盤でフェード
+  アウト)を追加し、硬い輪郭でパッと消えるのではなく自然に薄れて消えるようにした。
+- 呼び出し頻度が1フレームあたり最大32回→実質1回に激減したため、1回あたりの
+  生成数上限(`maxParticlesPerEvent` 12→20)と`dripParticlesPerVolume`
+  (180→320)を引き上げ、密度が薄くなりすぎないよう調整。
+
+**カメラ**: 「もっと引いていい」との追加要望を受け、`distance`を5.5→8に変更。
+
+**検証**: execute_code経由で`NotifySpillPoint`をカメラ正面の既知の座標に直接呼び出し、
+生成された粒子群をスクリーンショットで直接確認したところ、**細い線ではなく、複数の
+丸い緑の粒が重なり合った塊(クラスター)として表示される**ことを確認した。実際の
+Overflowシナリオ(armBalance=0.7を20ステップ)でも、リムの位置に波の盛り上がりが
+視覚的に確認でき、波の頂点と溢れ位置が一致する構図になっていることをスクリーン
+ショットで確認した(パーティクル自体の飛翔中の瞬間を静止画で捉えるのは本環境の
+フレーム制約上難しく、個々の粒の様子は上記のカメラ正面テストで代替確認)。
+コンソールエラー・警告ともに0。
