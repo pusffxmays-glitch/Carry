@@ -139,15 +139,21 @@ public class GoblinCarryRig : MonoBehaviour
         new BonePose("Head",          new Vector3(-0.008902f, 0.900179f, 0.144524f), new Vector3(-0.008529f, -0.040670f, 0.999136f), new Vector3(0.999945f, 0.005674f, 0.008767f)),
         new BonePose("headfront",     new Vector3(-0.005917f, 0.733702f, 0.321854f), new Vector3(0.012272f, -0.684395f, 0.729008f), new Vector3(0.999914f, 0.011776f, -0.005777f)),
         new BonePose("head_end",      new Vector3(-0.016177f, 1.046204f, 0.469641f), new Vector3(-0.020406f, 0.409632f, 0.912022f), new Vector3(0.999792f, 0.007638f, 0.018939f)),
-        // Name swapped left<->right on these 8 arm pairs only (2026-08-10, confirmed correct via
+        // Name swapped left<->right on these 8 arm pairs (2026-08-10, confirmed correct via
         // playtest: the Unity bone literally named "LeftArm" is this character's visual RIGHT
-        // arm). The leg swap that used to be here (added 2026-08-12) has been REVERTED -- see
-        // Awake(): it created a position/rotation mismatch (ApplyBasePose placed each leg bone by
-        // its own exact/unswapped name, but ApplyWalkCycle/ApplyStagger rotated it using the
-        // OPPOSITE leg's baked motion data via the swapped bone reference), which is what actually
-        // caused the reported "legs twisted from the hips down" during walk/stagger -- not a
-        // genuine left/right identity swap like the arms have. Legs now use plain, unswapped name
-        // lookups everywhere, consistent with this table.
+        // arm) AND on these 8 leg pairs (2026-08-12, confirmed correct via direct user observation
+        // after rotating the camera to view the goblin from the front: the feet were visibly on the
+        // wrong sides). The leg swap was removed earlier today after finding a position/rotation
+        // AUTHORITY mismatch bug (ApplyBasePose placed each leg bone by its own exact/unswapped
+        // name while ApplyWalkCycle/ApplyStagger rotated it using the opposite leg's data via a
+        // swapped Awake() bone reference) -- that removal fixed the internal-consistency bug (legs
+        // twisting during walk/stagger) but, on its own, left the SAME left/right identity mismatch
+        // the arms have, just no longer self-contradicting. The real fix needed BOTH halves done
+        // together, same as arms: the NAME here determines which Unity bone ApplyBasePose positions
+        // with this row's data, and Awake()'s leftUpLegBone/etc. must look up that SAME (swapped)
+        // Unity name -- so position and rotation authority land on one consistent, AND physically
+        // correct, bone. The DATA on each leg row is still exactly what Blender measured for that
+        // Left/Right bone; only the Unity bone NAME it gets applied to is swapped.
         new BonePose("RightShoulder", new Vector3(0.030397f, 0.832256f, 0.080034f), new Vector3(0.995995f, 0.064481f, -0.061937f)),
         new BonePose("RightArm",      new Vector3(0.171104f, 0.841365f, 0.071284f), new Vector3(0.696845f, 0.089225f, 0.711650f)),
         new BonePose("RightForeArm",  new Vector3(0.361686f, 0.865767f, 0.265914f), new Vector3(-0.280686f, 0.923010f, -0.263186f)),
@@ -156,14 +162,14 @@ public class GoblinCarryRig : MonoBehaviour
         new BonePose("LeftArm",       new Vector3(-0.180946f, 0.835394f, 0.069884f), new Vector3(-0.634239f, 0.137067f, 0.760889f)),
         new BonePose("LeftForeArm",   new Vector3(-0.350536f, 0.872045f, 0.273339f), new Vector3(0.257028f, 0.916655f, -0.306072f)),
         new BonePose("LeftHand",      new Vector3(-0.275399f, 1.140012f, 0.183865f), new Vector3(0.600000f, -0.000000f, -0.800000f)),
-        new BonePose("LeftUpLeg",     new Vector3(0.115463f, 0.406070f, 0.014226f), new Vector3(0.447992f, -0.737600f, 0.505223f), new Vector3(0.893345f, 0.391543f, -0.220519f)),
-        new BonePose("LeftLeg",       new Vector3(0.277781f, 0.138820f, 0.197280f), new Vector3(-0.055805f, -0.739027f, -0.671360f), new Vector3(0.969108f, 0.121696f, -0.214521f)),
-        new BonePose("LeftFoot",      new Vector3(0.258402f, -0.117820f, -0.035862f), new Vector3(0.096722f, -0.539439f, 0.836451f), new Vector3(0.994906f, 0.028408f, -0.096726f)),
-        new BonePose("LeftToeBase",   new Vector3(0.279049f, -0.232974f, 0.142695f), new Vector3(0.114869f, 0.000000f, 0.993381f), new Vector3(0.993380f, 0.000000f, -0.114872f)),
-        new BonePose("RightUpLeg",    new Vector3(-0.111189f, 0.406807f, 0.015939f), new Vector3(-0.462280f, -0.729747f, 0.503753f), new Vector3(0.885873f, -0.405106f, 0.226095f)),
-        new BonePose("RightLeg",      new Vector3(-0.277924f, 0.143603f, 0.197631f), new Vector3(0.045060f, -0.730926f, -0.680967f), new Vector3(0.954688f, -0.169225f, 0.244812f)),
-        new BonePose("RightFoot",     new Vector3(-0.262031f, -0.114191f, -0.042542f), new Vector3(-0.108725f, -0.541682f, 0.833523f), new Vector3(0.993553f, -0.032123f, 0.108723f)),
-        new BonePose("RightToeBase",  new Vector3(-0.286047f, -0.233840f, 0.141571f), new Vector3(-0.129344f, 0.000000f, 0.991600f), new Vector3(0.991600f, 0.000000f, 0.129343f)),
+        new BonePose("RightUpLeg",    new Vector3(0.115463f, 0.406070f, 0.014226f), new Vector3(0.447992f, -0.737600f, 0.505223f), new Vector3(0.893345f, 0.391543f, -0.220519f)),
+        new BonePose("RightLeg",      new Vector3(0.277781f, 0.138820f, 0.197280f), new Vector3(-0.055805f, -0.739027f, -0.671360f), new Vector3(0.969108f, 0.121696f, -0.214521f)),
+        new BonePose("RightFoot",     new Vector3(0.258402f, -0.117820f, -0.035862f), new Vector3(0.096722f, -0.539439f, 0.836451f), new Vector3(0.994906f, 0.028408f, -0.096726f)),
+        new BonePose("RightToeBase",  new Vector3(0.279049f, -0.232974f, 0.142695f), new Vector3(0.114869f, 0.000000f, 0.993381f), new Vector3(0.993380f, 0.000000f, -0.114872f)),
+        new BonePose("LeftUpLeg",     new Vector3(-0.111189f, 0.406807f, 0.015939f), new Vector3(-0.462280f, -0.729747f, 0.503753f), new Vector3(0.885873f, -0.405106f, 0.226095f)),
+        new BonePose("LeftLeg",       new Vector3(-0.277924f, 0.143603f, 0.197631f), new Vector3(0.045060f, -0.730926f, -0.680967f), new Vector3(0.954688f, -0.169225f, 0.244812f)),
+        new BonePose("LeftFoot",      new Vector3(-0.262031f, -0.114191f, -0.042542f), new Vector3(-0.108725f, -0.541682f, 0.833523f), new Vector3(0.993553f, -0.032123f, 0.108723f)),
+        new BonePose("LeftToeBase",   new Vector3(-0.286047f, -0.233840f, 0.141571f), new Vector3(-0.129344f, 0.000000f, 0.991600f), new Vector3(0.991600f, 0.000000f, 0.129343f)),
     };
 
     Transform root;
@@ -207,24 +213,19 @@ public class GoblinCarryRig : MonoBehaviour
         head = GoblinBoneUtil.FindDeep(root, "Head");
         pot = root.Find("Carry_Pot");
 
-        // REVERTED 2026-08-12 (see BasePose comment above): legs are NOT swapped. Plain,
-        // unswapped name lookups -- leftUpLegBone is Unity's own "LeftUpLeg" object, matching
-        // exactly what ApplyBasePose positions it with (via BasePose[].name) and what
-        // GoblinWalk/GoblinStagger's "Left..." samplers rotate it with in ApplyLegChain. Keeping
-        // position and rotation authority on the SAME bone identity is what actually matters here;
-        // the previous swapped version had ApplyBasePose place e.g. Unity's "RightUpLeg" using
-        // Blender's RightUpLeg position while ApplyWalkCycle/ApplyStagger rotated that same object
-        // using Blender's LEFT leg's baked motion curve (via the swap), which is what produced the
-        // "legs twisted from the hips down" during walk/stagger.
+        // RE-SWAPPED 2026-08-12 (see BasePose comment above): leftUpLegBone etc. look up the
+        // OPPOSITE Unity bone name, matching the BasePose table above so position (ApplyBasePose)
+        // and rotation (ApplyWalkCycle/ApplyStagger via these same variables) both land on the same
+        // physically-correct bone -- same pattern as the arms just above.
         hipsBone = GoblinBoneUtil.FindDeep(root, "Hips");
-        leftUpLegBone = GoblinBoneUtil.FindDeep(root, "LeftUpLeg");
-        leftLegBone = GoblinBoneUtil.FindDeep(root, "LeftLeg");
-        leftFootBone = GoblinBoneUtil.FindDeep(root, "LeftFoot");
-        leftToeBone = GoblinBoneUtil.FindDeep(root, "LeftToeBase");
-        rightUpLegBone = GoblinBoneUtil.FindDeep(root, "RightUpLeg");
-        rightLegBone = GoblinBoneUtil.FindDeep(root, "RightLeg");
-        rightFootBone = GoblinBoneUtil.FindDeep(root, "RightFoot");
-        rightToeBone = GoblinBoneUtil.FindDeep(root, "RightToeBase");
+        leftUpLegBone = GoblinBoneUtil.FindDeep(root, "RightUpLeg");
+        leftLegBone = GoblinBoneUtil.FindDeep(root, "RightLeg");
+        leftFootBone = GoblinBoneUtil.FindDeep(root, "RightFoot");
+        leftToeBone = GoblinBoneUtil.FindDeep(root, "RightToeBase");
+        rightUpLegBone = GoblinBoneUtil.FindDeep(root, "LeftUpLeg");
+        rightLegBone = GoblinBoneUtil.FindDeep(root, "LeftLeg");
+        rightFootBone = GoblinBoneUtil.FindDeep(root, "LeftFoot");
+        rightToeBone = GoblinBoneUtil.FindDeep(root, "LeftToeBase");
         controller = GetComponent<CharacterController>();
         locomotion = GetComponent<GoblinLocomotion>();
 
@@ -251,12 +252,15 @@ public class GoblinCarryRig : MonoBehaviour
         // Leg segment lengths, used by ApplyStagger() to reattach Leg/Foot/ToeBase via forward
         // kinematics after UpLeg/Leg get re-aimed for the stagger -- same rationale as the arm
         // lengths above (measured from the trusted baked BasePose data, not live Transforms).
-        leftUpLegLen = Vector3.Distance(PosOf("LeftUpLeg"), PosOf("LeftLeg"));
-        leftLegLen = Vector3.Distance(PosOf("LeftLeg"), PosOf("LeftFoot"));
-        leftFootLen = Vector3.Distance(PosOf("LeftFoot"), PosOf("LeftToeBase"));
-        rightUpLegLen = Vector3.Distance(PosOf("RightUpLeg"), PosOf("RightLeg"));
-        rightLegLen = Vector3.Distance(PosOf("RightLeg"), PosOf("RightFoot"));
-        rightFootLen = Vector3.Distance(PosOf("RightFoot"), PosOf("RightToeBase"));
+        // Uses the SAME (swapped) BasePose name each leftUpLegBone/etc. Transform is actually
+        // looked up under just above, so the length matches the data ApplyBasePose will place on
+        // that exact bone -- NOT the data literally labelled "left" (see the swap comment above).
+        leftUpLegLen = Vector3.Distance(PosOf("RightUpLeg"), PosOf("RightLeg"));
+        leftLegLen = Vector3.Distance(PosOf("RightLeg"), PosOf("RightFoot"));
+        leftFootLen = Vector3.Distance(PosOf("RightFoot"), PosOf("RightToeBase"));
+        rightUpLegLen = Vector3.Distance(PosOf("LeftUpLeg"), PosOf("LeftLeg"));
+        rightLegLen = Vector3.Distance(PosOf("LeftLeg"), PosOf("LeftFoot"));
+        rightFootLen = Vector3.Distance(PosOf("LeftFoot"), PosOf("LeftToeBase"));
     }
 
     static Vector3 PosOf(string boneName)
@@ -548,6 +552,20 @@ public class GoblinCarryRig : MonoBehaviour
     // Only corrects the DEFICIT below that already-approved baseline (never touches anything when
     // both feet are at/above it), so normal walk/idle is untouched -- this is deliberately not a
     // real ground raycast, just a clamp against the one height that's already known-good.
+    //
+    // FIXED 2026-08-12 (bug report: "body stretches" periodically during one stagger direction):
+    // the lift loop used to be `baseBones[i].position += lift`, applied in BasePose's Hips-first,
+    // then-UpLeg-then-Leg-then-Foot-then-ToeBase array order. Hips/UpLeg/Leg/Foot/ToeBase form a
+    // real Unity parent-child Transform chain, so by the time the loop reached e.g. UpLeg, its
+    // `.position` GETTER already reflected Hips' shift moments earlier in the SAME loop (world
+    // position is computed live from the parent's current transform) -- so `+= lift` added a
+    // SECOND lift on top of the one UpLeg had already inherited for free. This compounded once per
+    // link down the chain (confirmed by direct measurement: Hips got 1x lift, UpLeg 2x, Leg 3x,
+    // Foot 4x, ToeBase 5x, for a single `deficit`), silently stretching each leg by several times
+    // the intended correction and violating the fixed bone lengths ApplyLegChain/PositionFromParent
+    // had just carefully set up. Snapshotting every bone's position BEFORE touching any of them
+    // (rather than reading current -- possibly parent-already-moved -- position inside the loop)
+    // makes every bone's shift come from the SAME unmodified baseline, so it's a true uniform lift.
     void ClampFeetToGround()
     {
         if (leftFootBone == null || rightFootBone == null) return;
@@ -560,8 +578,11 @@ public class GoblinCarryRig : MonoBehaviour
         if (deficit <= 0f) return;
 
         Vector3 lift = root.up * deficit;
+        var originalPositions = new Vector3[baseBones.Length];
         for (int i = 0; i < baseBones.Length; i++)
-            if (baseBones[i] != null) baseBones[i].position += lift;
+            if (baseBones[i] != null) originalPositions[i] = baseBones[i].position;
+        for (int i = 0; i < baseBones.Length; i++)
+            if (baseBones[i] != null) baseBones[i].position = originalPositions[i] + lift;
     }
 
     ArmNeutral CaptureNeutral(Transform upperArm, Transform foreArm, Transform hand, float upperLen, float foreLen)
