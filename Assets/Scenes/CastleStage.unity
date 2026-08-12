@@ -947,7 +947,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::PotionGaugeUI
   potionLiquid: {fileID: 2131736045}
   barSize: {x: 48, y: 340}
-  screenEdgeOffset: {x: 40, y: 0}
+  screenEdgeOffset: {x: 110, y: 110}
   anchorLeft: 1
   frameColor: {r: 0, g: 0, b: 0, a: 0.55}
   emptyTrackColor: {r: 1, g: 1, b: 1, a: 0.12}
@@ -1011,6 +1011,7 @@ MonoBehaviour:
   sideWallRings: 4
   liquidMaterial: {fileID: 2100000, guid: 7621d19193d05544bb56afe72083c440, type: 2}
   overflowStream: {fileID: 0}
+  overflowMaterial: {fileID: 2100000, guid: 07bd178d93f047b41bbd8e8aa0920154, type: 2}
   overflowVfx: {fileID: 0}
   overflowSplashMaterial: {fileID: 2100000, guid: a4e87d618d73cb349a4ad043f3bfe97d, type: 2}
   potMeshSource: {fileID: 0}

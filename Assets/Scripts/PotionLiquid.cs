@@ -89,6 +89,8 @@ public class PotionLiquid : MonoBehaviour
     [Header("Overflow VFX (auto-created children)")]
     [Tooltip("Mesh-based flowing stream + droplets -- handles ALL overflow, every frame, regardless of speed.")]
     public PotionOverflowStream overflowStream;
+    [Tooltip("Translucent material (Custom/PotionLiquidOverflow) for the overflow stream/droplets -- deliberately different from the pool's opaque liquidMaterial, see PotionOverflowStream's own header comment.")]
+    public Material overflowMaterial;
     [Tooltip("Particle burst reserved for fast/violent spills only (see overflowSplashSpeed).")]
     public PotionOverflowVFX overflowVfx;
     public Material overflowSplashMaterial;
@@ -167,7 +169,8 @@ public class PotionLiquid : MonoBehaviour
             streamGo.transform.SetParent(transform, false);
             overflowStream = streamGo.AddComponent<PotionOverflowStream>();
         }
-        if (liquidMaterial != null) overflowStream.liquidMaterial = liquidMaterial;
+        if (overflowMaterial != null) overflowStream.overflowMaterial = overflowMaterial;
+        if (liquidMaterial != null) overflowStream.puddleMaterial = liquidMaterial;
         overflowStream.EnsureBuilt(rebuildMaterialsOnly: true);
 
         if (overflowVfx == null) overflowVfx = GetComponentInChildren<PotionOverflowVFX>();
@@ -783,7 +786,13 @@ public class PotionLiquid : MonoBehaviour
                 float weightSum = dominantExcess + (secondSeg >= 0 ? secondExcess : 0f);
                 float dominantShare = weightSum > 0f ? dominantExcess / weightSum : 1f;
 
-                Vector3 rimLocal = new Vector3(dominantDir.x * rimRadiusLocal, rimHeightLocal, dominantDir.z * rimRadiusLocal);
+                // Spawn slightly above the flattened rim line, toward where the actual (pre-flatten)
+                // bulge crested, so the stream visibly grows out of the wave's own bulge instead of
+                // popping in at a flat clamp line just below it -- part of tightening the perceptual
+                // link between "wave rises" and "stream pours" (2026-08-12, "波打ちからこぼれのところ
+                // がちゃんとリンクするかどうかがポイント").
+                float bulgeLift = Mathf.Min(dominantExcess, 0.02f);
+                Vector3 rimLocal = new Vector3(dominantDir.x * rimRadiusLocal, rimHeightLocal + bulgeLift, dominantDir.z * rimRadiusLocal);
                 Vector3 worldPos = liquidTransform.TransformPoint(rimLocal);
                 Vector3 outwardWorld = liquidTransform.TransformDirection(dominantDir).normalized;
                 // World-gravity-based pour direction (spec section 7): follows actual effective
@@ -791,18 +800,24 @@ public class PotionLiquid : MonoBehaviour
                 // the stream visibly clears the rim edge before falling.
                 Vector3 spillDir = (outwardWorld * 0.4f + gravityDirWorld * 0.9f).normalized;
                 float flowRate = (totalOverflowVolume * dominantShare) / dt;
+                // sourceKey = the rim segment index -- lets PotionOverflowStream recognize "this is
+                // still the same overflow event" as the wave crest drifts a bit frame to frame,
+                // instead of re-bucketing by raw world-position distance (which snapped to a brand
+                // new stream slot on small jitter, reading as disconnected pops rather than one
+                // continuous pour tracking the wave).
                 if (overflowStream != null)
-                    overflowStream.Feed(worldPos, spillDir, flowRate);
+                    overflowStream.Feed(worldPos, spillDir, flowRate, dominantSeg);
 
                 if (secondSeg >= 0)
                 {
-                    Vector3 rimLocal2 = new Vector3(secondDir.x * rimRadiusLocal, rimHeightLocal, secondDir.z * rimRadiusLocal);
+                    float bulgeLift2 = Mathf.Min(secondExcess, 0.02f);
+                    Vector3 rimLocal2 = new Vector3(secondDir.x * rimRadiusLocal, rimHeightLocal + bulgeLift2, secondDir.z * rimRadiusLocal);
                     Vector3 worldPos2 = liquidTransform.TransformPoint(rimLocal2);
                     Vector3 outwardWorld2 = liquidTransform.TransformDirection(secondDir).normalized;
                     Vector3 spillDir2 = (outwardWorld2 * 0.4f + gravityDirWorld * 0.9f).normalized;
                     float flowRate2 = (totalOverflowVolume * (1f - dominantShare)) / dt;
                     if (overflowStream != null)
-                        overflowStream.Feed(worldPos2, spillDir2, flowRate2);
+                        overflowStream.Feed(worldPos2, spillDir2, flowRate2, secondSeg);
                 }
 
                 // Splash burst reserved for genuinely violent/fast spills (sudden stop, hard impact)

@@ -27,17 +27,19 @@ public class PotionOverflowVFX : MonoBehaviour
     [Header("Splash (fast/violent overflow only)")]
     [Tooltip("Surface-rise speed (from PotionLiquid.overflowSplashSpeed) above which this burst fires. Ordinary overflow below this speed is 100% handled by PotionOverflowStream.")]
     public float splashSpeedThreshold = 0.6f;
-    [Tooltip("Particle count spawned per unit of spilled volume.")]
-    public float splashParticlesPerVolume = 350f;
-    public float splashLifetime = 0.55f;
-    public float splashSize = 0.03f;
-    public float splashSpeedMultiplier = 1.4f;
+    [Tooltip("Particle count spawned per unit of spilled volume. Lowered 2026-08-12 (spec: \"水のような大量の細かいParticleではなく、粘性のある緑色の液体が跳ねたように見えること\") together with a bigger splashSize -- fewer, bigger blobs read as viscous splashing liquid; lots of tiny particles read as a fine watery mist.")]
+    public float splashParticlesPerVolume = 200f;
+    public float splashLifetime = 0.6f;
+    [Tooltip("Raised 2026-08-12 alongside the lowered particle count -- see splashParticlesPerVolume.")]
+    public float splashSize = 0.048f;
+    public float splashSpeedMultiplier = 1.3f;
     [Tooltip("Random cone spread (degrees) applied to splash particle direction.")]
-    public float splashSpread = 28f;
-    [Tooltip("Lower = heavier/thicker splash droplets, less watery spray. 1 = real gravity.")]
-    public float splashGravityModifier = 1.0f;
+    public float splashSpread = 26f;
+    [Tooltip("Lower = heavier/thicker splash droplets, less watery spray. 1 = real gravity. Lowered 2026-08-12 alongside the size/count changes for the same 'viscous blob, not water mist' goal.")]
+    public float splashGravityModifier = 0.75f;
 
-    [Range(1, 60)] public int maxParticlesPerEvent = 20;
+    [Tooltip("Lowered 2026-08-12 alongside splashParticlesPerVolume -- fewer, chunkier splash blobs.")]
+    [Range(1, 60)] public int maxParticlesPerEvent = 14;
     [Tooltip("Spilled volume at which splash particles reach their full up-scaled size (below it they scale down toward the base splashSize) -- so a genuinely huge splash still visibly looks bigger even once particle COUNT has saturated at maxParticlesPerEvent. 2026-08-12 (\"こぼれる量と残量がリンクしていなそう\").")]
     public float splashVolumeReference = 0.002f;
 

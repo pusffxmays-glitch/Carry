@@ -28,6 +28,31 @@ public class PotionGaugeUI : MonoBehaviour
     [Range(0f, 1f)] public float lowThreshold = 0.2f;
 
     Image fillImage;
+    RectTransform frameRect;
+
+    // 2026-08-12: user found the actual cause of the gauge not being visible -- it was positioned
+    // relative to the full reported Screen dimensions, but what's actually VISIBLE to them is
+    // whatever the active camera is currently rendering ("カメラによらず、現在描画されている範囲内
+    // のはじにだすようにして"). Screen Space Overlay's own coordinate space always matches
+    // Screen.width/height exactly, which is not necessarily the same as the camera's actual rendered
+    // pixel rect (letterboxing, split-screen, a future camera-rect change, etc. would all diverge).
+    // Re-anchoring every frame to Camera.main.pixelRect -- not just once in BuildUI() -- means the
+    // gauge always sits at the edge of whatever is ACTUALLY being rendered right now, independent of
+    // any particular camera setup, rather than assuming the camera always fills the whole screen.
+    // The frame's own anchor/pivot is always the canvas's bottom-left (0,0) regardless of
+    // anchorLeft/Right (set in BuildUI) so this method can work in one consistent absolute
+    // screen-pixel coordinate space rather than juggling two different anchor origins.
+    void PositionAtRenderedEdge()
+    {
+        if (frameRect == null) return;
+        var cam = Camera.main;
+        Rect r = cam != null ? cam.pixelRect : new Rect(0, 0, Screen.width, Screen.height);
+
+        float frameWidth = frameRect.sizeDelta.x;
+        float x = anchorLeft ? (r.xMin + screenEdgeOffset.x) : (r.xMax - screenEdgeOffset.x - frameWidth);
+        float y = r.yMin + screenEdgeOffset.y;
+        frameRect.anchoredPosition = new Vector2(x, y);
+    }
 
     // 2026-08-12: user reports the gauge does not appear when they press Play in the Editor, but
     // every check made here (direct RectTransform/Canvas inspection, a giant sanity-check red
@@ -43,6 +68,7 @@ public class PotionGaugeUI : MonoBehaviour
             if (potionLiquid == null)
                 Debug.LogError("PotionGaugeUI: no PotionLiquid found in the scene -- the gauge will build but always show empty/default fill.");
             BuildUI();
+            PositionAtRenderedEdge();
             Debug.Log("PotionGaugeUI: gauge built successfully. potionLiquid=" + (potionLiquid != null ? potionLiquid.name : "NULL") +
                 " Screen=" + Screen.width + "x" + Screen.height);
         }
@@ -68,15 +94,16 @@ public class PotionGaugeUI : MonoBehaviour
         scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
         canvasGo.AddComponent<GraphicRaycaster>();
 
-        // Bottom corner instead of mid-left-edge (2026-08-12, see screenEdgeOffset comment above).
-        Vector2 anchor = anchorLeft ? new Vector2(0f, 0f) : new Vector2(1f, 0f);
+        // Always anchored/pivoted at the canvas's own bottom-left (0,0) -- PositionAtRenderedEdge()
+        // computes the actual on-screen X for either side itself, in one consistent absolute
+        // screen-pixel coordinate space (see that method's comment).
+        var anchor = new Vector2(0f, 0f);
 
         var frameGo = new GameObject("GaugeFrame", typeof(RectTransform));
         frameGo.transform.SetParent(canvasGo.transform, false);
-        var frameRect = frameGo.GetComponent<RectTransform>();
+        frameRect = frameGo.GetComponent<RectTransform>();
         frameRect.anchorMin = anchor; frameRect.anchorMax = anchor; frameRect.pivot = anchor;
         frameRect.sizeDelta = barSize + new Vector2(8f, 8f);
-        frameRect.anchoredPosition = new Vector2(anchorLeft ? screenEdgeOffset.x : -screenEdgeOffset.x, screenEdgeOffset.y);
         var frameImg = frameGo.AddComponent<Image>();
         frameImg.color = frameColor;
 
@@ -105,6 +132,7 @@ public class PotionGaugeUI : MonoBehaviour
 
     void Update()
     {
+        PositionAtRenderedEdge();
         if (potionLiquid == null || fillImage == null) return;
         float f = potionLiquid.FillFraction01;
         fillImage.fillAmount = f;
