@@ -161,7 +161,13 @@ RWStructuredBuffer<uint> RegionCounters;
 // 消滅の実行は Finalize が行い（位置を動かすのは物理カーネルの仕事）、
 // ここでは観測して数えるだけ。
 RWStructuredBuffer<float> Ages;            // 地面に留まっている時間 (s)
-RWStructuredBuffer<uint>  RetiredFlags;    // 1 = Retired
+// 0 = 通常, 1 = Retired（世界から消滅・回収不可）, 2 = Settled（地面に取り残された水たまり）
+//
+// Settled: 地面に落ちた液体は、ゴブリンが歩いて計算領域が離れても
+// **その場に残っていてほしい**。領域の外へ出た地面の液体は、消すのではなく
+// その場で凍結する。位置はそのままなので、戻ってくれば再び描画される。
+// Mass の扱いは Ground のまま（§16 で「将来的に回収可能」な分類）。
+RWStructuredBuffer<uint>  RetiredFlags;
 StructuredBuffer<uint>    RetiredFlagsIn;  // 分類カーネル用の読み取り専用エイリアス
 float  GroundLifetime;                     // これを超えたら Retired
 float3 RetiredPark;                        // Retired 粒子の待避先（領域外）
@@ -621,10 +627,25 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     // 領域外の待避先へ移し、速度を 0 にする。CellCoord が領域外になるので近傍探索にも
     // 入らず、密度場にも寄与しない（＝物理的にも視覚的にも存在しなくなる）。
     // Mass は消えるのではなく RetiredMass へ移る。収支は常に一定 (§16)。
-    if (RetiredFlags[i] != 0)
+    uint state = RetiredFlags[i];
+    if (state == 1u)
     {
         Positions[i] = RetiredPark;
         Velocities[i] = float3(0, 0, 0);
+        return;
+    }
+    if (state == 2u)
+    {
+        // 領域外に取り残された水たまり。その場で凍結する。
+        // グリッド外なので近傍探索にも入らず、他の粒子に干渉しない。
+        Velocities[i] = float3(0, 0, 0);
+        // 寿命だけは進める。GroundLifetime を過ぎたら Retired へ移す。
+        if (GroundLifetime > 0.0)
+        {
+            float a2 = Ages[i] + DeltaTime;
+            Ages[i] = a2;
+            if (a2 >= GroundLifetime) RetiredFlags[i] = 1u;
+        }
         return;
     }
 
@@ -641,15 +662,21 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         v.xz *= (1.0 - BoundsFriction);
     }
 
-    // 領域の水平端に達した粒子は Retired にする (§16)。
-    // 壺の中の液体がここへ到達することはない。到達しうるのは既にこぼれた液体だけ。
-    // これをしないと、ゴブリンが歩いて領域が動いたとき、地面の水たまりが
-    // 見えない壁に沿って引きずられて一緒に付いてくる。
-    // Mass は消えるのではなく RetiredMass へ移るので収支は保たれる。
-    if (GroundLifetime > 0.0 &&
-        (p.x <= BoundsMin.x || p.x >= BoundsMax.x || p.z <= BoundsMin.z || p.z >= BoundsMax.z))
+    // 領域の水平端に達した粒子の扱い。
+    // これをしないと、ゴブリンが歩いて領域が動いたとき、粒子が見えない壁に沿って
+    // 引きずられて一緒に付いてくる。
+    //  * 地面にいる液体 → **その場に置いていく (Settled)**。水たまりは残ってほしい。
+    //  * 空中の液体     → 世界の外へ飛んで行ったものとして Retired。
+    if (p.x <= BoundsMin.x || p.x >= BoundsMax.x || p.z <= BoundsMin.z || p.z >= BoundsMax.z)
     {
-        RetiredFlags[i] = 1;
+        bool onGround = p.y <= GroundY + GroundBandHeight * 2.0;
+        RetiredFlags[i] = onGround ? 2u : 1u;
+        if (onGround)
+        {
+            Positions[i] = p;
+            Velocities[i] = float3(0, 0, 0);
+            return;      // 境界クランプをかけない（領域の外に残す）
+        }
     }
 
     [unroll] for (int a = 0; a < 3; a++)
@@ -755,12 +782,15 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
     bool everOut   = (prev & FLAG_EVER_OUT) != 0u;
 
     uint region;
-    if (RetiredFlagsIn[i] != 0)
+    uint stateIn = RetiredFlagsIn[i];
+    if (stateIn != 0u)
     {
-        // 既に消滅した粒子。位置は待避先にあるので領域判定はしない。
+        // 1 = 消滅済み（待避先にいる）/ 2 = 領域外に取り残された水たまり。
+        // 後者は「地面にある回収可能な液体」なので Ground として数える (§16)。
         uint d2;
-        InterlockedAdd(RegionCounters[REGION_RETIRED], 1, d2);
-        RegionFlags[i] = REGION_RETIRED | (prev & (FLAG_PASSED_RIM | FLAG_EVER_OUT));
+        uint reg = (stateIn == 2u) ? REGION_GROUND : REGION_RETIRED;
+        InterlockedAdd(RegionCounters[reg], 1, d2);
+        RegionFlags[i] = reg | (prev & (FLAG_PASSED_RIM | FLAG_EVER_OUT));
         return;
     }
     if (p.y <= GroundY + GroundBandHeight)

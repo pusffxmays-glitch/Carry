@@ -66,7 +66,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     [Header("Fill / region")]
     [Tooltip("容器の内容積に対する初期充填率。")]
-    [Range(0.05f, 0.95f)] public float fillFraction = 0.45f;
+    // 満タン。0.95 は「リムの直下まで」で、これ以上入れると静止時から溢れる。
+    [Range(0.05f, 0.95f)] public float fillFraction = 0.95f;
     [Tooltip("シミュレーション領域の余白 (m)。容器の周囲にこれだけ広げる。")]
     public float simPadding = 0.45f;
     [Tooltip("容器の下へ領域を伸ばす量 (m)。Box モードでのみ使う。壺モードでは領域の底は groundY に固定される。")]
@@ -74,15 +75,18 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Tooltip("地面の World Y。Overflow した液体はここに着地する。")]
     public float groundY = 0f;
     [Tooltip("注ぎ出した液体が横へ広がる余地 (m)。壺の旋回半径にこれを足した範囲が領域になる。ここが不足すると液体が見えない壁に当たって板状に溜まる。")]
-    public float lateralSpread = 0.5f;
+    // 地面の水たまりが見える範囲でもある。密度場が 1 軸 384 voxel を超えない上限が
+    // 半径 1.77m 付近（voxel 9.4mm）なので、そこに合わせてある。
+    // これ以上広げるには Brick Pool（OI-3）が要る。
+    public float lateralSpread = 0.8f;
     [Tooltip("地面より下に確保する余白 (m)。地面 Collision が領域端と重ならないようにする。")]
     public float groundMargin = 0.12f;
     [Tooltip("容器の上に確保する余白 (m)。")]
     public float topMargin = 0.18f;
     [Tooltip("Rim Opening 領域の高さ (m)。粒子間隔の 2〜3 倍程度。ここを通過した粒子だけが正常な Overflow として数えられる (§11)。")]
     public float rimOpeningHeight = 0.08f;
-    [Tooltip("地面に留まった液体が Retired（回収不可能）になるまでの時間 (s)。0 で無効。Mass は消えず RetiredMass へ移る (§16/§20)。")]
-    public float groundLifetime = 8f;
+    [Tooltip("地面に留まった液体が Retired（回収不可能）になるまでの時間 (s)。0 で無効（永久に残る）。Mass は消えず RetiredMass へ移る (§16/§20)。")]
+    public float groundLifetime = 45f;
     [Range(0f, 0.5f)] public float boundsRestitution = 0.02f;
     [Range(0f, 1f)] public float boundsFriction = 0.15f;
 

@@ -1011,15 +1011,15 @@ MonoBehaviour:
   solverRelaxation: 0.12
   maxDeltaPPerSpacing: 0.25
   maxSpeed: 8
-  fillFraction: 0.45
+  fillFraction: 0.95
   simPadding: 0.45
   fallZoneBelow: 1.2
   groundY: 0
-  lateralSpread: 0.55
+  lateralSpread: 0.8
   groundMargin: 0.12
   topMargin: 0.18
   rimOpeningHeight: 0.08
-  groundLifetime: 8
+  groundLifetime: 45
   boundsRestitution: 0.02
   boundsFriction: 0.15
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}

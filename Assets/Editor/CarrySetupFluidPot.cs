@@ -71,10 +71,10 @@ public static class CarrySetupFluidPot
         core.viscosity = 2.8f;          // dt 比例化後の値 (Phase 6 と同じ効き)
         core.boundaryViscosity = 0.55f; // 剛体回転比 0.844 (実測)
         core.boundaryPressureScale = 1.6f;  // 壁の貫通 465 -> 309 個 (実測)
-        core.fillFraction = 0.45f;
+        core.fillFraction = 0.95f;     // 満タン
         core.simPadding = 0.45f;
         core.groundY = 0f;              // Floor の上面 (y=0)
-        core.lateralSpread = 0.55f;     // 注ぎ出した液体が横へ広がる余地 (Phase 7 実測)
+        core.lateralSpread = 0.8f;    // 地面の水たまりが見える範囲     // 注ぎ出した液体が横へ広がる余地 (Phase 7 実測)
         core.groundMargin = 0.12f;
         core.topMargin = 0.18f;
         core.rimOpeningHeight = 0.08f;

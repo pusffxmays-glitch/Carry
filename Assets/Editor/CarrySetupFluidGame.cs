@@ -41,17 +41,17 @@ public static class CarrySetupFluidGame
         if (core == null) core = pot.gameObject.AddComponent<FluidCore>();
         core.fluidCompute = AssetDatabase.LoadAssetAtPath<ComputeShader>(CorePath);
         core.particleCount = 16384;
-        core.fillFraction = 0.45f;
+        core.fillFraction = 0.95f;     // 満タン
         core.minSubSteps = 6;
         core.maxSubSteps = 20;       // CFL を満たせない急な動きで発散するのを防ぐ (実測)        // Phase 12: 品質を保てる下限 (実測)
         core.viscosity = 2.8f;
         core.boundaryViscosity = 0.55f;
         core.boundaryPressureScale = 1.6f;
         core.groundY = 0f;              // Room_Floor の上面
-        core.lateralSpread = 0.55f;
+        core.lateralSpread = 0.8f;    // 地面の水たまりが見える範囲
         core.groundMargin = 0.12f;
         core.topMargin = 0.18f;
-        core.groundLifetime = 8f;
+        core.groundLifetime = 45f;     // こぼれた液体を地面に残す
 
         var srf = pot.GetComponent<FluidSurface>();
         if (srf == null) srf = pot.gameObject.AddComponent<FluidSurface>();
