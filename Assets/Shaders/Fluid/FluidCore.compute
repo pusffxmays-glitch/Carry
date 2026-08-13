@@ -37,6 +37,8 @@
 #define THREADS 256
 #define SCAN_BLOCK 256
 
+#define REGION_INSIDE  0u
+
 // ---------------------------------------------------------------------------- fluid state
 //
 // 読み取り専用の使い方をするバッファは SRV (StructuredBuffer) として別名で宣言してある。
@@ -167,8 +169,17 @@ RWStructuredBuffer<float> Ages;            // 地面に留まっている時間 
 // **その場に残っていてほしい**。領域の外へ出た地面の液体は、消すのではなく
 // その場で凍結する。位置はそのままなので、戻ってくれば再び描画される。
 // Mass の扱いは Ground のまま（§16 で「将来的に回収可能」な分類）。
+// 0 = 通常 / 1 = Retired / 2 = Settled / 3 = Escaped
+//
+// Escaped: **壺のふちを越えた液体**。一度越えたら壺へは戻らず、そのまま地面へ落ちる。
+// 越えた液体が跳ね上がって壺の口へ落ち戻ると、見た目には派手にこぼれているのに
+// 残量が減らない（実測: 揺さぶりで空中へ出た 8708 粒子のうち 2329 しか地面に残らず、
+// PotionVolume が 0.917 までしか下がらなかった）。
+// Escaped は壁とも他の粒子とも相互作用しない。重力と地面 Collision だけが効く。
 RWStructuredBuffer<uint>  RetiredFlags;
-StructuredBuffer<uint>    RetiredFlagsIn;  // 分類カーネル用の読み取り専用エイリアス
+StructuredBuffer<uint>    RetiredFlagsIn;  // 読み取り専用エイリアス
+float EscapeMargin;      // リム面からこの高さ(local)を超えたら Escaped
+int   EscapeEnabled;
 float  GroundLifetime;                     // これを超えたら Retired
 float3 RetiredPark;                        // Retired 粒子の待避先（領域外）
 float RimOpeningHeight;
@@ -218,12 +229,20 @@ uint CellIndex(int3 c) { return (uint)c.x + (uint)c.y * GridSize.x + (uint)c.z *
 // 容器が瞬間移動したときに、中身を同じ剛体変換で連れて行く。
 // 相対速度は与えない（速度はワールドの回転ぶんだけ向きを変える）。
 float4x4 TeleportMatrix;
+StructuredBuffer<uint> RegionFlagsIn;   // 前フレームの領域分類（読み取り専用）
 
 [numthreads(THREADS, 1, 1)]
 void TeleportFluid(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= FluidCount) return;
+
+    // **壺の中身だけを運ぶ。** こぼれて地面にある液体や落下中の液体まで一緒に運ぶと、
+    // 容器が速く動いたときに水たまりが壺に付いてきてしまい、
+    // 「こぼれた分だけ残量が減る」が成立しなくなる
+    // （実測: よろけで PotionVolume が 0.964 -> 0.992 と増えた）。
+    if ((RegionFlagsIn[i] & 7u) != REGION_INSIDE) return;
+
     Positions[i] = mul(TeleportMatrix, float4(Positions[i], 1.0)).xyz;
     Velocities[i] = mul((float3x3)TeleportMatrix, Velocities[i]);
 }
@@ -263,6 +282,7 @@ void CountParticlesPerCell(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= TotalCount) return;
+    if (i < FluidCount && RetiredFlagsIn[i] != 0u) return;   // Escaped/Settled/Retired は近傍に入らない
     int3 c = CellCoord(SortPositions[i]);
     if (!CellValid(c)) return;
     uint dummy;
@@ -332,6 +352,7 @@ void ScatterParticles(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= TotalCount) return;
+    if (i < FluidCount && RetiredFlagsIn[i] != 0u) return;   // 近傍リストに入れない
     int3 c = CellCoord(SortPositions[i]);
     if (!CellValid(c)) return;
     uint slot;
@@ -382,6 +403,8 @@ void ComputeDensityLambda(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= FluidCount) return;
+    // 壺を出た液体は他と相互作用しない。重力で落ちるだけ。
+    if (RetiredFlagsIn[i] != 0u) { Densities[i] = RestDensity; Lambdas[i] = 0.0; return; }
 
     float h = KernelRadius;
     float3 pi = PredictedPositions[i];
@@ -437,6 +460,7 @@ void ComputeDeltaP(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= FluidCount) return;
+    if (RetiredFlagsIn[i] != 0u) { DeltaP[i] = float3(0, 0, 0); return; }
 
     float h = KernelRadius;
     float3 pi = PredictedPositions[i];
@@ -500,6 +524,7 @@ void ComputeNormals(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= FluidCount) return;
+    if (RetiredFlagsIn[i] != 0u) { Normals[i] = float3(0, 0, 0); return; }
 
     float h = KernelRadius;
     float3 pi = PredictedIn[i];
@@ -524,6 +549,10 @@ void ApplyViscosityTension(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= FluidCount) return;
+    // Escaped/Settled/Retired は近傍計算をしない。ただし **速度の書き戻しは必要**。
+    // ここで return してしまうと Velocities が更新されず、重力が乗らないまま
+    // 脱出時の速度で飛び続ける（実測: 空中の液体が落ちてこず Ground が 0 のまま）。
+    if (RetiredFlagsIn[i] != 0u) { Velocities[i] = VelocityIn[i]; return; }
 
     float h = KernelRadius;
     float3 pi = PredictedIn[i];
@@ -654,6 +683,24 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     if (any(isnan(p)) || any(isinf(p))) { p = clamp(Positions[i], BoundsMin, BoundsMax); v = float3(0, 0, 0); }
     float3 before = p;
 
+    if (state == 3u)
+    {
+        // 壺のふちを越えた液体。壁とも他の粒子とも相互作用せず、重力で落ちるだけ。
+        // 地面に着いたらその場に残す。
+        if (p.y <= GroundY + GroundBandHeight)
+        {
+            p.y = GroundY;
+            Positions[i] = p;
+            Velocities[i] = float3(0, 0, 0);
+            RetiredFlags[i] = 2u;
+            return;
+        }
+        if (p.y < BoundsMin.y) p.y = BoundsMin.y;
+        Positions[i] = p;
+        Velocities[i] = v;
+        return;
+    }
+
     // 地面 (§9 Collision)。Overflow した液体はここへ落ちる。
     if (p.y < GroundY)
     {
@@ -663,28 +710,62 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     }
 
     // 領域の水平端に達した粒子の扱い。
-    // これをしないと、ゴブリンが歩いて領域が動いたとき、粒子が見えない壁に沿って
-    // 引きずられて一緒に付いてくる。
-    //  * 地面にいる液体 → **その場に置いていく (Settled)**。水たまりは残ってほしい。
-    //  * 空中の液体     → 世界の外へ飛んで行ったものとして Retired。
-    if (p.x <= BoundsMin.x || p.x >= BoundsMax.x || p.z <= BoundsMin.z || p.z >= BoundsMax.z)
+    //
+    // 水平方向のクランプはかけない。かけると、ゴブリンが歩いて領域が動いたとき、
+    // 置いてきたはずの液体が見えない壁に沿って引きずられて一緒に付いてくる。
+    //
+    // 代わりに:
+    //  * 地面に着いていたら **その場に置いていく (Settled)**。水たまりは残ってほしい。
+    //  * まだ空中なら **そのまま落とす**。近傍探索には入らないので他の粒子には
+    //    干渉しないが、重力と地面 Collision は効くので、ちゃんと落ちて着地する。
+    //    ここで消してしまうと、こぼれた液体が地面に着く前に空中で消える
+    //    （実測: ゴブリンが歩くと Ground が常に 0 で、全部 Retired になっていた）。
+    bool outsideHoriz = p.x <= BoundsMin.x || p.x >= BoundsMax.x
+                     || p.z <= BoundsMin.z || p.z >= BoundsMax.z;
+    if (outsideHoriz && p.y <= GroundY + GroundBandHeight * 2.0)
     {
-        bool onGround = p.y <= GroundY + GroundBandHeight * 2.0;
-        RetiredFlags[i] = onGround ? 2u : 1u;
-        if (onGround)
-        {
-            Positions[i] = p;
-            Velocities[i] = float3(0, 0, 0);
-            return;      // 境界クランプをかけない（領域の外に残す）
-        }
+        RetiredFlags[i] = 2u;
+        Positions[i] = p;
+        Velocities[i] = float3(0, 0, 0);
+        return;
     }
 
-    [unroll] for (int a = 0; a < 3; a++)
+    // 縦方向だけはクランプする（領域の底は地面より下にある）。
+    if (p.y < BoundsMin.y) { p.y = BoundsMin.y; if (v.y < 0.0) v.y = -v.y * BoundsRestitution; }
+    if (p.y > BoundsMax.y) { p.y = BoundsMax.y; if (v.y > 0.0) v.y = -v.y * BoundsRestitution; }
+    if (!outsideHoriz)
     {
-        if (p[a] < BoundsMin[a]) { p[a] = BoundsMin[a]; if (v[a] < 0.0) v[a] = -v[a] * BoundsRestitution; }
-        if (p[a] > BoundsMax[a]) { p[a] = BoundsMax[a]; if (v[a] > 0.0) v[a] = -v[a] * BoundsRestitution; }
+        [unroll] for (int a = 0; a < 3; a += 2)
+        {
+            if (p[a] < BoundsMin[a]) { p[a] = BoundsMin[a]; if (v[a] < 0.0) v[a] = -v[a] * BoundsRestitution; }
+            if (p[a] > BoundsMax[a]) { p[a] = BoundsMax[a]; if (v[a] > 0.0) v[a] = -v[a] * BoundsRestitution; }
+        }
     }
     if (any(abs(p - before) > 1e-9)) v *= (1.0 - BoundsFriction);
+
+    // --- 壺のふちを越えたら Escaped にする（ユーザー指定の挙動） ---
+    // 越えた液体は戻さない。跳ね上がって口へ落ち戻ると、派手にこぼれているのに
+    // 残量が減らない、という状態になるため。
+    if (EscapeEnabled != 0 && SafetyEnabled != 0)
+    {
+        // 判定は「リム面より上か」ではなく **「壺の内側から出たか」**。
+        // リム面だけで見ると、満タンの壺が待機モーションで揺れただけで
+        // 中身が次々に逃げてしまう（実測: 立っているだけで 6 秒で半分失われた）。
+        // 横から縁を越えて流れ出す液体も、上へ跳ねた液体も、
+        // どちらも「壺の内側の形から出た」という同じ条件で拾える。
+        float3 lpE = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
+        float rE = length(lpE.xz);
+        float rIn = PotRadiusAt(clamp(lpE.y, PotFloorY, PotRimY));
+        bool outsidePot = (lpE.y > PotRimY + EscapeMargin)
+                       || (rE > rIn + WallTolerance + EscapeMargin);
+        if (outsidePot)
+        {
+            RetiredFlags[i] = 3u;
+            Positions[i] = p;
+            Velocities[i] = v;
+            return;
+        }
+    }
 
     // --- SafetyCorrection (§10): 壺の壁/床を突き抜けた粒子だけを引き戻す ---
     // このカーネルは ComputeVelocity より後に走るので、ここでの位置変更は
@@ -753,7 +834,6 @@ void Finalize(uint3 id : SV_DispatchThreadID)
 // Rim Opening を「通過した」粒子だけを正常な Overflow とみなす。壁や底から直接外へ
 // 出た粒子は Boundary Failure として別に数え、Overflow には計上しない。
 // ============================================================================
-#define REGION_INSIDE  0u
 #define REGION_RIM     1u
 #define REGION_AIR     2u
 #define REGION_GROUND  3u
@@ -788,7 +868,9 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
         // 1 = 消滅済み（待避先にいる）/ 2 = 領域外に取り残された水たまり。
         // 後者は「地面にある回収可能な液体」なので Ground として数える (§16)。
         uint d2;
-        uint reg = (stateIn == 2u) ? REGION_GROUND : REGION_RETIRED;
+        uint reg = (stateIn == 2u) ? REGION_GROUND
+                 : (stateIn == 3u) ? REGION_AIR
+                 : REGION_RETIRED;
         InterlockedAdd(RegionCounters[reg], 1, d2);
         RegionFlags[i] = reg | (prev & (FLAG_PASSED_RIM | FLAG_EVER_OUT));
         return;

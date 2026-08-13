@@ -62,7 +62,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Tooltip("位置補正の緩和係数 (SOR)。これが無いと補正が行き過ぎて毎サブステップでエネルギーが注入される。")]
     [Range(0.02f, 1f)] public float solverRelaxation = 0.12f;
     [Range(0.05f, 1f)] public float maxDeltaPPerSpacing = 0.25f;
-    public float maxSpeed = 8f;
+    // 速度クランプ。跳ね上がる高さの上限を決める (v^2/2g)。
+    // 8 m/s だと 3.3m も噴き上がって「発散」に見える。5 m/s なら 1.3m。
+    // 壺の直径が 0.9m なので、この程度が運搬中の跳ねとして妥当。
+    public float maxSpeed = 5f;
 
     [Header("Fill / region")]
     [Tooltip("容器の内容積に対する初期充填率。")]
@@ -81,12 +84,20 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public float lateralSpread = 0.8f;
     [Tooltip("地面より下に確保する余白 (m)。地面 Collision が領域端と重ならないようにする。")]
     public float groundMargin = 0.12f;
-    [Tooltip("容器の上に確保する余白 (m)。")]
-    public float topMargin = 0.18f;
+    // 揺さぶりで跳ね上がった液体が飛ぶ高さ。ここが足りないと、液体が領域の天井に
+    // 当たって平らに潰され、そのまま壺へ落ち戻る。実測: 0.18m のとき、
+    // 激しく揺すって空中へ出た 5895 粒子のうち 99.97% が壺に戻り、
+    // PotionVolume が 1.000 へ復帰していた（＝こぼれない）。
+    [Tooltip("容器の上に確保する余白 (m)。跳ね上がった液体が天井に当たって落ち戻らない高さが必要。")]
+    public float topMargin = 1.2f;
     [Tooltip("Rim Opening 領域の高さ (m)。粒子間隔の 2〜3 倍程度。ここを通過した粒子だけが正常な Overflow として数えられる (§11)。")]
     public float rimOpeningHeight = 0.08f;
     [Tooltip("地面に留まった液体が Retired（回収不可能）になるまでの時間 (s)。0 で無効（永久に残る）。Mass は消えず RetiredMass へ移る (§16/§20)。")]
     public float groundLifetime = 45f;
+    [Tooltip("壺のふちを越えた液体を壺へ戻さず、そのまま地面へ落とす。跳ね上がった液体が口へ落ち戻って残量が減らないのを防ぐ。")]
+    public bool escapeAboveRim = true;
+    [Tooltip("リム面からこの高さ(粒子間隔の倍数)を超えたら「ふちを越えた」とみなす。液面の盛り上がりを誤検出しない程度に取る。")]
+    [Range(0.5f, 8f)] public float escapeMarginSpacings = 2f;
     [Range(0f, 0.5f)] public float boundsRestitution = 0.02f;
     [Range(0f, 1f)] public float boundsFriction = 0.15f;
 
@@ -197,8 +208,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     /// <summary>容器の旋回半径 (m)。回転が境界粒子に与える速度 = |omega| * これ。</summary>
     float containerSwingRadius = 1f;
 
+    bool pendingSeed;
     Vector3 regionCenter, regionSize;
     float regionOffsetY;
+    // 壺モードでの領域中心の Y。地面を必ず含むよう world 固定にする。
+    float regionAnchorY;
+    bool regionYAnchored;
     Vector3Int gridSize;
     Vector3 gridOrigin;
     float cellSize;
@@ -260,6 +275,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         AllocateBuffers();
         SeedFluid();
         BuildGrid();
+        // 実際の配置は最初の Step まで待つ。
+        // OnEnable の時点では容器がまだシリアライズされた位置にあり、
+        // ゴブリンのリグが LateUpdate で手の位置へ動かす前なので、
+        // ここで配置すると液体が壺から 0.4m ずれた場所に生まれ、
+        // その大半が「壺の外」と判定されて即こぼれる
+        // （実測: 起動しただけで PotionVolume が 0.44 まで落ちた）。
+        pendingSeed = true;
     }
 
     // 粒子間隔は「入れたい体積を何個で割るか」から。静止密度はその間隔での理想的な
@@ -295,6 +317,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
                                      ext.y + simPadding * 2f + fallZoneBelow,
                                      ext.z + simPadding * 2f);
             regionOffsetY = -fallZoneBelow * 0.5f;
+            regionYAnchored = false;
             containerSwingRadius = ext.magnitude * 0.5f * boundary.ContainerScale;
         }
         else
@@ -318,10 +341,23 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             float halfXZ = swingR + lateralSpread;
 
             regionSize = new Vector3(halfXZ * 2f, Mathf.Max(top - bottom, swingR * 2f), halfXZ * 2f);
-            regionOffsetY = (top + bottom) * 0.5f - containerY;
+            // 領域の底は **地面に固定** する。容器の高さに追従させると、
+            // 初期化時より容器が高い位置に置かれたときに底が地面より上へ行き、
+            // 落ちた液体が地面に届かず空中で止まる
+            // （実測: CastleGtage で領域の底が y=0.31、地面は y=0 で、
+            //  こぼれた液体が Ground にならず Airborne のままだった）。
+            regionAnchorY = groundY - groundMargin + regionSize.y * 0.5f;
+            regionYAnchored = true;
         }
-        regionCenter = boundary.Container.position + Vector3.up * regionOffsetY;
+        regionCenter = RegionCentreFor(boundary.SimPosition);
         cellSize = kernelRadius;
+    }
+
+    /// <summary>領域の中心。横は容器に追従し、縦は（壺モードでは）地面を含むよう world 固定。</summary>
+    Vector3 RegionCentreFor(Vector3 containerPos)
+    {
+        float y = regionYAnchored ? regionAnchorY : containerPos.y + regionOffsetY;
+        return new Vector3(containerPos.x, y, containerPos.z);
     }
 
     static float IdealLatticeKernelSum(float s, float h)
@@ -489,7 +525,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 微小移動でセル割り当てがガタつかないようにする。
     void UpdateGridOrigin()
     {
-        regionCenter = boundary.Container.position + Vector3.up * regionOffsetY;
+        regionCenter = RegionCentreFor(boundary.SimPosition);
         Vector3 lo = regionCenter - regionSize * 0.5f - Vector3.one * (cellSize * 3f);
         gridOrigin = new Vector3(
             Mathf.Floor(lo.x / cellSize) * cellSize,
@@ -505,7 +541,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
         var pos = new Vector3[fluidCount];
         var vel = new Vector3[fluidCount];
-        Vector3 fallback = boundary.Container.position;
+        Vector3 fallback = boundary.SimPosition;
         for (int i = 0; i < fluidCount; i++)
         {
             pos[i] = i < pts.Count ? pts[i] : fallback;
@@ -561,6 +597,14 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
         boundary.SampleMotion(dt);
 
+        // 容器の姿勢が確定してから配置する（上の pendingSeed の注記を参照）。
+        if (pendingSeed)
+        {
+            pendingSeed = false;
+            UpdateGridOrigin();
+            SeedFluid();
+        }
+
         // §21: 容器が瞬間移動したら、中身を同じ剛体変換で連れて行く。
         // これをしないと液体だけ元の場所に取り残され、次のフレームには
         // 「壺の外にある」＝全量こぼれた、と判定されてしまう。
@@ -568,7 +612,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         {
             fluidCompute.SetMatrix("TeleportMatrix", boundary.TeleportDelta);
             fluidCompute.SetInt("FluidCount", fluidCount);
-            Bind(kTeleport, ("Positions", positions), ("Velocities", velocities));
+            Bind(kTeleport, ("Positions", positions), ("Velocities", velocities),
+                            ("RegionFlagsIn", regionFlags));
             fluidCompute.Dispatch(kTeleport, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
         }
 
@@ -593,54 +638,38 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
         float maxTravel = 0.4f * spacing;
 
-        // 流体側の CFL は dt で守れる。サブステップ数を上限まで使っても足りないなら、
-        // そのフレームだけ **流体の時間をゆっくり進める**。
-        // フレームが引っかかって dt が跳ねたとき（実測 1/30 秒）に効く。
+        // サブステップ数を上限まで使っても足りないなら、そのフレームだけ
+        // **流体の時間をゆっくり進める**。フレームが引っかかって dt が跳ねたときに効く。
         // 解けないまま進めて発散させるより、一瞬スローになる方がよい。
-        if (fluidSpeed * dt > maxTravel * maxSubSteps)
-            dt = maxTravel * maxSubSteps / Mathf.Max(fluidSpeed, 1e-6f);
+        //
+        // 容器側も対象にする。容器の姿勢は速度制限つきで追従する (§21 の平滑化) ので、
+        // dt を削れば容器の移動量も減り、両方まとめて CFL を満たせる。
+        // 流体だけを見ていたときは、フレーム落ち時に容器側が上限を超えて
+        // CFL 不足が残っていた（実測 4 フレーム）。
+        if (worstSpeed * dt > maxTravel * maxSubSteps)
+            dt = maxTravel * maxSubSteps / Mathf.Max(worstSpeed, 1e-6f);
 
         LastBoundaryTravel = containerSpeed * dt;
         int need = Mathf.CeilToInt(worstSpeed * dt / maxTravel);
         int sub = Mathf.Clamp(need, minSubSteps, maxSubSteps);
         LastRequiredSubSteps = need;
 
-        // --- サブステップで解けない容器の動きは、中身ごと剛体で運ぶ (§3 CFL の最終手段) ---
-        //
-        // ゲーム中は容器が一瞬で非常に速く動くことがある（実測: ゴブリンのよろけで
-        // 容器速度 15.5 m/s、必要サブステップ 70）。これを全部解こうとすると
-        // 1 フレーム 100ms を超える。かといって解かずに壁を動かすと、
-        // 壁が流体を薙ぎ払って発散し、描画が崩れる。
-        //
-        // 解ける量 = 1 サブステップの許容移動量 x サブステップ数。
-        // それを超えた分は「相対運動なし」＝中身を壁と一緒に運ぶ。
-        // その瞬間だけ揺れが出ないが、発散するよりはるかにまし。
-        // 質量も体積も変わらないので、収支や PotionVolume には影響しない。
-        float travel = containerSpeed * dt;
-        float resolvable = maxTravel * sub;
-        float carry = (travel > resolvable && travel > 1e-6f) ? 1f - resolvable / travel : 0f;
-        LastCarryFraction = carry;
-        // ここまでで CFL は必ず満たされる。それでも足りないフレームがあれば
-        // 上の 2 つの対策のどちらかが効いていないということなので、数えて可視化する。
-        if (need > sub && carry <= 0f) CflLimitedFrames++;
-        if (carry > 0f)
-        {
-            RigidCarryFrames++;
-            fluidCompute.SetMatrix("TeleportMatrix", boundary.CarryDelta(carry));
-            fluidCompute.SetInt("FluidCount", fluidCount);
-            Bind(kTeleport, ("Positions", positions), ("Velocities", velocities));
-            fluidCompute.Dispatch(kTeleport, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
-        }
+        // 剛体搬送は**廃止した**。
+        // 「解けない容器の動きを中身ごと運ぶ」対策は CFL は守れるが、
+        // 運んだ分だけ相対運動が消えるので **こぼれなくなり**、さらに搬送後の状態が
+        // 緩和して「空中で膨らんでから収束する」という不自然な見え方になった。
+        // 代わりに FluidBoundary 側で容器の姿勢そのものを平滑化し、
+        // 流体が見る速度を最初から解ける範囲に収めている (§21 の「平滑化」)。
+        LastCarryFraction = 0f;
+        if (need > sub) CflLimitedFrames++;
         if (need > PeakRequiredSubSteps) PeakRequiredSubSteps = need;
         if (containerSpeed > PeakContainerSpeed) PeakContainerSpeed = containerSpeed;
         if (MeasuredMaxSpeed > PeakFluidSpeed) PeakFluidSpeed = MeasuredMaxSpeed;
 
         LastSubStepCount = sub;
 
-        // 剛体搬送した分は既に進んでいるので、壁の補間は carry..1 の区間だけを掃く。
         float sdt = dt / sub;
-        for (int s = 0; s < sub; s++)
-            SubStep(sdt, carry + (1f - carry) * ((s + 1) / (float)sub));
+        for (int s = 0; s < sub; s++) SubStep(sdt, (s + 1) / (float)sub);
 
         // 領域分類はフレームに 1 回。観測のみで、位置・速度には触れない (§14/追加修正1)。
         ClassifyAndRead();
@@ -751,11 +780,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         Bind(kClearCounts, ("CellCounts", cellCounts));
         Bind(kBuildSortPos, ("SortPositions", sortPositions), ("PredictedPositions", predicted),
                             ("BoundaryPositions", boundaryPositions));
-        Bind(kCount, ("SortPositions", sortPositions), ("CellCounts", cellCounts));
+        Bind(kCount, ("SortPositions", sortPositions), ("CellCounts", cellCounts),
+                     ("RetiredFlagsIn", retiredFlags));
         Bind(kScanLocal, ("CellCounts", cellCounts), ("CellStart", cellStart), ("BlockSums", blockSums));
         Bind(kScanBlocks, ("BlockSums", blockSums));
         Bind(kScanAdd, ("CellStart", cellStart), ("CellCursor", cellCursor), ("BlockSums", blockSums));
-        Bind(kScatter, ("SortPositions", sortPositions), ("CellCursor", cellCursor), ("SortedIndices", sortedIndices));
+        Bind(kScatter, ("SortPositions", sortPositions), ("CellCursor", cellCursor), ("SortedIndices", sortedIndices),
+                       ("RetiredFlagsIn", retiredFlags));
 
         Bind(kIntegrate, ("Positions", positions), ("PredictedPositions", predicted),
                          ("Velocities", velocities), ("SafetyCorrection", safety));
@@ -763,12 +794,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         Bind(kDensityLambda, ("PredictedPositions", predicted), ("Densities", densities), ("Lambdas", lambdas),
                              ("SortPositionsIn", sortPositions), ("CellStartIn", cellStart),
                              ("CellCountsIn", cellCounts), ("SortedIndicesIn", sortedIndices),
-                             ("BoundaryVolumes", boundaryVolumes));
+                             ("BoundaryVolumes", boundaryVolumes), ("RetiredFlagsIn", retiredFlags));
 
         Bind(kDeltaP, ("PredictedPositions", predicted), ("DeltaP", deltaP), ("LambdasIn", lambdas),
                       ("SortPositionsIn", sortPositions), ("CellStartIn", cellStart),
                       ("CellCountsIn", cellCounts), ("SortedIndicesIn", sortedIndices),
-                      ("BoundaryVolumes", boundaryVolumes));
+                      ("BoundaryVolumes", boundaryVolumes), ("RetiredFlagsIn", retiredFlags));
 
         Bind(kApplyDeltaP, ("PredictedPositions", predicted), ("DeltaP", deltaP));
 
@@ -777,13 +808,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
         Bind(kNormals, ("Normals", normals), ("PredictedIn", predicted), ("DensitiesIn", densities),
                        ("SortPositionsIn", sortPositions), ("CellStartIn", cellStart),
-                       ("CellCountsIn", cellCounts), ("SortedIndicesIn", sortedIndices));
+                       ("CellCountsIn", cellCounts), ("SortedIndicesIn", sortedIndices),
+                       ("RetiredFlagsIn", retiredFlags));
 
         Bind(kViscTension, ("Velocities", velocities), ("PredictedIn", predicted), ("VelocityIn", deltaP),
                            ("NormalsIn", normals), ("DensitiesIn", densities),
                            ("SortPositionsIn", sortPositions), ("CellStartIn", cellStart),
                            ("CellCountsIn", cellCounts), ("SortedIndicesIn", sortedIndices),
-                           ("BoundaryVelocities", boundaryVelocities), ("BoundaryVolumes", boundaryVolumes));
+                           ("BoundaryVelocities", boundaryVelocities), ("BoundaryVolumes", boundaryVolumes),
+                           ("RetiredFlagsIn", retiredFlags));
 
         // UAV: PredictedPositions / Positions / Velocities / SafetyCounters / Ages / RetiredFlags = 6。
         // D3D11 の上限 8 に収まっている。
@@ -862,6 +895,9 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("RimOpeningHeight", rimOpeningHeight);
         fluidCompute.SetFloat("GroundY", groundY);
         fluidCompute.SetFloat("GroundBandHeight", spacing * 1.5f);
+        fluidCompute.SetInt("EscapeEnabled", escapeAboveRim ? 1 : 0);
+        fluidCompute.SetFloat("EscapeMargin", boundary.mode == FluidBoundary.Mode.PotProfile
+            ? spacing * escapeMarginSpacings / Mathf.Max(1e-6f, boundary.ContainerScale) : 1e9f);
         fluidCompute.SetFloat("GroundLifetime", groundLifetime);
         // 待避先は領域の外。CellCoord が領域外になるので近傍探索にも密度場にも入らない。
         fluidCompute.SetVector("RetiredPark", regionCenter + Vector3.down * (regionSize.y * 0.5f + 50f));

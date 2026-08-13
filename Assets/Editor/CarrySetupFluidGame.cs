@@ -42,6 +42,7 @@ public static class CarrySetupFluidGame
         core.fluidCompute = AssetDatabase.LoadAssetAtPath<ComputeShader>(CorePath);
         core.particleCount = 16384;
         core.fillFraction = 0.95f;     // 満タン
+        core.maxSpeed = 5f;          // 跳ね上がる高さの上限
         core.minSubSteps = 6;
         core.maxSubSteps = 20;       // CFL を満たせない急な動きで発散するのを防ぐ (実測)        // Phase 12: 品質を保てる下限 (実測)
         core.viscosity = 2.8f;
@@ -50,8 +51,10 @@ public static class CarrySetupFluidGame
         core.groundY = 0f;              // Room_Floor の上面
         core.lateralSpread = 0.8f;    // 地面の水たまりが見える範囲
         core.groundMargin = 0.12f;
-        core.topMargin = 0.18f;
-        core.groundLifetime = 45f;     // こぼれた液体を地面に残す
+        core.topMargin = 1.2f;      // 跳ね上がった液体が天井で潰されない高さ
+        core.groundLifetime = 45f;
+        core.escapeAboveRim = true;        // ふちを越えた液体は戻さず地面へ
+        core.escapeMarginSpacings = 2f;     // こぼれた液体を地面に残す
 
         var srf = pot.GetComponent<FluidSurface>();
         if (srf == null) srf = pot.gameObject.AddComponent<FluidSurface>();
@@ -61,6 +64,7 @@ public static class CarrySetupFluidGame
         // §17: ゲージは Fluid の状態を読むだけ。逆向きに書く経路は無い。
         var gauge = Object.FindObjectOfType<PotionGaugeUI>();
         if (gauge != null) gauge.potionSourceBehaviour = core;
+        if (gauge != null) gauge.fillColor = new Color(0.20f, 0.52f, 1.00f, 0.95f);
         else Debug.LogWarning("CarrySetupFluidGame: PotionGaugeUI がシーンに見つかりません。");
 
         EditorUtility.SetDirty(pot.gameObject);

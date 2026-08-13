@@ -25,7 +25,7 @@ public class PotionGaugeUI : MonoBehaviour
     [Header("Colors")]
     public Color frameColor = new Color(0f, 0f, 0f, 0.55f);
     public Color emptyTrackColor = new Color(1f, 1f, 1f, 0.12f);
-    public Color fillColor = new Color(0.22f, 0.75f, 0.28f, 0.95f);
+    public Color fillColor = new Color(0.20f, 0.52f, 1.00f, 0.95f);   // ポーションの色（神聖な青）に合わせる
     [Tooltip("Fill color blended in as the gauge runs low, to read as an urgent warning.")]
     public Color lowFillColor = new Color(0.85f, 0.75f, 0.15f, 0.95f);
     [Range(0f, 1f)] public float lowThreshold = 0.2f;

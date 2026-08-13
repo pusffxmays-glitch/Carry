@@ -957,7 +957,7 @@ MonoBehaviour:
   anchorLeft: 1
   frameColor: {r: 0, g: 0, b: 0, a: 0.55}
   emptyTrackColor: {r: 1, g: 1, b: 1, a: 0.12}
-  fillColor: {r: 0.22, g: 0.75, b: 0.28, a: 0.95}
+  fillColor: {r: 0.2, g: 0.52, b: 1, a: 0.95}
   lowFillColor: {r: 0.85, g: 0.75, b: 0.15, a: 0.95}
   lowThreshold: 0.2
 --- !u!4 &2056031052
@@ -1010,16 +1010,18 @@ MonoBehaviour:
   boundaryPressureScale: 1.6
   solverRelaxation: 0.12
   maxDeltaPPerSpacing: 0.25
-  maxSpeed: 8
+  maxSpeed: 5
   fillFraction: 0.95
   simPadding: 0.45
   fallZoneBelow: 1.2
   groundY: 0
   lateralSpread: 0.8
   groundMargin: 0.12
-  topMargin: 0.18
+  topMargin: 1.2
   rimOpeningHeight: 0.08
   groundLifetime: 45
+  escapeAboveRim: 1
+  escapeMarginSpacings: 2
   boundsRestitution: 0.02
   boundsFriction: 0.15
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
@@ -1069,8 +1071,10 @@ MonoBehaviour:
   edgeVolumeClamp: 1.25
   rimFadePerKernel: 1
   debugForceCylinderRadius: 0
-  teleportSpeed: 12
-  teleportAngularSpeed: 900
+  simMaxSpeed: 5
+  simMaxAngularSpeed: 240
+  teleportDistance: 0.6
+  teleportAngle: 100
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

@@ -58,16 +58,35 @@ public class FluidBoundary : MonoBehaviour
     // 境界粒子が数十 m/s で動いたことになり中身が吹き飛ぶ。
     // 実際に起きた例: ゲーム開始直後、Carry_Pot がシリアライズ位置から
     // GoblinCarryRig が計算する手の中央へ 1 フレームで移動し、液体が飛び散った。
-    [Header("Teleport detection (§21)")]
-    [Tooltip("1 フレームの移動速度がこれを超えたらテレポートとみなす (m/s)。運搬中の壺の速度より十分大きく取る。")]
-    public float teleportSpeed = 12f;
-    [Tooltip("1 フレームの角速度がこれを超えたらテレポートとみなす (deg/s)。")]
-    public float teleportAngularSpeed = 900f;
+    // §21「Pot Linear Velocity: Transform 差分（**平滑化**・テレポート検出）」。
+    //
+    // 流体が見る容器の姿勢は、Transform をそのまま使わず速度制限つきで追従させる。
+    // ゲーム中の実測では、ゴブリンのよろけで Carry_Pot の Transform が
+    // **一瞬 15.5 m/s** に跳ねる（歩行 1.0 / 走行 3.0 / 旋回 110 deg/s しかないので、
+    // これはリグの計算が飛んだ結果であって運搬の動きではない）。
+    // その速度をそのまま壁に与えると、CFL が満たせず流体が発散する。
+    // 上限は通常の操作を一切削らない値に取ってあるので、普通に動かす分には影響しない。
+    [Header("Motion smoothing / teleport (§21)")]
+    // 実際の操作は 歩行 1.0 / 走行 3.0 m/s、旋回 110 deg/s、よろけ移動 1.0 m/s。
+    // 上限はそれを少しだけ上回る値にする。以前は 5 m/s / 240 deg/s と実操作の
+    // 2〜3 倍あり、その分だけ壁が液体を強く弾いて「揺れが大きすぎる」状態になっていた。
+    [Tooltip("流体が見る容器の最大並進速度 (m/s)。走行 3.0 を少し上回る値。")]
+    public float simMaxSpeed = 3.5f;
+    [Tooltip("流体が見る容器の最大角速度 (deg/s)。旋回 110 を少し上回る値。")]
+    public float simMaxAngularSpeed = 150f;
+    [Tooltip("実際の姿勢との位置ずれがこれを超えたらテレポートとみなして追いつく (m)。")]
+    public float teleportDistance = 0.6f;
+    [Tooltip("実際の姿勢との角度ずれがこれを超えたらテレポートとみなして追いつく (deg)。")]
+    public float teleportAngle = 100f;
     /// <summary>直近の SampleMotion でテレポートを検出したか。</summary>
     public bool TeleportedThisStep { get; private set; }
     /// <summary>テレポート前の姿勢から後の姿勢への剛体変換。中身をそのまま連れて行くために使う。</summary>
     public Matrix4x4 TeleportDelta { get; private set; } = Matrix4x4.identity;
-    public Vector3 CenterWorld => Container.position;
+    /// <summary>流体が見る容器の位置（平滑化済み）。</summary>
+    public Vector3 SimPosition => simPosition;
+    /// <summary>流体が見る容器の回転（平滑化済み）。</summary>
+    public Quaternion SimRotation => simRotation;
+    public Vector3 CenterWorld => simPosition;
     public Transform Container => container != null ? container : transform;
 
     Matrix4x4 prevMatrix;
@@ -81,6 +100,9 @@ public class FluidBoundary : MonoBehaviour
     // 瞬間移動していた。急な動きで壁が流体を薙ぎ払い、発散する原因になっていた。
     Quaternion lerpFromRotation;
     Vector3 lerpFromPosition;
+    // 流体が見る容器の姿勢（速度制限つきで実 Transform を追う）
+    Quaternion simRotation = Quaternion.identity;
+    Vector3 simPosition;
     float containerScale = 1f;
 
     public float ContainerScale => containerScale;
@@ -389,43 +411,53 @@ public class FluidBoundary : MonoBehaviour
             return;
         }
 
-        Vector3 dPos = t.position - prevPosition;
-        Quaternion dq = t.rotation * Quaternion.Inverse(prevRotation);
-        dq.ToAngleAxis(out float angleDeg, out Vector3 axis);
-        if (float.IsNaN(axis.x) || axis.sqrMagnitude < 1e-8f) { axis = Vector3.up; angleDeg = 0f; }
-        if (angleDeg > 180f) angleDeg -= 360f;
+        // 補間の始点は「このフレームの直前に流体が見ていた姿勢」。
+        lerpFromPosition = simPosition;
+        lerpFromRotation = simRotation;
 
-        // テレポートなら「速度」として扱わない。中身は剛体変換でそのまま連れて行き、
-        // 相対的な運動は一切与えない（そうしないと中身だけ置き去りになり、
-        // 次のフレームには壺の外にある＝全量こぼれた扱いになる）。
-        bool jumped = dPos.magnitude / dt > teleportSpeed
-                   || Mathf.Abs(angleDeg) / dt > teleportAngularSpeed;
-        if (jumped)
+        // 実 Transform とのずれ。大きすぎるならテレポート扱いで追いつく。
+        float gapDist = Vector3.Distance(t.position, simPosition);
+        float gapAngle = Quaternion.Angle(t.rotation, simRotation);
+
+        if (gapDist > teleportDistance || gapAngle > teleportAngle)
         {
-            TeleportDelta = t.localToWorldMatrix * prevMatrix.inverse;
+            Matrix4x4 from = Matrix4x4.TRS(simPosition, simRotation, t.lossyScale);
+            simPosition = t.position;
+            simRotation = t.rotation;
+            TeleportDelta = Matrix4x4.TRS(simPosition, simRotation, t.lossyScale) * from.inverse;
             TeleportedThisStep = true;
             LinearVelocity = Vector3.zero;
             AngularVelocity = Vector3.zero;
+            // 瞬間移動した分は補間しない
+            lerpFromPosition = simPosition;
+            lerpFromRotation = simRotation;
         }
         else
         {
-            LinearVelocity = dPos / dt;
+            // 速度制限つきで追従する。ここで削られるのは、運搬ではありえない
+            // 一瞬の跳ねだけ。通常の歩行・走行・旋回は上限に届かない。
+            simPosition = Vector3.MoveTowards(simPosition, t.position, simMaxSpeed * dt);
+            simRotation = Quaternion.RotateTowards(simRotation, t.rotation, simMaxAngularSpeed * dt);
+
+            LinearVelocity = (simPosition - lerpFromPosition) / dt;
+            Quaternion dq = simRotation * Quaternion.Inverse(lerpFromRotation);
+            dq.ToAngleAxis(out float angleDeg, out Vector3 axis);
+            if (float.IsNaN(axis.x) || axis.sqrMagnitude < 1e-8f) { axis = Vector3.up; angleDeg = 0f; }
+            if (angleDeg > 180f) angleDeg -= 360f;
             AngularVelocity = axis.normalized * (angleDeg * Mathf.Deg2Rad / dt);
         }
 
-        // 補間の始点は「このフレームの直前の姿勢」。prev* を上書きする前に控える。
-        lerpFromPosition = prevPosition;
-        lerpFromRotation = prevRotation;
-
-        prevMatrix = t.localToWorldMatrix;
-        prevPosition = t.position;
-        prevRotation = t.rotation;
+        prevMatrix = Matrix4x4.TRS(simPosition, simRotation, t.lossyScale);
+        prevPosition = simPosition;
+        prevRotation = simRotation;
     }
 
     /// <summary>容器がテレポートしたことを伝える。差分を運動として扱わない。</summary>
     public void ResyncMotion()
     {
         var t = Container;
+        simPosition = t.position;
+        simRotation = t.rotation;
         prevMatrix = t.localToWorldMatrix;
         prevPosition = t.position;
         prevRotation = t.rotation;
@@ -443,12 +475,13 @@ public class FluidBoundary : MonoBehaviour
     public Matrix4x4 InterpolatedMatrix(float t)
     {
         var tr = Container;
-        Vector3 p = Vector3.Lerp(lerpFromPosition, tr.position, t);
-        Quaternion q = Quaternion.Slerp(lerpFromRotation, tr.rotation, t);
+        // 流体が見る姿勢（平滑化済み）へ向かって補間する。
+        Vector3 p = Vector3.Lerp(lerpFromPosition, simPosition, t);
+        Quaternion q = Quaternion.Slerp(lerpFromRotation, simRotation, t);
         return Matrix4x4.TRS(p, q, tr.lossyScale);
     }
 
-    public Vector3 InterpolatedCenter(float t) => Vector3.Lerp(lerpFromPosition, Container.position, t);
+    public Vector3 InterpolatedCenter(float t) => Vector3.Lerp(lerpFromPosition, simPosition, t);
 
     /// <summary>フレーム開始姿勢から u まで進めたときの剛体変換。
     /// 容器が 1 フレームで「サブステップでは解けない量」動いたときに、

@@ -66,6 +66,7 @@ public static class CarrySetupFluidPot
         var core = pot.AddComponent<FluidCore>();
         core.fluidCompute = AssetDatabase.LoadAssetAtPath<ComputeShader>(CorePath);
         core.particleCount = 16384;
+        core.maxSpeed = 5f;          // 跳ね上がる高さの上限
         core.minSubSteps = 6;
         core.maxSubSteps = 20;       // CFL を満たせない急な動きで発散するのを防ぐ (実測)        // Phase 12: 品質を保てる下限 (実測)
         core.viscosity = 2.8f;          // dt 比例化後の値 (Phase 6 と同じ効き)
@@ -76,7 +77,7 @@ public static class CarrySetupFluidPot
         core.groundY = 0f;              // Floor の上面 (y=0)
         core.lateralSpread = 0.8f;    // 地面の水たまりが見える範囲     // 注ぎ出した液体が横へ広がる余地 (Phase 7 実測)
         core.groundMargin = 0.12f;
-        core.topMargin = 0.18f;
+        core.topMargin = 1.2f;      // 跳ね上がった液体が天井で潰されない高さ
         core.rimOpeningHeight = 0.08f;
 
         var surface = pot.AddComponent<FluidSurface>();
@@ -95,6 +96,7 @@ public static class CarrySetupFluidPot
         var gaugeGo = new GameObject("PotionGauge");
         var gauge = gaugeGo.AddComponent<PotionGaugeUI>();
         gauge.potionSourceBehaviour = core;
+        if (gauge != null) gauge.fillColor = new Color(0.20f, 0.52f, 1.00f, 0.95f);
 
         EditorSceneManager.MarkSceneDirty(scene);
         System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(ScenePath));
