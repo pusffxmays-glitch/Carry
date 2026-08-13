@@ -74,6 +74,8 @@ public class FluidBoundary : MonoBehaviour
     public float simMaxSpeed = 3.5f;
     [Tooltip("流体が見る容器の最大角速度 (deg/s)。旋回 110 を少し上回る値。")]
     public float simMaxAngularSpeed = 150f;
+    [Tooltip("流体が見る容器の最大並進加速度 (m/s^2)。ジャンプの着地のような瞬間停止を和らげる。実際に壺を持つ腕にも同じだけの余裕がある。0 で無効。")]
+    public float simMaxAccel = 70f;
     [Tooltip("実際の姿勢との位置ずれがこれを超えたらテレポートとみなして追いつく (m)。")]
     public float teleportDistance = 0.6f;
     [Tooltip("実際の姿勢との角度ずれがこれを超えたらテレポートとみなして追いつく (deg)。")]
@@ -103,6 +105,7 @@ public class FluidBoundary : MonoBehaviour
     // 流体が見る容器の姿勢（速度制限つきで実 Transform を追う）
     Quaternion simRotation = Quaternion.identity;
     Vector3 simPosition;
+    Vector3 simVelocity;
     float containerScale = 1f;
 
     public float ContainerScale => containerScale;
@@ -431,12 +434,24 @@ public class FluidBoundary : MonoBehaviour
             // 瞬間移動した分は補間しない
             lerpFromPosition = simPosition;
             lerpFromRotation = simRotation;
+            simVelocity = Vector3.zero;
         }
         else
         {
             // 速度制限つきで追従する。ここで削られるのは、運搬ではありえない
             // 一瞬の跳ねだけ。通常の歩行・走行・旋回は上限に届かない。
-            simPosition = Vector3.MoveTowards(simPosition, t.position, simMaxSpeed * dt);
+            //
+            // さらに **加速度も制限する**。ジャンプの着地で容器が瞬間停止すると、
+            // 落下中の液体だけが速度を持ったまま底に叩きつけられ、噴水のように
+            // 噴き上がる（実測: 着地で 97% が空中へ出た）。
+            // 実際には壺を持つ腕が衝撃を吸収するので、瞬間停止はしない。
+            Vector3 target = Vector3.MoveTowards(simPosition, t.position, simMaxSpeed * dt);
+            Vector3 desiredVel = (target - simPosition) / dt;
+            if (simMaxAccel > 0f)
+                simVelocity = Vector3.MoveTowards(simVelocity, desiredVel, simMaxAccel * dt);
+            else
+                simVelocity = desiredVel;
+            simPosition += simVelocity * dt;
             simRotation = Quaternion.RotateTowards(simRotation, t.rotation, simMaxAngularSpeed * dt);
 
             LinearVelocity = (simPosition - lerpFromPosition) / dt;
@@ -458,6 +473,7 @@ public class FluidBoundary : MonoBehaviour
         var t = Container;
         simPosition = t.position;
         simRotation = t.rotation;
+        simVelocity = Vector3.zero;
         prevMatrix = t.localToWorldMatrix;
         prevPosition = t.position;
         prevRotation = t.rotation;

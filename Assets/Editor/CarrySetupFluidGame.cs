@@ -52,7 +52,7 @@ public static class CarrySetupFluidGame
         core.lateralSpread = 0.8f;    // 地面の水たまりが見える範囲
         core.groundMargin = 0.12f;
         core.topMargin = 1.2f;      // 跳ね上がった液体が天井で潰されない高さ
-        core.groundLifetime = 45f;
+        core.groundLifetime = 10f;
         core.escapeAboveRim = true;        // ふちを越えた液体は戻さず地面へ
         core.escapeMarginSpacings = 2f;     // こぼれた液体を地面に残す
 

@@ -93,7 +93,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Tooltip("Rim Opening 領域の高さ (m)。粒子間隔の 2〜3 倍程度。ここを通過した粒子だけが正常な Overflow として数えられる (§11)。")]
     public float rimOpeningHeight = 0.08f;
     [Tooltip("地面に留まった液体が Retired（回収不可能）になるまでの時間 (s)。0 で無効（永久に残る）。Mass は消えず RetiredMass へ移る (§16/§20)。")]
-    public float groundLifetime = 45f;
+    public float groundLifetime = 10f;
     [Tooltip("壺のふちを越えた液体を壺へ戻さず、そのまま地面へ落とす。跳ね上がった液体が口へ落ち戻って残量が減らないのを防ぐ。")]
     public bool escapeAboveRim = true;
     [Tooltip("リム面からこの高さ(粒子間隔の倍数)を超えたら「ふちを越えた」とみなす。液面の盛り上がりを誤検出しない程度に取る。")]
@@ -903,6 +903,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetVector("RetiredPark", regionCenter + Vector3.down * (regionSize.y * 0.5f + 50f));
         fluidCompute.SetFloat("WallTolerance", boundary.mode == FluidBoundary.Mode.PotProfile
             ? spacing * 0.5f / Mathf.Max(1e-6f, boundary.ContainerScale) : 0f);
+        fluidCompute.SetFloat("FloorTolerance", boundary.mode == FluidBoundary.Mode.PotProfile && boundary.Profile != null
+            ? (boundary.Profile.RimY - boundary.Profile.FloorY) * 0.35f : 0f);
     }
 
     /// <summary>SafetyCorrection の発動数を GPU から読み戻す（Debug 用、同期読み取り）。</summary>

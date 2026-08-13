@@ -188,6 +188,8 @@ float GroundBandHeight;   // 地面から上へこの高さまでを Ground 領�
 // 壁際の粒子は中心が R(y) をわずかに超えた位置で静止しうる。これを「壁抜け」と
 // 数えないための許容幅（local 単位、粒子半径程度）。
 float WallTolerance;
+// 床より下をどこまで「まだ壺の中」とみなすか。着地の衝撃で沈む分の許容。
+float FloorTolerance;
 
 // ============================================================================ SPH kernels
 static const float PI = 3.14159265359;
@@ -689,7 +691,10 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         // 地面に着いたらその場に残す。
         if (p.y <= GroundY + GroundBandHeight)
         {
-            p.y = GroundY;
+            // 地面にぴったり (y = GroundY) 揃えると、全粒子が完全な同一平面に並び、
+            // 密度場が厚みゼロの板になって等値面に線状のノイズが出る。
+            // 実際の粒子は床の上に「乗る」ので、中心は半径ぶん上にある。
+            p.y = max(p.y, GroundY + GroundBandHeight * 0.35);
             Positions[i] = p;
             Velocities[i] = float3(0, 0, 0);
             RetiredFlags[i] = 2u;
@@ -756,8 +761,16 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         float3 lpE = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
         float rE = length(lpE.xz);
         float rIn = PotRadiusAt(clamp(lpE.y, PotFloorY, PotRimY));
-        bool outsidePot = (lpE.y > PotRimY + EscapeMargin)
-                       || (rE > rIn + WallTolerance + EscapeMargin);
+        // 液体が壺から出られるのは **開口部（リム）だけ**。
+        //  * リム付近より上にいて、かつ壺の内側半径より外 → こぼれた
+        //  * 壺の口の真上へ跳ね上がっただけ（半径が内側） → 戻ってよい（ユーザー指示）
+        //  * 壺の胴や底で壁の外へはみ出した → こぼれではなく「壁の貫通」。
+        //    これを脱出扱いにすると、ジャンプの着地で底へ押し付けられた液体が
+        //    一斉に失われる（実測: ジャンプでほぼ全量が消えた）。
+        //    壁の貫通は SafetyCorrection の担当。
+        bool nearOrAboveLip = lpE.y > PotRimY - EscapeMargin;
+        bool outsideRadius  = rE > rIn + WallTolerance + EscapeMargin;
+        bool outsidePot = nearOrAboveLip && outsideRadius;
         if (outsidePot)
         {
             RetiredFlags[i] = 3u;
@@ -884,7 +897,11 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
         float3 lp = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
         float r = length(lp.xz);
 
-        if (lp.y >= PotFloorY && lp.y <= PotRimY && r <= PotRadiusAt(lp.y) + WallTolerance)
+        // 下限は床ちょうどではなく少し下まで見る。着地の衝撃で液体は一瞬 床を
+        // 突き抜けるが、それは「壺の外」ではない（SafetyCorrection が押し戻す）。
+        // 床ちょうどで切ると、ジャンプの着地でゲージが一瞬ゼロまで落ちる
+        // （実測: 着地の瞬間だけ PotionVolume が 0.99 -> 0.03 になった）。
+        if (lp.y >= PotFloorY - FloorTolerance && lp.y <= PotRimY && r <= PotRadiusAt(lp.y) + WallTolerance)
         {
             region = REGION_INSIDE;
             passedRim = false;                     // 中に戻ったら通過履歴はリセット
