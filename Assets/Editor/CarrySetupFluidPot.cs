@@ -61,10 +61,14 @@ public static class CarrySetupFluidPot
         bnd.mode = FluidBoundary.Mode.PotProfile;
         bnd.meshSource = pot.transform;
         bnd.container = pot.transform;
+        bnd.rimFadePerKernel = 1.0f;    // 開口端の境界斥力フェード (OI-1 対策1)
 
         var core = pot.AddComponent<FluidCore>();
         core.fluidCompute = AssetDatabase.LoadAssetAtPath<ComputeShader>(CorePath);
         core.particleCount = 16384;
+        core.viscosity = 2.8f;          // dt 比例化後の値 (Phase 6 と同じ効き)
+        core.boundaryViscosity = 0.55f; // 剛体回転比 0.844 (実測)
+        core.boundaryPressureScale = 1.6f;  // 壁の貫通 465 -> 309 個 (実測)
         core.fillFraction = 0.45f;
         core.simPadding = 0.45f;
         core.groundY = 0f;              // Floor の上面 (y=0)
@@ -83,6 +87,12 @@ public static class CarrySetupFluidPot
 
         var rig = pot.AddComponent<FluidCoreTestRig>();
         rig.restPosition = new Vector3(0f, 0.95f, 0f);
+
+        // §17: PotionVolume は Fluid の状態から導かれる。ゲージは FluidCore を
+        // IPotionVolumeSource として参照するだけで、逆向きに書き込む経路は無い。
+        var gaugeGo = new GameObject("PotionGauge");
+        var gauge = gaugeGo.AddComponent<PotionGaugeUI>();
+        gauge.potionSourceBehaviour = core;
 
         EditorSceneManager.MarkSceneDirty(scene);
         System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(ScenePath));

@@ -31,8 +31,10 @@ public class FluidBoundary : MonoBehaviour
     public Transform container;
     [Tooltip("壁シェルの厚み。カーネル半径の倍数。1 未満だと液体がカーネルの穴から染み出す。")]
     [Range(1f, 2.5f)] public float shellThicknessPerKernel = 1.15f;
-    [Tooltip("Akinci psi の開口端クランプ。壁内部の sum に対してこの倍率までしか psi を上げない。1 に近いほど強くクランプする。リムで液体が堰き止められるのを防ぐ。")]
+    [Tooltip("Akinci psi の開口端クランプ。壁内部の sum に対してこの倍率までしか psi を上げない。1 に近いほど強くクランプする。")]
     [Range(1.05f, 4f)] public float edgeVolumeClamp = 1.25f;
+    [Tooltip("リム(開口端)から下へ、この本数分のカーネル半径だけ境界の密度寄与をフェードさせる。0 で無効。壁の斥力が開口部で液体を持ち上げ、実際のリムより高い堰を作るのを防ぐ (OI-1)。")]
+    [Range(0f, 2.5f)] public float rimFadePerKernel = 1.0f;
 
     // ---- 生成結果（容器ローカル） ----
     public Vector3[] LocalPositions { get; private set; }
@@ -47,6 +49,22 @@ public class FluidBoundary : MonoBehaviour
     // ---- 運動 ----
     public Vector3 LinearVelocity { get; private set; }
     public Vector3 AngularVelocity { get; private set; }
+
+    // §21 テレポート検出。
+    // 容器が 1 フレームで運搬中にはあり得ない距離/角度を飛んだら、それは
+    // 「運動」ではなく「瞬間移動」である。差分をそのまま速度にすると、
+    // 境界粒子が数十 m/s で動いたことになり中身が吹き飛ぶ。
+    // 実際に起きた例: ゲーム開始直後、Carry_Pot がシリアライズ位置から
+    // GoblinCarryRig が計算する手の中央へ 1 フレームで移動し、液体が飛び散った。
+    [Header("Teleport detection (§21)")]
+    [Tooltip("1 フレームの移動速度がこれを超えたらテレポートとみなす (m/s)。運搬中の壺の速度より十分大きく取る。")]
+    public float teleportSpeed = 12f;
+    [Tooltip("1 フレームの角速度がこれを超えたらテレポートとみなす (deg/s)。")]
+    public float teleportAngularSpeed = 900f;
+    /// <summary>直近の SampleMotion でテレポートを検出したか。</summary>
+    public bool TeleportedThisStep { get; private set; }
+    /// <summary>テレポート前の姿勢から後の姿勢への剛体変換。中身をそのまま連れて行くために使う。</summary>
+    public Matrix4x4 TeleportDelta { get; private set; } = Matrix4x4.identity;
     public Vector3 CenterWorld => Container.position;
     public Transform Container => container != null ? container : transform;
 
@@ -66,7 +84,7 @@ public class FluidBoundary : MonoBehaviour
         int layers = Mathf.Max(2, Mathf.CeilToInt(shell / spacingWorld));
 
         if (mode == Mode.Box) BuildBox(spacingWorld, layers);
-        else BuildPot(spacingWorld, layers);
+        else BuildPot(spacingWorld, layers, kernelRadiusWorld);
 
         ComputeVolumes(kernelRadiusWorld);
         ResyncMotion();
@@ -117,7 +135,7 @@ public class FluidBoundary : MonoBehaviour
 
     // 壺の実測内径プロファイルから、内壁・底のシェルを作る。
     // リム高さで打ち切るのが Open Boundary (§22)。
-    void BuildPot(float spacing, int layers)
+    void BuildPot(float spacing, int layers, float kernelRadiusWorld)
     {
         var mf = (meshSource != null ? meshSource : Container).GetComponentInChildren<MeshFilter>();
         Profile = PotInteriorProfile.FromMesh(mf != null ? mf.sharedMesh : null);
@@ -128,11 +146,23 @@ public class FluidBoundary : MonoBehaviour
 
         // --- 内壁シェル: 高さ方向に走査し、各高さで R(y) から外側へ layers 枚 ---
         int rows = Mathf.Max(2, Mathf.CeilToInt((Profile.RimY - Profile.FloorY) / s));
+        // リム上端では層数を 1 まで絞る。ここで層を外側へ並べたままにすると、
+        // リム高さに **水平な環状の棚** ができ、その棚と、棚から h だけ上まで届く斥力が
+        // 合わさって「実際のリムより高い堰」になる。実測ではこの堰のせいで液面が
+        // 最低リム点より +0.118m 高いところで静止し、傾け続けても流れ出さなかった。
+        // 実際の壺の縁も水平な棚ではなく丸い縁なので、テーパーの方が形状としても近い。
+        float taperY = Profile.RimY - kernelRadiusWorld / containerScale;
         for (int iy = 0; iy <= rows; iy++)
         {
             float y = Mathf.Lerp(Profile.FloorY, Profile.RimY, iy / (float)rows);
             float rIn = Profile.RadiusAt(y);
-            for (int l = 0; l < layers; l++)
+            int layersHere = layers;
+            if (y > taperY && Profile.RimY > taperY)
+            {
+                float t = Mathf.InverseLerp(taperY, Profile.RimY, y);
+                layersHere = Mathf.Max(1, Mathf.RoundToInt(Mathf.Lerp(layers, 1f, t)));
+            }
+            for (int l = 0; l < layersHere; l++)
             {
                 float r = rIn + (l + 0.5f) * s;
                 int n = Mathf.Max(8, Mathf.RoundToInt(2f * Mathf.PI * r / s));
@@ -220,16 +250,39 @@ public class FluidBoundary : MonoBehaviour
         float bulkSum = sorted[Mathf.Clamp(Mathf.RoundToInt(0.5f * (n - 1)), 0, n - 1)];
         float minSum = bulkSum / Mathf.Max(1.0001f, edgeVolumeClamp);
 
+        // 開口端(リム)のフェード (OI-1)。
+        // 壁は密度計算に参加することで斥力を生むが、**開口部でもそれが働く**ため、
+        // リムを越えようとする液体が持ち上げられ、実際のリムより高い位置に
+        // 「越えられない堰」ができる。実測では堰の高さが boundaryPressureScale に
+        // 正比例した（1.0 -> 0.124m / 1.6 -> 0.138m / 2.0 -> 0.168m）ので、
+        // 堰の正体は壁の斥力そのものである。
+        // 壁としての形も、リムから離れた場所の斥力も変えずに、
+        // 開口端の帯だけ寄与を落とす。
+        float fadeBand = 0f;
+        if (Profile != null && rimFadePerKernel > 0f)
+            fadeBand = rimFadePerKernel * h / Mathf.Max(1e-6f, containerScale);
+
         float psiMin = float.MaxValue, psiMax = 0f;
-        int clamped = 0;
+        int clamped = 0, faded = 0;
         for (int i = 0; i < n; i++)
         {
             if (sums[i] < minSum) clamped++;
-            Volumes[i] = 1f / Mathf.Max(sums[i], Mathf.Max(minSum, 1e-6f));
+            float psi = 1f / Mathf.Max(sums[i], Mathf.Max(minSum, 1e-6f));
+            if (fadeBand > 0f)
+            {
+                float d = Profile.RimY - LocalPositions[i].y;      // リム面からの深さ
+                if (d < fadeBand)
+                {
+                    float t = Mathf.Clamp01(d / fadeBand);
+                    psi *= t * t * (3f - 2f * t);                  // smoothstep
+                    faded++;
+                }
+            }
+            Volumes[i] = psi;
             psiMin = Mathf.Min(psiMin, Volumes[i]); psiMax = Mathf.Max(psiMax, Volumes[i]);
         }
         Debug.Log($"FluidBoundary: psi bulk={1f / bulkSum:F6} min={psiMin:F6} max={psiMax:F6} " +
-                  $"（開口端でクランプした粒子 {clamped}/{n}）", this);
+                  $"（クランプ {clamped}/{n}, リムフェード {faded}/{n}, 帯 {fadeBand:F4} local）", this);
     }
 
     static float Poly6(float r2, float h)
@@ -317,19 +370,38 @@ public class FluidBoundary : MonoBehaviour
     public void SampleMotion(float dt)
     {
         var t = Container;
+        TeleportedThisStep = false;
+        TeleportDelta = Matrix4x4.identity;
+
         if (!motionPrimed || dt <= 0f)
         {
             ResyncMotion();
             return;
         }
 
-        LinearVelocity = (t.position - prevPosition) / dt;
-
+        Vector3 dPos = t.position - prevPosition;
         Quaternion dq = t.rotation * Quaternion.Inverse(prevRotation);
         dq.ToAngleAxis(out float angleDeg, out Vector3 axis);
         if (float.IsNaN(axis.x) || axis.sqrMagnitude < 1e-8f) { axis = Vector3.up; angleDeg = 0f; }
         if (angleDeg > 180f) angleDeg -= 360f;
-        AngularVelocity = axis.normalized * (angleDeg * Mathf.Deg2Rad / dt);
+
+        // テレポートなら「速度」として扱わない。中身は剛体変換でそのまま連れて行き、
+        // 相対的な運動は一切与えない（そうしないと中身だけ置き去りになり、
+        // 次のフレームには壺の外にある＝全量こぼれた扱いになる）。
+        bool jumped = dPos.magnitude / dt > teleportSpeed
+                   || Mathf.Abs(angleDeg) / dt > teleportAngularSpeed;
+        if (jumped)
+        {
+            TeleportDelta = t.localToWorldMatrix * prevMatrix.inverse;
+            TeleportedThisStep = true;
+            LinearVelocity = Vector3.zero;
+            AngularVelocity = Vector3.zero;
+        }
+        else
+        {
+            LinearVelocity = dPos / dt;
+            AngularVelocity = axis.normalized * (angleDeg * Mathf.Deg2Rad / dt);
+        }
 
         prevMatrix = t.localToWorldMatrix;
         prevPosition = t.position;

@@ -32,6 +32,7 @@
 #pragma kernel ApplyViscosityTension
 #pragma kernel Finalize
 #pragma kernel ClassifyRegions
+#pragma kernel TeleportFluid
 
 #define THREADS 256
 #define SCAN_BLOCK 256
@@ -116,6 +117,7 @@ float ArtificialPressureQ;
 float MaxDeltaP;           // 1反復あたりの位置補正上限
 
 float ViscosityXSPH;
+float ViscosityRefStep;    // 粘性係数の基準時間刻み。ブレンド率 = 係数 * dt / これ
 float BoundaryViscosity;   // §2: 接線方向の運動量伝達。法線方向(圧力)とは直交する
 float CohesionStrength;    // §9 Akinci
 float CurvatureStrength;   // §9 Akinci
@@ -151,10 +153,23 @@ RWStructuredBuffer<uint> SafetyCounters;   // [0] = 発動粒子数
 // ここは「観測」しかしない。粒子の生成も移動も速度変更も一切行わない。
 RWStructuredBuffer<uint> RegionFlags;
 RWStructuredBuffer<uint> RegionCounters;
-// [0]=Inside [1]=RimOpening [2]=Airborne [3]=Ground [4]=正常Overflow遷移 [5]=貫通(異常)
+// [0]=Inside [1]=RimOpening [2]=Airborne [3]=Ground [4]=Retired
+// [5]=正常Overflow遷移 [6]=貫通(異常)
+//
+// Retired (§16/§20): 地面に一定時間留まった粒子は「ゲーム世界から消滅した」扱いになる。
+// 消滅の実行は Finalize が行い（位置を動かすのは物理カーネルの仕事）、
+// ここでは観測して数えるだけ。
+RWStructuredBuffer<float> Ages;            // 地面に留まっている時間 (s)
+RWStructuredBuffer<uint>  RetiredFlags;    // 1 = Retired
+StructuredBuffer<uint>    RetiredFlagsIn;  // 分類カーネル用の読み取り専用エイリアス
+float  GroundLifetime;                     // これを超えたら Retired
+float3 RetiredPark;                        // Retired 粒子の待避先（領域外）
 float RimOpeningHeight;
 float GroundY;
 float GroundBandHeight;   // 地面から上へこの高さまでを Ground 領域とみなす (§20)
+// 壁際の粒子は中心が R(y) をわずかに超えた位置で静止しうる。これを「壁抜け」と
+// 数えないための許容幅（local 単位、粒子半径程度）。
+float WallTolerance;
 
 // ============================================================================ SPH kernels
 static const float PI = 3.14159265359;
@@ -191,6 +206,20 @@ float CohesionKernel(float r, float h)
 int3 CellCoord(float3 p) { return (int3)floor((p - GridOrigin) / CellSize); }
 bool CellValid(int3 c) { return all(c >= 0) && all((uint3)c < GridSize); }
 uint CellIndex(int3 c) { return (uint)c.x + (uint)c.y * GridSize.x + (uint)c.z * GridSize.x * GridSize.y; }
+
+// ============================================================================ teleport (§21)
+// 容器が瞬間移動したときに、中身を同じ剛体変換で連れて行く。
+// 相対速度は与えない（速度はワールドの回転ぶんだけ向きを変える）。
+float4x4 TeleportMatrix;
+
+[numthreads(THREADS, 1, 1)]
+void TeleportFluid(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+    Positions[i] = mul(TeleportMatrix, float4(Positions[i], 1.0)).xyz;
+    Velocities[i] = mul((float3x3)TeleportMatrix, Velocities[i]);
+}
 
 // ============================================================================ moving boundary
 [numthreads(THREADS, 1, 1)]
@@ -548,7 +577,20 @@ void ApplyViscosityTension(uint3 id : SV_DispatchThreadID)
     float taMax = 50.0;
     if (ta > taMax) tensionAccel *= taMax / ta;
 
-    float3 v = vi + ViscosityXSPH * xsph + BoundaryViscosity * boundaryDrag + tensionAccel * DeltaTime;
+    // 粘性は「周囲の速度へ何%寄せるか」というブレンドなので、そのままだと
+    // **適用回数（サブステップ数）に比例して効きが変わる**。サブステップ数は CFL で
+    // 2〜10 の間を動くため、容器を速く動かすほど中身が粘る、という物理的にあり得ない
+    // 挙動になっていた。さらに 10 サブステップでは壁際の速度が 1 フレームで
+    // 0.45^10 ≒ 0.0003 倍になり、リムを越える流出層（厚み ≒ h）ごと壁に貼り付いて
+    // 液体が溢れ出せなかった（Phase 7 実測: 62°で残存 90%、液面が最低リム点より +0.153m）。
+    //
+    // ブレンド率を dt に比例させ、1 フレームあたりの粘性の総量をサブステップ数から
+    // 独立させる。表面張力が加速度として dt を掛けているのと同じ扱いに揃える。
+    float tscale = DeltaTime / max(ViscosityRefStep, 1e-6);
+    float kVisc = min(ViscosityXSPH * tscale, 0.9);      // 1 を超えると行き過ぎて発散する
+    float kBnd  = min(BoundaryViscosity * tscale, 0.9);
+
+    float3 v = vi + kVisc * xsph + kBnd * boundaryDrag + tensionAccel * DeltaTime;
 
     if (any(isnan(v)) || any(isinf(v))) v = float3(0, 0, 0);
     float sp = length(v);
@@ -573,6 +615,18 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     uint i = id.x;
     if (i >= FluidCount) return;
 
+    // --- Retired (§16/§20) ---
+    // 地面に GroundLifetime 以上留まった粒子は「回収不可能」として世界から取り除く。
+    // 領域外の待避先へ移し、速度を 0 にする。CellCoord が領域外になるので近傍探索にも
+    // 入らず、密度場にも寄与しない（＝物理的にも視覚的にも存在しなくなる）。
+    // Mass は消えるのではなく RetiredMass へ移る。収支は常に一定 (§16)。
+    if (RetiredFlags[i] != 0)
+    {
+        Positions[i] = RetiredPark;
+        Velocities[i] = float3(0, 0, 0);
+        return;
+    }
+
     float3 p = PredictedPositions[i];
     float3 v = Velocities[i];
     if (any(isnan(p)) || any(isinf(p))) { p = clamp(Positions[i], BoundsMin, BoundsMax); v = float3(0, 0, 0); }
@@ -584,6 +638,17 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         p.y = GroundY;
         if (v.y < 0.0) v.y = -v.y * BoundsRestitution;
         v.xz *= (1.0 - BoundsFriction);
+    }
+
+    // 領域の水平端に達した粒子は Retired にする (§16)。
+    // 壺の中の液体がここへ到達することはない。到達しうるのは既にこぼれた液体だけ。
+    // これをしないと、ゴブリンが歩いて領域が動いたとき、地面の水たまりが
+    // 見えない壁に沿って引きずられて一緒に付いてくる。
+    // Mass は消えるのではなく RetiredMass へ移るので収支は保たれる。
+    if (GroundLifetime > 0.0 &&
+        (p.x <= BoundsMin.x || p.x >= BoundsMax.x || p.z <= BoundsMin.z || p.z >= BoundsMax.z))
+    {
+        RetiredFlags[i] = 1;
     }
 
     [unroll] for (int a = 0; a < 3; a++)
@@ -630,6 +695,21 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         }
     }
 
+    // 地面に留まっている時間を数える。地面から離れたらリセットする。
+    if (GroundLifetime > 0.0)
+    {
+        if (p.y <= GroundY + GroundBandHeight)
+        {
+            float age = Ages[i] + DeltaTime;
+            Ages[i] = age;
+            if (age >= GroundLifetime) RetiredFlags[i] = 1;
+        }
+        else
+        {
+            Ages[i] = 0.0;
+        }
+    }
+
     Positions[i] = p;
     Velocities[i] = v;
 }
@@ -649,6 +729,7 @@ void Finalize(uint3 id : SV_DispatchThreadID)
 #define REGION_RIM     1u
 #define REGION_AIR     2u
 #define REGION_GROUND  3u
+#define REGION_RETIRED 4u
 #define FLAG_PASSED_RIM 8u
 #define FLAG_EVER_OUT  16u    // 一度でも壺の外へ出た。戻っても消さない（重複計上を防ぐラッチ）
 
@@ -665,6 +746,14 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
     bool everOut   = (prev & FLAG_EVER_OUT) != 0u;
 
     uint region;
+    if (RetiredFlagsIn[i] != 0)
+    {
+        // 既に消滅した粒子。位置は待避先にあるので領域判定はしない。
+        uint d2;
+        InterlockedAdd(RegionCounters[REGION_RETIRED], 1, d2);
+        RegionFlags[i] = REGION_RETIRED | (prev & (FLAG_PASSED_RIM | FLAG_EVER_OUT));
+        return;
+    }
     if (p.y <= GroundY + GroundBandHeight)
     {
         region = REGION_GROUND;
@@ -674,7 +763,7 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
         float3 lp = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
         float r = length(lp.xz);
 
-        if (lp.y >= PotFloorY && lp.y <= PotRimY && r <= PotRadiusAt(lp.y))
+        if (lp.y >= PotFloorY && lp.y <= PotRimY && r <= PotRadiusAt(lp.y) + WallTolerance)
         {
             region = REGION_INSIDE;
             passedRim = false;                     // 中に戻ったら通過履歴はリセット
@@ -697,11 +786,21 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
     // 液面付近の粒子は Inside と RimOpening を何度も往復するので、遷移をそのまま数えると
     // 「溢れた量」としては読めない。粒子ごとに FLAG_EVER_OUT でラッチし、
     // **初めて外へ出たときだけ**数える。
+    //
+    // 正常/貫通の判別は「RimOpening 領域を通ったか」ではなく
+    // **リム面(local y = RimY)を越えたか**で行う。RimOpening は半径 PotRimR の
+    // 細い筒なので、勢いよく縁を越えて外へ広がる粒子は 1 フレームの間に筒の外へ出てしまい、
+    // 正常な Overflow が「貫通」として誤計上されていた（幾何判定では壁抜け 0 個なのに
+    // penetrationEvents が 988 になる、という食い違いが実測で出た）。
+    // 壁を抜けたなら local y は RimY 以下のままのはずなので、この判定で過不足なく分かれる。
     if (prevRegion == REGION_INSIDE && region != REGION_INSIDE && !everOut)
     {
         everOut = true;
-        if (region == REGION_RIM || passedRim) InterlockedAdd(RegionCounters[4], 1, dummy);   // 正常な Overflow
-        else                                   InterlockedAdd(RegionCounters[5], 1, dummy);   // 貫通 = 異常
+        float3 lpNow = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
+        if (lpNow.y > PotRimY || region == REGION_RIM || passedRim)
+            InterlockedAdd(RegionCounters[5], 1, dummy);   // 正常な Overflow
+        else
+            InterlockedAdd(RegionCounters[6], 1, dummy);   // 壁/床の貫通 = 異常
     }
 
     RegionFlags[i] = region | (passedRim ? FLAG_PASSED_RIM : 0u) | (everOut ? FLAG_EVER_OUT : 0u);

@@ -11,7 +11,7 @@ using UnityEngine;
 // ============================================================================================
 [DefaultExecutionOrder(100)]
 [RequireComponent(typeof(FluidBoundary))]
-public class FluidCore : MonoBehaviour
+public class FluidCore : MonoBehaviour, IPotionVolumeSource
 {
     [Header("Simulation")]
     public int particleCount = 16384;
@@ -23,9 +23,13 @@ public class FluidCore : MonoBehaviour
     [Header("Material")]
     [Range(1.5f, 3f)] public float kernelRadiusScale = 2f;
     [Tooltip("XSPH 粘性。水 < ポーション < シロップ (§8)。")]
-    [Range(0f, 1f)] public float viscosity = 0.28f;
+    // 0.28 は「サブステップごとに適用」前提で合わせた値だった。ブレンド率を dt 比例に
+    // したので、10 サブステップ時に同じ効きになる 2.8 が Phase 6 と同じ見え方になる。
+    [Range(0f, 8f)] public float viscosity = 2.8f;
     [Tooltip("境界粘性 (§2 の補正項)。0 = 完全スリップ、大 = ノースリップ。容器の回転が中身に伝わるかを決める。")]
-    [Range(0f, 2f)] public float boundaryViscosity = 0.55f;
+    [Range(0f, 12f)] public float boundaryViscosity = 0.55f;
+    [Tooltip("粘性係数の基準時間刻み (s)。粘性のブレンド率 = 係数 * dt / これ。サブステップ数が変わっても実効粘性が変わらないようにするための基準。")]
+    public float viscosityRefStep = 1f / 60f;
     [Tooltip("Akinci 凝集力 (§9)。")]
     public float cohesionStrength = 0.3f;
     [Tooltip("Akinci 曲率力 (§9)。表面を平滑化する主役。")]
@@ -38,7 +42,10 @@ public class FluidCore : MonoBehaviour
     [Tooltip("lambda の分母の下限。自由表面の粒子が過大な補正で射出されるのを防ぐ。")]
     [Range(0f, 1f)] public float minDenomFraction = 0.5f;
     [Tooltip("境界からの圧力押し戻しの強さ。1 = Akinci 標準。")]
-    [Range(0f, 2f)] public float boundaryPressureScale = 1f;
+    // Phase 7 実測で 1.6 を採用。1.0 -> 1.6 で壁の貫通 465 -> 309 個、
+    // リム開口の暴れ 2.15 -> 0.58 m/s。2.0 まで上げると壁の斥力が強すぎて
+    // リムの堰が高くなる（液面-堰 0.138 -> 0.168m）ので 1.6 が折り合い点。
+    [Range(0f, 3f)] public float boundaryPressureScale = 1.6f;
     [Tooltip("位置補正の緩和係数 (SOR)。これが無いと補正が行き過ぎて毎サブステップでエネルギーが注入される。")]
     [Range(0.02f, 1f)] public float solverRelaxation = 0.12f;
     [Range(0.05f, 1f)] public float maxDeltaPPerSpacing = 0.25f;
@@ -61,6 +68,8 @@ public class FluidCore : MonoBehaviour
     public float topMargin = 0.18f;
     [Tooltip("Rim Opening 領域の高さ (m)。粒子間隔の 2〜3 倍程度。ここを通過した粒子だけが正常な Overflow として数えられる (§11)。")]
     public float rimOpeningHeight = 0.08f;
+    [Tooltip("地面に留まった液体が Retired（回収不可能）になるまでの時間 (s)。0 で無効。Mass は消えず RetiredMass へ移る (§16/§20)。")]
+    public float groundLifetime = 8f;
     [Range(0f, 0.5f)] public float boundsRestitution = 0.02f;
     [Range(0f, 1f)] public float boundsFriction = 0.15f;
 
@@ -93,12 +102,28 @@ public class FluidCore : MonoBehaviour
     public int RimCount { get; private set; }
     public int AirborneCount { get; private set; }
     public int GroundCount { get; private set; }
+    /// <summary>ゲーム世界から取り除かれた粒子数 (§16 RetiredMass)。</summary>
+    public int RetiredCount { get; private set; }
     /// <summary>Rim Opening を通って外へ出た粒子の累計（正常な Overflow）。</summary>
     public int OverflowEvents { get; private set; }
     /// <summary>Rim を通らずに外へ出た粒子の累計（壁抜け/底抜け = 異常）。</summary>
     public int PenetrationEvents { get; private set; }
-    /// <summary>壺内に残っている液量の比 (0..1)。粒子数の実測から導かれる (§17)。</summary>
-    public float FillFraction01 => fluidCount > 0 ? Mathf.Clamp01(InsideCount / (float)fluidCount) : 0f;
+    // ---- Fluid Mass (§16) ----
+    // 粒子は全て同じ質量なので Mass = 個数 x ParticleMass。
+    // どれも「観測から導かれる量」であり、独立に書ける変数ではない。
+    public float ParticleMassValue => particleVolume * restDensity;
+    public float PotMass => InsideCount * ParticleMassValue;
+    public float AirborneMass => (RimCount + AirborneCount) * ParticleMassValue;
+    public float GroundMass => GroundCount * ParticleMassValue;
+    public float RetiredMass => RetiredCount * ParticleMassValue;
+    public float InitialTotalMass => fluidCount * ParticleMassValue;
+    public float TotalMass => PotMass + AirborneMass + GroundMass + RetiredMass;
+    /// <summary>収支誤差。分類漏れがあると 0 にならない (§16 の Debug 検証)。</summary>
+    public int MassBalanceError => fluidCount - (InsideCount + RimCount + AirborneCount + GroundCount + RetiredCount);
+
+    /// <summary>§17: PotionVolume (0..1) = PotMass / InitialTotalMass。
+    /// 経路は Fluid -> PotMass -> PotionVolume の一方向だけ。逆方向は存在しない。</summary>
+    public float FillFraction01 => InitialTotalMass > 0f ? Mathf.Clamp01(PotMass / InitialTotalMass) : 0f;
     public FluidBoundary Boundary => boundary;
     /// <summary>流体が存在しうる World 空間の領域。容器に追従する。</summary>
     public Bounds SimBounds => new Bounds(regionCenter, regionSize);
@@ -109,7 +134,7 @@ public class FluidCore : MonoBehaviour
     GraphicsBuffer boundaryLocal, boundaryPositions, boundaryVelocities, boundaryVolumes;
     GraphicsBuffer sortPositions, cellCounts, cellStart, cellCursor, blockSums, sortedIndices;
     GraphicsBuffer potProfile, safetyCounters;
-    GraphicsBuffer regionFlags, regionCounters;
+    GraphicsBuffer regionFlags, regionCounters, ages, retiredFlags;
     uint[] safetyRead = new uint[4];
     uint[] regionRead = new uint[8];
 
@@ -126,6 +151,7 @@ public class FluidCore : MonoBehaviour
 
     int kUpdateBoundary, kClearCounts, kBuildSortPos, kCount, kScanLocal, kScanBlocks, kScanAdd, kScatter;
     int kIntegrate, kDensityLambda, kDeltaP, kApplyDeltaP, kVelocity, kNormals, kViscTension, kFinalize, kClassify;
+    int kTeleport;
 
     const int Threads = 256;
     const int ScanBlock = 256;
@@ -162,6 +188,7 @@ public class FluidCore : MonoBehaviour
         kViscTension = fluidCompute.FindKernel("ApplyViscosityTension");
         kFinalize = fluidCompute.FindKernel("Finalize");
         kClassify = fluidCompute.FindKernel("ClassifyRegions");
+        kTeleport = fluidCompute.FindKernel("TeleportFluid");
 
         fluidCount = Mathf.Max(Threads, particleCount);
         ComputeScales();
@@ -335,6 +362,12 @@ public class FluidCore : MonoBehaviour
         regionCounters?.Release();
         regionCounters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 8, sizeof(uint));
 
+        ages?.Release(); retiredFlags?.Release();
+        ages = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount, sizeof(float));
+        retiredFlags = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount, sizeof(uint));
+        ages.SetData(new float[fluidCount]);
+        retiredFlags.SetData(new uint[fluidCount]);
+
         potProfile?.Release();
         if (boundary.mode == FluidBoundary.Mode.PotProfile && boundary.Profile != null)
         {
@@ -439,6 +472,8 @@ public class FluidCore : MonoBehaviour
         safetyCounters?.Release(); safetyCounters = null;
         regionFlags?.Release(); regionFlags = null;
         regionCounters?.Release(); regionCounters = null;
+        ages?.Release(); ages = null;
+        retiredFlags?.Release(); retiredFlags = null;
     }
 
     void LateUpdate() { if (autoStep) Step(Time.deltaTime); }
@@ -450,6 +485,18 @@ public class FluidCore : MonoBehaviour
         dt = Mathf.Min(dt, 1f / 20f);
 
         boundary.SampleMotion(dt);
+
+        // §21: 容器が瞬間移動したら、中身を同じ剛体変換で連れて行く。
+        // これをしないと液体だけ元の場所に取り残され、次のフレームには
+        // 「壺の外にある」＝全量こぼれた、と判定されてしまう。
+        if (boundary.TeleportedThisStep)
+        {
+            fluidCompute.SetMatrix("TeleportMatrix", boundary.TeleportDelta);
+            fluidCompute.SetInt("FluidCount", fluidCount);
+            Bind(kTeleport, ("Positions", positions), ("Velocities", velocities));
+            fluidCompute.Dispatch(kTeleport, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
+        }
+
         UpdateGridOrigin();
 
         // §3 CFL: 壁も流体も、1 サブステップで粒子間隔の一定割合以上動かさない。
@@ -471,7 +518,8 @@ public class FluidCore : MonoBehaviour
     {
         regionCounters.SetData(new uint[8]);
         Bind(kClassify, ("PositionsIn", positions), ("RegionFlags", regionFlags),
-                        ("RegionCounters", regionCounters), ("PotProfileBuf", potProfile));
+                        ("RegionCounters", regionCounters), ("PotProfileBuf", potProfile),
+                        ("RetiredFlagsIn", retiredFlags));
         fluidCompute.Dispatch(kClassify, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
 
         regionCounters.GetData(regionRead);
@@ -479,8 +527,9 @@ public class FluidCore : MonoBehaviour
         RimCount = (int)regionRead[1];
         AirborneCount = (int)regionRead[2];
         GroundCount = (int)regionRead[3];
-        OverflowEvents += (int)regionRead[4];
-        PenetrationEvents += (int)regionRead[5];
+        RetiredCount = (int)regionRead[4];
+        OverflowEvents += (int)regionRead[5];
+        PenetrationEvents += (int)regionRead[6];
     }
 
     public void ResetOverflowCounters()
@@ -490,6 +539,9 @@ public class FluidCore : MonoBehaviour
         // これを消さないと、シード直後でも全粒子が「もう数えた」状態になり、
         // Overflow が二度と計上されない。
         regionFlags?.SetData(new uint[fluidCount]);
+        ages?.SetData(new float[fluidCount]);
+        retiredFlags?.SetData(new uint[fluidCount]);
+        RetiredCount = 0;
         regionCounters?.SetData(new uint[8]);
     }
 
@@ -577,8 +629,11 @@ public class FluidCore : MonoBehaviour
                            ("CellCountsIn", cellCounts), ("SortedIndicesIn", sortedIndices),
                            ("BoundaryVelocities", boundaryVelocities), ("BoundaryVolumes", boundaryVolumes));
 
+        // UAV: PredictedPositions / Positions / Velocities / SafetyCounters / Ages / RetiredFlags = 6。
+        // D3D11 の上限 8 に収まっている。
         Bind(kFinalize, ("PredictedPositions", predicted), ("Positions", positions), ("Velocities", velocities),
-                        ("PotProfileBuf", potProfile), ("SafetyCounters", safetyCounters));
+                        ("PotProfileBuf", potProfile), ("SafetyCounters", safetyCounters),
+                        ("Ages", ages), ("RetiredFlags", retiredFlags));
 
         fluidCompute.SetInt("FluidCount", fluidCount);
         fluidCompute.SetInt("TotalCount", totalCount);
@@ -608,6 +663,9 @@ public class FluidCore : MonoBehaviour
         fluidCompute.SetFloat("MaxDeltaP", spacing * maxDeltaPPerSpacing);
         fluidCompute.SetFloat("ViscosityXSPH", viscosity);
         fluidCompute.SetFloat("BoundaryViscosity", boundaryViscosity);
+        // 粘性のブレンド率をサブステップ数から独立させるための基準時間刻み。
+        // 係数はこの dt のときの 1 ステップ分の効きを表す。
+        fluidCompute.SetFloat("ViscosityRefStep", viscosityRefStep);
         fluidCompute.SetFloat("CohesionStrength", cohesionStrength);
         fluidCompute.SetFloat("CurvatureStrength", curvatureStrength);
         fluidCompute.SetFloat("MaxSpeed", maxSpeed);
@@ -633,9 +691,11 @@ public class FluidCore : MonoBehaviour
             fluidCompute.SetInt("PotProfileCount", PotInteriorProfile.Samples);
             fluidCompute.SetFloat("PotFloorY", prof.FloorY);
             fluidCompute.SetFloat("PotRimY", prof.RimY);
-            // リムから下へカーネル半径 1 個分は SafetyCorrection の対象外にする。
-            // リムは「出口」であり、そこで粒子を内側へ戻すと堰になる (追加修正2)。
-            fluidCompute.SetFloat("SafetyTopY", prof.RimY - kernelRadius / boundary.ContainerScale);
+            // SafetyCorrection は「壁を半径方向に突き抜けた粒子」だけを戻す。
+            // リムを越える動きは半径方向ではなく上方向なので、リムまで有効にしても
+            // 堰にはならない（実測でリム帯を除外しても堰の高さは不変だった）。
+            // 一方、リムフェードで開口端の壁は弱くなるので、そこを守る必要がある。
+            fluidCompute.SetFloat("SafetyTopY", prof.RimY);
             fluidCompute.SetFloat("PotMaxRadius", prof.MaxRadius);
             fluidCompute.SetFloat("SafetyMargin", spacing / boundary.ContainerScale * 0.25f);
             Matrix4x4 m = boundary.InterpolatedMatrix(lerpT);
@@ -646,6 +706,11 @@ public class FluidCore : MonoBehaviour
         fluidCompute.SetFloat("RimOpeningHeight", rimOpeningHeight);
         fluidCompute.SetFloat("GroundY", groundY);
         fluidCompute.SetFloat("GroundBandHeight", spacing * 1.5f);
+        fluidCompute.SetFloat("GroundLifetime", groundLifetime);
+        // 待避先は領域の外。CellCoord が領域外になるので近傍探索にも密度場にも入らない。
+        fluidCompute.SetVector("RetiredPark", regionCenter + Vector3.down * (regionSize.y * 0.5f + 50f));
+        fluidCompute.SetFloat("WallTolerance", boundary.mode == FluidBoundary.Mode.PotProfile
+            ? spacing * 0.5f / Mathf.Max(1e-6f, boundary.ContainerScale) : 0f);
     }
 
     /// <summary>SafetyCorrection の発動数を GPU から読み戻す（Debug 用、同期読み取り）。</summary>

@@ -450,6 +450,12 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
       insertIndex: -1
       addedObject: {fileID: 2131736045}
+    - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 2131736043}
+    - targetCorrespondingSourceObject: {fileID: 919132149155446097, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 2131736044}
   m_SourcePrefab: {fileID: 100100000, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
 --- !u!4 &803830707 stripped
 Transform:
@@ -945,7 +951,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: c8086cc2bf48708488d39917190afd7e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PotionGaugeUI
-  potionLiquid: {fileID: 2131736045}
+  potionSourceBehaviour: {fileID: 2131736043}
   barSize: {x: 48, y: 340}
   screenEdgeOffset: {x: 110, y: 110}
   anchorLeft: 1
@@ -974,6 +980,73 @@ GameObject:
   m_CorrespondingSourceObject: {fileID: 919132149155446097, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
   m_PrefabInstance: {fileID: 803830706}
   m_PrefabAsset: {fileID: 0}
+--- !u!114 &2131736043
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2131736042}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 25c1fee7d2d599b4f8d8ed9dc8a9cfdd, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::FluidCore
+  particleCount: 16384
+  solverIterations: 4
+  minSubSteps: 2
+  maxSubSteps: 10
+  kernelRadiusScale: 2
+  viscosity: 2.8
+  boundaryViscosity: 0.55
+  viscosityRefStep: 0.016666668
+  cohesionStrength: 0.3
+  curvatureStrength: 0.02
+  artificialPressureFraction: 0.02
+  artificialPressureQ: 0.2
+  relaxationFraction: 0.5
+  minDenomFraction: 0.5
+  boundaryPressureScale: 1.6
+  solverRelaxation: 0.12
+  maxDeltaPPerSpacing: 0.25
+  maxSpeed: 8
+  fillFraction: 0.45
+  simPadding: 0.45
+  fallZoneBelow: 1.2
+  groundY: 0
+  lateralSpread: 0.55
+  groundMargin: 0.12
+  topMargin: 0.18
+  rimOpeningHeight: 0.08
+  groundLifetime: 8
+  boundsRestitution: 0.02
+  boundsFriction: 0.15
+  fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
+  autoStep: 1
+--- !u!114 &2131736044
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2131736042}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5201b138382543145a45ef069d7cf4fe, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::FluidSurface
+  voxelsPerSpacing: 3
+  splatRadiusPerSpacing: 1.5
+  isoValue: 0.45
+  smoothingPasses: 2
+  normalEpsVoxels: 1.2
+  densityFixedPointScale: 16384
+  maxVoxelsPerAxis: 384
+  maxTriangles: 900000
+  liquidMaterial: {fileID: 0}
+  liquidShader: {fileID: 4800000, guid: 01d274dfaa867904f87c7d6fcc7fb0bc, type: 3}
+  logCapacity: 0
+  surfaceCompute: {fileID: 7200000, guid: e0f1e8efeab1fa94badf547b78979918, type: 3}
 --- !u!114 &2131736045
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -983,47 +1056,16 @@ MonoBehaviour:
   m_GameObject: {fileID: 2131736042}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 5ee242642a19d02408a1299c4effffba, type: 3}
+  m_Script: {fileID: 11500000, guid: 44e65bf51b32ca24f8ae0364b9069c28, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::PotionLiquid
-  maxPotionVolume: 0.032
-  initialPotionVolume: 0.032
-  insideBlobCount: 40
-  maxOverflowBlobs: 16
-  spacingScale: 1.1225
-  radiusPerSpacing: 0.7
-  solverIterations: 3
-  solverStiffness: 1
-  kernelRadiusScale: 2
-  artificialPressure: 0.0002
-  cohesionStrength: 8
-  cohesionRange: 1.9
-  velocityCoupling: 0.35
-  damping: 1.2
-  maxBlobSpeed: 6
-  accelerationSensitivity: 1.15
-  groundSlopeInfluence: 0.35
-  maxMeasuredAcceleration: 60
-  dropsPerBlob: 4
-  overflowRate: 2.5
-  overflowEjectSpeed: 0.12
-  overflowSplashSpeed: 3
-  overflowGravityScale: 0.9
-  overflowDrag: 0.12
-  strandSpringStrength: 18
-  strandBreakStretch: 3.2
-  overflowLifetime: 3.5
-  groundLayerMask:
-    serializedVersion: 2
-    m_Bits: 4294967295
-  volumeMaterial: {fileID: 2100000, guid: 7b2a570d5612ff6449899d281571fce2, type: 2}
-  volumeRenderer: {fileID: 0}
-  puddleField: {fileID: 0}
-  puddleMaterial: {fileID: 2100000, guid: 6ea62b105bfb9a0429a2b342cae61b74, type: 2}
-  overflowVfx: {fileID: 0}
-  overflowSplashMaterial: {fileID: 2100000, guid: a4e87d618d73cb349a4ad043f3bfe97d, type: 2}
-  potMeshSource: {fileID: 0}
-  autoStep: 1
+  m_EditorClassIdentifier: Assembly-CSharp::FluidBoundary
+  mode: 1
+  boxInnerSize: {x: 1, y: 1.2, z: 1}
+  meshSource: {fileID: 803830707}
+  container: {fileID: 803830707}
+  shellThicknessPerKernel: 1.15
+  edgeVolumeClamp: 1.25
+  rimFadePerKernel: 1
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
