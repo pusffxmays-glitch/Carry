@@ -52,7 +52,7 @@ public class FluidSurface : MonoBehaviour
     [Header("Refs")]
     public ComputeShader surfaceCompute;
 
-    GraphicsBuffer densityAccum, vertexBuffer, argsBuffer, counters;
+    GraphicsBuffer densityAccum, vertexBuffer, argsBuffer, argsSrc, counters;
     GraphicsBuffer brickMarks, brickResident, activeBricks, brickArgs;
     RenderTexture densityA, densityB;
     Vector3Int voxelDims, brickDims;
@@ -63,7 +63,7 @@ public class FluidSurface : MonoBehaviour
     uint[] counterReset = new uint[4];
     uint[] counterRead = new uint[4];
 
-    int kClear, kMark, kCollect, kClearBricks, kSplat, kDecode, kBlur, kBuild;
+    int kClear, kMark, kCollect, kClearBricks, kSplat, kDecode, kBlur, kBuild, kDrawArgs;
     const int Threads = 256;
     const int Threads3 = 4;
     const int Brick = 8;        // FluidSurface.compute の BRICK と一致させること
@@ -96,6 +96,7 @@ public class FluidSurface : MonoBehaviour
         brickArgs?.Release(); brickArgs = null;
         vertexBuffer?.Release(); vertexBuffer = null;
         argsBuffer?.Release(); argsBuffer = null;
+        argsSrc?.Release(); argsSrc = null;
         counters?.Release(); counters = null;
         if (densityA != null) { densityA.Release(); DestroyImmediate(densityA); densityA = null; }
         if (densityB != null) { densityB.Release(); DestroyImmediate(densityB); densityB = null; }
@@ -122,14 +123,23 @@ public class FluidSurface : MonoBehaviour
         kDecode = cs.FindKernel("DecodeDensity");
         kBlur = cs.FindKernel("BlurDensity");
         kBuild = cs.FindKernel("BuildSurface");
+        kDrawArgs = cs.FindKernel("WriteDrawArgs");
 
         BuildField();
 
         // 頂点は position + normal の 6 float。
-        vertexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Append | GraphicsBuffer.Target.Structured,
+        // Append ではなく通常の Structured。三角形 1 枚を連続 3 スロットへ書くため
+        // （Append だと他スレッドの Append が割り込んで頂点が別の三角形に混ざる）。
+        vertexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
                                           maxTriangles * 3, sizeof(float) * 6);
-        argsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 4, sizeof(uint));
+        // IndirectArguments のバッファへ Compute から直接書くのは環境依存なので、
+        // Structured へ書いてから CopyBuffer で移す。
+        argsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments | GraphicsBuffer.Target.CopyDestination,
+                                        4, sizeof(uint));
         argsBuffer.SetData(new uint[] { 0, 1, 0, 0 });
+        argsSrc = new GraphicsBuffer(GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.CopySource,
+                                     4, sizeof(uint));
+        argsSrc.SetData(new uint[] { 0, 1, 0, 0 });
         counters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 4, sizeof(uint));
 
         if (liquidShader == null) liquidShader = Shader.Find("Custom/PotionLiquidSurface");
@@ -326,14 +336,17 @@ public class FluidSurface : MonoBehaviour
 
         // 7. iso surface
         counters.SetData(counterReset);
-        vertexBuffer.SetCounterValue(0);
         cs.SetBuffer(kBuild, "ActiveBricks", activeBricks);
         cs.SetTexture(kBuild, "DensitySrc", src);
         cs.SetBuffer(kBuild, "SurfaceVertices", vertexBuffer);
         cs.SetBuffer(kBuild, "SurfaceCounters", counters);
         cs.DispatchIndirect(kBuild, brickArgs);
 
-        GraphicsBuffer.CopyCount(vertexBuffer, argsBuffer, 0);
+        // 8. 描画引数を三角形カウンタから作る
+        cs.SetBuffer(kDrawArgs, "SurfaceCounters", counters);
+        cs.SetBuffer(kDrawArgs, "DrawArgs", argsSrc);
+        cs.Dispatch(kDrawArgs, 1, 1, 1);
+        Graphics.CopyBuffer(argsSrc, argsBuffer);
         surfaceSrc = src;
 
         if (logCapacity)

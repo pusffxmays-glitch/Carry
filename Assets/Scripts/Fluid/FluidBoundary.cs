@@ -74,6 +74,13 @@ public class FluidBoundary : MonoBehaviour
     Quaternion prevRotation;
     Vector3 prevPosition;
     bool motionPrimed;
+    // サブステップ補間の始点。**prev* を更新する前の値**を控えておく必要がある。
+    // 以前は prev* をそのまま補間に使っていたが、SampleMotion の最後で prev* を
+    // 現在値に更新しているため、InterpolatedMatrix(t) が t によらず常に現在姿勢を
+    // 返していた。つまり壁がサブステップで補間されず、1 サブステップ目で最終姿勢へ
+    // 瞬間移動していた。急な動きで壁が流体を薙ぎ払い、発散する原因になっていた。
+    Quaternion lerpFromRotation;
+    Vector3 lerpFromPosition;
     float containerScale = 1f;
 
     public float ContainerScale => containerScale;
@@ -406,6 +413,10 @@ public class FluidBoundary : MonoBehaviour
             AngularVelocity = axis.normalized * (angleDeg * Mathf.Deg2Rad / dt);
         }
 
+        // 補間の始点は「このフレームの直前の姿勢」。prev* を上書きする前に控える。
+        lerpFromPosition = prevPosition;
+        lerpFromRotation = prevRotation;
+
         prevMatrix = t.localToWorldMatrix;
         prevPosition = t.position;
         prevRotation = t.rotation;
@@ -418,6 +429,8 @@ public class FluidBoundary : MonoBehaviour
         prevMatrix = t.localToWorldMatrix;
         prevPosition = t.position;
         prevRotation = t.rotation;
+        lerpFromPosition = t.position;
+        lerpFromRotation = t.rotation;
         LinearVelocity = Vector3.zero;
         AngularVelocity = Vector3.zero;
         motionPrimed = true;
@@ -430,12 +443,22 @@ public class FluidBoundary : MonoBehaviour
     public Matrix4x4 InterpolatedMatrix(float t)
     {
         var tr = Container;
-        Vector3 p = Vector3.Lerp(prevPosition, tr.position, t);
-        Quaternion q = Quaternion.Slerp(prevRotation, tr.rotation, t);
+        Vector3 p = Vector3.Lerp(lerpFromPosition, tr.position, t);
+        Quaternion q = Quaternion.Slerp(lerpFromRotation, tr.rotation, t);
         return Matrix4x4.TRS(p, q, tr.lossyScale);
     }
 
-    public Vector3 InterpolatedCenter(float t) => Vector3.Lerp(prevPosition, Container.position, t);
+    public Vector3 InterpolatedCenter(float t) => Vector3.Lerp(lerpFromPosition, Container.position, t);
+
+    /// <summary>フレーム開始姿勢から u まで進めたときの剛体変換。
+    /// 容器が 1 フレームで「サブステップでは解けない量」動いたときに、
+    /// その解けない分だけ中身を相対運動なしで運ぶために使う (§3 CFL の最終手段)。</summary>
+    public Matrix4x4 CarryDelta(float u)
+    {
+        var tr = Container;
+        Matrix4x4 from = Matrix4x4.TRS(lerpFromPosition, lerpFromRotation, tr.lossyScale);
+        return InterpolatedMatrix(u) * from.inverse;
+    }
 
 #if UNITY_EDITOR
     void OnDrawGizmosSelected()

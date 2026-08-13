@@ -23,7 +23,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 悪化した（＝落ち着かない）。下限を 6 に固定すると 10 と同等の品質を保ったまま
     // 静止時の物理コストが 17.1 -> 10.4 ms/frame になる。
     [Range(1, 12)] public int minSubSteps = 6;
-    [Range(1, 16)] public int maxSubSteps = 10;
+    // 上限が低いと CFL を満たせないフレームが出て、そこで流体が発散する。
+    // 実測（急な往復+回転）: 必要 12 に対し上限 10 で、120 フレーム中 118 が CFL 違反、
+    // 流体が速度クランプ 8m/s に張り付いて描画が崩れた。
+    // 速度クランプ maxSpeed=8 のとき、dt=1/60 で必要なサブステップは
+    // 8 * (1/60) / (0.4 * spacing) ≒ 12。上限はそれを上回っている必要がある。
+    // 静かなときは適応 CFL が 6 まで落とすので、常時のコストは増えない。
+    [Range(1, 32)] public int maxSubSteps = 20;
     [Tooltip("CFL に使う実測最大速度への安全率。実測値は 1 フレーム前のものなので、急加速に備えて余裕を持たせる。")]
     [Range(1f, 4f)] public float cflSpeedMargin = 1.6f;
 
@@ -109,6 +115,24 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public float ParticleVolume => particleVolume;
     public float RefSumGradSq => refSumGradSq;
     public int LastSubStepCount { get; private set; }
+    /// <summary>CFL が本当に必要としたサブステップ数（クランプ前）。
+    /// これが LastSubStepCount より大きいフレームは CFL を満たせていない = 発散しうる。</summary>
+    public int LastRequiredSubSteps { get; private set; }
+    /// <summary>CFL を満たせなかったフレームの累計。0 でなければ発散の原因になる。</summary>
+    public int CflLimitedFrames { get; private set; }
+    /// <summary>観測開始からの必要サブステップ数のピーク。</summary>
+    public int PeakRequiredSubSteps { get; private set; }
+    /// <summary>観測開始からの容器速度のピーク (m/s)。</summary>
+    public float PeakContainerSpeed { get; private set; }
+    /// <summary>観測開始からの流体最大速さのピーク (m/s)。</summary>
+    public float PeakFluidSpeed { get; private set; }
+    /// <summary>CFL で解けない分を剛体搬送したフレームの累計。</summary>
+    public int RigidCarryFrames { get; private set; }
+    /// <summary>直近フレームで剛体搬送した割合 (0..1)。</summary>
+    public float LastCarryFraction { get; private set; }
+    public void ResetPeaks() { PeakRequiredSubSteps = 0; PeakContainerSpeed = 0f; PeakFluidSpeed = 0f; CflLimitedFrames = 0; RigidCarryFrames = 0; }
+    /// <summary>直近フレームで境界が進んだ距離 (m)。回転は旋回半径を掛けて距離に直したもの。</summary>
+    public float LastBoundaryTravel { get; private set; }
     /// <summary>直近フレームで実測した流体の最大速さ (m/s)。CFL のサブステップ数はこれで決まる。</summary>
     public float MeasuredMaxSpeed { get; private set; }
     /// <summary>SafetyCorrection の発動粒子数（直近の読み取り時点）。常態化していたら壁の扱いが破綻しているサイン (§10)。</summary>
@@ -166,6 +190,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     int fluidCount, boundaryCount, totalCount;
     float spacing, kernelRadius, restDensity, particleVolume;
     float relaxationEps, artificialPressure, refSumGradSq;
+    /// <summary>容器の旋回半径 (m)。回転が境界粒子に与える速度 = |omega| * これ。</summary>
+    float containerSwingRadius = 1f;
 
     Vector3 regionCenter, regionSize;
     float regionOffsetY;
@@ -265,6 +291,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
                                      ext.y + simPadding * 2f + fallZoneBelow,
                                      ext.z + simPadding * 2f);
             regionOffsetY = -fallZoneBelow * 0.5f;
+            containerSwingRadius = ext.magnitude * 0.5f * boundary.ContainerScale;
         }
         else
         {
@@ -279,6 +306,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
                 swingR = Mathf.Max(swingR, Mathf.Sqrt(r * r + y * y));
             }
             swingR *= sc;
+            containerSwingRadius = swingR;
 
             float containerY = boundary.Container.position.y;
             float top = containerY + swingR + topMargin;
@@ -544,8 +572,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
         // §3 CFL: 壁も流体も、1 サブステップで粒子間隔の一定割合以上動かさない。
         // 壁がそれより速く動くと、境界粒子が流体を貫通して飲み込む。
+        //
+        // 回転の腕の長さは **容器の旋回半径** であって、シミュレーション領域の
+        // 大きさではない。従来は regionSize.magnitude*0.5 (約 2.45m) を使っており、
+        // 実際の壺 (約 0.97m) の 2.5 倍を要求していた。過大評価は安全側に見えるが、
+        // サブステップ数の上限に早く張り付く分だけ、**本当に必要なときに足りなくなる**。
         float containerSpeed = boundary.LinearVelocity.magnitude
-                             + boundary.AngularVelocity.magnitude * regionSize.magnitude * 0.5f;
+                             + boundary.AngularVelocity.magnitude * containerSwingRadius;
         // 流体側は「速度クランプ値 (maxSpeed) 」ではなく **前フレームの実測最大速さ** を使う。
         // クランプ値は理論上の最悪値なので、それを使うとどんなに静かでも常に
         // maxSubSteps に張り付き、静止状態でも 10 サブステップ回っていた（実測 17ms/frame）。
@@ -553,11 +586,57 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // 実測速度を使うのが本来の実装。1 フレーム遅れる分は cflSpeedMargin で見る。
         float fluidSpeed = Mathf.Min(MeasuredMaxSpeed * cflSpeedMargin, maxSpeed);
         float worstSpeed = Mathf.Max(fluidSpeed, containerSpeed);
-        int sub = Mathf.Clamp(Mathf.CeilToInt(worstSpeed * dt / (0.4f * spacing)), minSubSteps, maxSubSteps);
+
+        float maxTravel = 0.4f * spacing;
+
+        // 流体側の CFL は dt で守れる。サブステップ数を上限まで使っても足りないなら、
+        // そのフレームだけ **流体の時間をゆっくり進める**。
+        // フレームが引っかかって dt が跳ねたとき（実測 1/30 秒）に効く。
+        // 解けないまま進めて発散させるより、一瞬スローになる方がよい。
+        if (fluidSpeed * dt > maxTravel * maxSubSteps)
+            dt = maxTravel * maxSubSteps / Mathf.Max(fluidSpeed, 1e-6f);
+
+        LastBoundaryTravel = containerSpeed * dt;
+        int need = Mathf.CeilToInt(worstSpeed * dt / maxTravel);
+        int sub = Mathf.Clamp(need, minSubSteps, maxSubSteps);
+        LastRequiredSubSteps = need;
+
+        // --- サブステップで解けない容器の動きは、中身ごと剛体で運ぶ (§3 CFL の最終手段) ---
+        //
+        // ゲーム中は容器が一瞬で非常に速く動くことがある（実測: ゴブリンのよろけで
+        // 容器速度 15.5 m/s、必要サブステップ 70）。これを全部解こうとすると
+        // 1 フレーム 100ms を超える。かといって解かずに壁を動かすと、
+        // 壁が流体を薙ぎ払って発散し、描画が崩れる。
+        //
+        // 解ける量 = 1 サブステップの許容移動量 x サブステップ数。
+        // それを超えた分は「相対運動なし」＝中身を壁と一緒に運ぶ。
+        // その瞬間だけ揺れが出ないが、発散するよりはるかにまし。
+        // 質量も体積も変わらないので、収支や PotionVolume には影響しない。
+        float travel = containerSpeed * dt;
+        float resolvable = maxTravel * sub;
+        float carry = (travel > resolvable && travel > 1e-6f) ? 1f - resolvable / travel : 0f;
+        LastCarryFraction = carry;
+        // ここまでで CFL は必ず満たされる。それでも足りないフレームがあれば
+        // 上の 2 つの対策のどちらかが効いていないということなので、数えて可視化する。
+        if (need > sub && carry <= 0f) CflLimitedFrames++;
+        if (carry > 0f)
+        {
+            RigidCarryFrames++;
+            fluidCompute.SetMatrix("TeleportMatrix", boundary.CarryDelta(carry));
+            fluidCompute.SetInt("FluidCount", fluidCount);
+            Bind(kTeleport, ("Positions", positions), ("Velocities", velocities));
+            fluidCompute.Dispatch(kTeleport, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
+        }
+        if (need > PeakRequiredSubSteps) PeakRequiredSubSteps = need;
+        if (containerSpeed > PeakContainerSpeed) PeakContainerSpeed = containerSpeed;
+        if (MeasuredMaxSpeed > PeakFluidSpeed) PeakFluidSpeed = MeasuredMaxSpeed;
+
         LastSubStepCount = sub;
 
+        // 剛体搬送した分は既に進んでいるので、壁の補間は carry..1 の区間だけを掃く。
         float sdt = dt / sub;
-        for (int s = 0; s < sub; s++) SubStep(sdt, (s + 1) / (float)sub);
+        for (int s = 0; s < sub; s++)
+            SubStep(sdt, carry + (1f - carry) * ((s + 1) / (float)sub));
 
         // 領域分類はフレームに 1 回。観測のみで、位置・速度には触れない (§14/追加修正1)。
         ClassifyAndRead();

@@ -18,6 +18,7 @@ public class FluidCoreTestRig : MonoBehaviour
         Pour = 6,       // 傾け続けて実際に Overflow させる (§37 Phase 7)
         Drip = 7,       // ゆっくり傾けて細い液だれを作る (§22-A TEST K/L)
         DripBack = 8,   // 注いでから戻す。リムに残った液が垂れて分離する (§22-A TEST L)
+        Violent = 9,    // 急な動き。CFL が破れて発散しないかを見る
     }
 
     public Case current = Case.Settle;
@@ -58,6 +59,7 @@ public class FluidCoreTestRig : MonoBehaviour
             if (kb.digit6Key.wasPressedThisFrame) SetCase(Case.Pour);
             if (kb.digit7Key.wasPressedThisFrame) SetCase(Case.Drip);
             if (kb.digit8Key.wasPressedThisFrame) SetCase(Case.DripBack);
+            if (kb.digit9Key.wasPressedThisFrame) SetCase(Case.Violent);
             if (kb.rKey.wasPressedThisFrame) core.SeedFluid();
         }
         if (autoDrive) Drive(Time.deltaTime);
@@ -128,6 +130,16 @@ public class FluidCoreTestRig : MonoBehaviour
                 rot = Quaternion.Euler(-a, 0f, 0f);
                 break;
             }
+            case Case.Violent:
+            {
+                // ユーザー報告「少し急な動きをした際に液体が一気に発散する」の再現。
+                // 速い往復 + 急な向き変更 + 揺さぶりを重ねる。
+                float sx = Mathf.Sin(t * 6.0f) * 0.35f;
+                float sz = Mathf.Sin(t * 4.3f + 1.1f) * 0.30f;
+                pos += new Vector3(sx, Mathf.Abs(Mathf.Sin(t * 5.0f)) * 0.10f, sz);
+                rot = Quaternion.Euler(Mathf.Sin(t * 5.5f) * 22f, Mathf.Sin(t * 3.1f) * 60f, Mathf.Sin(t * 4.7f) * 22f);
+                break;
+            }
             case Case.Pour:
                 // カメラ側へ傾け続けて、実際にリムから溢れさせる。
                 // 横移動は入れない: 連続した液柱を見るのが目的で、横移動は流れを散らす。
@@ -153,7 +165,7 @@ public class FluidCoreTestRig : MonoBehaviour
                 "inside " + core.InsideCount + "  rim " + core.RimCount + "  air " + core.AirborneCount +
                 "  ground " + core.GroundCount + "   overflow " + core.OverflowEvents +
                 "  penetration " + core.PenetrationEvents + "   fill " + (core.FillFraction01 * 100f).ToString("F1") + "%", style);
-        GUI.Label(new Rect(12, 80, 900, 24), "1..8 = case,  R = reseed", style);
+        GUI.Label(new Rect(12, 80, 900, 24), "1..9 = case,  R = reseed", style);
     }
 #endif
 }

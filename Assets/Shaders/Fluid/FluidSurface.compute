@@ -24,6 +24,7 @@
 #pragma kernel DecodeDensity
 #pragma kernel BlurDensity
 #pragma kernel BuildSurface
+#pragma kernel WriteDrawArgs
 
 #define THREADS 256
 #define THREADS3 4
@@ -66,8 +67,15 @@ struct SurfaceVertex
     float3 position;
     float3 normal;
 };
-AppendStructuredBuffer<SurfaceVertex> SurfaceVertices;
-RWStructuredBuffer<uint> SurfaceCounters;   // [0] = 容量超過で捨てた三角形数
+// **AppendStructuredBuffer は使わない。**
+// Append() は 1 要素ずつスロットを取るので、三角形 1 枚ぶんの 3 頂点を 3 回 Append すると
+// 他スレッドの Append が間に割り込み、**別々の三角形の頂点が 1 枚に混ざる**。
+// 結果、離れた点を結ぶ細長いスパイクや扇状の筋が出る（密な表面では小さな皺、
+// 粒子が疎な空中の液体では画面いっぱいのガラス片のような崩れになる）。
+// 三角形番号を 1 回の InterlockedAdd で取り、3 頂点を連続スロットへ直接書く。
+RWStructuredBuffer<SurfaceVertex> SurfaceVertices;
+RWStructuredBuffer<uint> SurfaceCounters;   // [0] = 容量超過で捨てた三角形数, [1] = 三角形数
+RWStructuredBuffer<uint> DrawArgs;
 uint MaxTriangles;
 
 static const float PI = 3.14159265359;
@@ -260,21 +268,22 @@ float3 EdgeLerp(float3 pa, float va, float3 pb, float vb)
 
 void EmitTriangle(float3 a, float3 b, float3 c)
 {
-    // 容量チェックを書き込みの「前」に行う。AppendStructuredBuffer は容量を超えると
-    // 未定義動作になるため、超過分は捨ててカウンタに積むだけにする (§13/修正9)。
-    uint used;
-    InterlockedAdd(SurfaceCounters[1], 1, used);
-    if (used >= MaxTriangles)
+    // 容量チェックを書き込みの「前」に行う。超過分は捨ててカウンタに積むだけにする (§13/修正9)。
+    uint tri;
+    InterlockedAdd(SurfaceCounters[1], 1, tri);
+    if (tri >= MaxTriangles)
     {
         uint dummy;
         InterlockedAdd(SurfaceCounters[0], 1, dummy);
         return;
     }
 
+    // 三角形 1 枚は連続した 3 スロットに書く。ここが混ざらないことが重要。
+    uint base = tri * 3u;
     SurfaceVertex v;
-    v.normal = FieldNormal(a); v.position = a; SurfaceVertices.Append(v);
-    v.normal = FieldNormal(b); v.position = b; SurfaceVertices.Append(v);
-    v.normal = FieldNormal(c); v.position = c; SurfaceVertices.Append(v);
+    v.normal = FieldNormal(a); v.position = a; SurfaceVertices[base + 0u] = v;
+    v.normal = FieldNormal(b); v.position = b; SurfaceVertices[base + 1u] = v;
+    v.normal = FieldNormal(c); v.position = c; SurfaceVertices[base + 2u] = v;
 }
 
 // 四面体 1 個の等値面。内側頂点の個数だけで分割が決まるのでテーブルが要らない。
@@ -356,4 +365,17 @@ void BuildSurface(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
     MarchTetra(P[0],V[0], P[7],V[7], P[4],V[4], P[6],V[6]);
     MarchTetra(P[0],V[0], P[4],V[4], P[5],V[5], P[6],V[6]);
     MarchTetra(P[0],V[0], P[5],V[5], P[1],V[1], P[6],V[6]);
+}
+
+
+// 描画引数を三角形カウンタから作る。AppendStructuredBuffer を使わなくなったので
+// CopyCount は使えない。
+[numthreads(1, 1, 1)]
+void WriteDrawArgs(uint3 id : SV_DispatchThreadID)
+{
+    uint tris = min(SurfaceCounters[1], MaxTriangles);
+    DrawArgs[0] = tris * 3u;   // 頂点数
+    DrawArgs[1] = 1u;          // インスタンス数
+    DrawArgs[2] = 0u;
+    DrawArgs[3] = 0u;
 }

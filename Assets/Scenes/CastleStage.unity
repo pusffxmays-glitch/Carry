@@ -995,7 +995,7 @@ MonoBehaviour:
   particleCount: 16384
   solverIterations: 4
   minSubSteps: 6
-  maxSubSteps: 10
+  maxSubSteps: 20
   cflSpeedMargin: 1.6
   kernelRadiusScale: 2
   viscosity: 2.8
