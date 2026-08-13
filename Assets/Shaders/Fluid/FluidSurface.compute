@@ -1,5 +1,5 @@
 // ============================================================================================
-// FluidSurface.compute -- Particle -> 3D Density Field -> Iso Surface (Phase 2)
+// FluidSurface.compute -- Particle -> 3D Density Field (Sparse Brick Pool) -> Iso Surface
 //
 // FLUID_DESIGN.md §11 / §12 / §13 / §14 に対応。
 //
@@ -12,41 +12,62 @@
 //
 // 設計上の要点:
 //  * 粒子位置を直接メッシュ化しない。Kernel で 3D 密度場へ広げてから等値面を取る (§11)。
-//  * Atomic 蓄積は uint 固定小数、Visual 用は float の 3D テクスチャ。両者を分離する (§11/修正3)。
+//  * Atomic 蓄積は uint 固定小数、Visual 用は float。両者を分離する (§11/修正3)。
 //  * 壺内部・Overflow・Ground Fluid を区別しない。全部この 1 つの場に入る (§12/修正7)。
+//
+// ---- Sparse Brick Pool (§14) ----
+//
+// 以前は「ドメイン全体ぶんの密な 3D テクスチャ」を持ち、計算する範囲だけを Brick で
+// 絞っていた。これだとメモリがドメインの体積に比例するので、密度場を壺の周り
+// 半径 1.8m 程度の箱にしか広げられず、**こぼした液体が少し離れると描画されなくなり、
+// 箱の縁で等値面がスパッと切れて四角い境界線として見えていた**。
+//
+// この版はメモリを **実際に液体がある Brick の数** に比例させる。
+//  * ドメインは world 固定の大きな箱（部屋全体を覆える）
+//  * Brick(8^3 voxel) ごとに「プールのどのスロットを使うか」を毎フレーム割り当てる
+//  * 割り当てが無い Brick は密度 0 として読む
+//
+// 場そのものは全ドメインで 1 つ・連続。Brick は「同じ 1 つの場のどこを実体化するか」を
+// 決めるだけで、別の場を作らない。したがって Brick 境界に継ぎ目は発生しない。
 // ============================================================================================
 
-#pragma kernel ClearDensity
-#pragma kernel MarkBricks
-#pragma kernel CollectBricks
-#pragma kernel ClearBricks
+#pragma kernel ResetSlots
+#pragma kernel ClearSlots
+#pragma kernel MarkAndAllocate
+#pragma kernel WriteBrickArgs
+#pragma kernel ClearPool
 #pragma kernel SplatDensity
 #pragma kernel DecodeDensity
 #pragma kernel BlurDensity
 #pragma kernel BuildSurface
 #pragma kernel WriteDrawArgs
+#pragma kernel ComputeVertexNormals
 
 #define THREADS 256
-#define THREADS3 4
-#define BRICK 8         // 1 Brick = 8^3 voxel (§14)
+#define BRICK 8              // 1 Brick = 8^3 voxel
+#define BRICK_VOXELS 512     // 8*8*8
 
-uint ClearStride;   // ClearDensity の 2 次元タイル幅
+static const uint INVALID_SLOT = 0xFFFFFFFFu;
+static const uint SLOT_RESERVED = 0xFFFFFFFEu;   // 割り当て中（CAS の勝者が確定値を書くまで）
 
-// ---- Sparse Brick (§14) ----
-// 場そのものは全ドメインで 1 つ・連続。Brick は「同じ 1 つの場のどこを計算するか」を
-// 決めるだけで、別の場を作らない。したがって Brick 境界に継ぎ目は発生しない。
 uint3 BrickDims;
-uint  BrickMargin;                          // 粒子の Brick からこの数だけ外側も有効にする
-RWStructuredBuffer<uint>     BrickMarks;    // 今フレーム粒子が居る Brick
-RWStructuredBuffer<uint>     BrickResident; // 前フレームに使っていた Brick（消し残し防止）
-AppendStructuredBuffer<uint> ActiveBricksAppend;
-StructuredBuffer<uint>       ActiveBricks;
-RWTexture3D<float>           DensityClearB;  // ClearBricks 用の 2 枚目
+uint  BrickTotal;
+int   MarkRadiusVoxels;      // 粒子からこの voxel 半径に触れる Brick を実体化する
+uint  PoolCapacity;          // プールが持てる Brick 数
+uint  ClearStride;           // ResetSlots (起動時のみ) の 2D タイル幅
 
-RWStructuredBuffer<uint> DensityAccum;      // 固定小数。atomic 用
-RWTexture3D<float>       DensityOut;        // Visual 用
-Texture3D<float>         DensitySrc;
-SamplerState             samplerDensitySrc;
+RWStructuredBuffer<uint>  BrickSlot;       // Brick -> プールのスロット (INVALID_SLOT = 未割当)
+StructuredBuffer<uint>    BrickSlotIn;     // 読み取り専用エイリアス
+RWStructuredBuffer<uint>  ActiveBricksRW;  // スロット -> Brick
+StructuredBuffer<uint>    ActiveBricks;
+RWStructuredBuffer<uint>  AllocCounter;    // [0]=割当数 [1]=容量超過数
+
+RWStructuredBuffer<uint>  PoolAccum;       // 固定小数。atomic 用
+RWStructuredBuffer<float> PoolOut;         // 書き込み先 (A or B)
+RWStructuredBuffer<float> PoolOutB;        // ClearPool 用の 2 枚目
+StructuredBuffer<float>   PoolSrc;         // 読み取り元
+
+RWStructuredBuffer<uint>  BrickArgs;       // DispatchIndirect 用 (x,y,z)
 
 StructuredBuffer<float3> Particles;
 uint  ParticleCount;
@@ -70,8 +91,7 @@ struct SurfaceVertex
 // **AppendStructuredBuffer は使わない。**
 // Append() は 1 要素ずつスロットを取るので、三角形 1 枚ぶんの 3 頂点を 3 回 Append すると
 // 他スレッドの Append が間に割り込み、**別々の三角形の頂点が 1 枚に混ざる**。
-// 結果、離れた点を結ぶ細長いスパイクや扇状の筋が出る（密な表面では小さな皺、
-// 粒子が疎な空中の液体では画面いっぱいのガラス片のような崩れになる）。
+// 結果、離れた点を結ぶ細長いスパイクや扇状の筋が出る。
 // 三角形番号を 1 回の InterlockedAdd で取り、3 頂点を連続スロットへ直接書く。
 RWStructuredBuffer<SurfaceVertex> SurfaceVertices;
 RWStructuredBuffer<uint> SurfaceCounters;   // [0] = 容量超過で捨てた三角形数, [1] = 三角形数
@@ -88,26 +108,6 @@ float SplatKernel(float r2, float h)
     return d * d * d;      // 正規化しない: IsoValue 側で吸収する
 }
 
-uint VoxelIndex(uint3 c) { return c.x + c.y * VoxelDims.x + c.z * VoxelDims.x * VoxelDims.y; }
-
-// --------------------------------------------------------------------------------------------
-[numthreads(THREADS, 1, 1)]
-void ClearDensity(uint3 id : SV_DispatchThreadID)
-{
-    // 初期化時に 1 度だけ場全体を 0 にする。有効 Brick が 65535 グループを超えうる
-    // 初回クリアを DispatchIndirect に任せないための経路。
-    // 1 次元ディスパッチではグループ数が 65535 を超えるので 2 次元へタイルする。
-    uint total = VoxelDims.x * VoxelDims.y * VoxelDims.z;
-    uint idx = id.x + id.y * ClearStride;
-    if (idx >= total) return;
-    DensityAccum[idx] = 0;
-
-    uint xy = VoxelDims.x * VoxelDims.y;
-    uint3 v = uint3(idx % VoxelDims.x, (idx / VoxelDims.x) % VoxelDims.y, idx / xy);
-    DensityOut[v] = 0;
-    DensityClearB[v] = 0;
-}
-
 uint BrickIndex(uint3 b) { return b.x + b.y * BrickDims.x + b.z * BrickDims.x * BrickDims.y; }
 
 uint3 BrickCoord(uint idx)
@@ -116,55 +116,130 @@ uint3 BrickCoord(uint idx)
     return uint3(idx % BrickDims.x, (idx / BrickDims.x) % BrickDims.y, idx / xy);
 }
 
-// 粒子の居る Brick とその周囲 BrickMargin 個を「有効」にする。
-// マージンは Splat 半径 + Blur の到達範囲より広くしておく。そうしないと、
-// 有効でない Brick の古い値を Blur が読んでしまう。
+uint LocalIndex(uint3 v) { uint3 l = v & 7u; return l.x + l.y * 8u + l.z * 64u; }
+
+// voxel -> プール上のアドレス。未割当なら INVALID_SLOT を返す。
+uint PoolAddress(int3 v)
+{
+    if (any(v < 0) || any(v >= (int3)VoxelDims)) return INVALID_SLOT;
+    uint slot = BrickSlotIn[BrickIndex((uint3)v >> 3u)];
+    if (slot == INVALID_SLOT) return INVALID_SLOT;
+    return slot * BRICK_VOXELS + LocalIndex((uint3)v);
+}
+
+// 密度場の読み取り。未割当の Brick は 0（そこに液体は無い）。
+float ReadField(int3 v)
+{
+    uint a = PoolAddress(v);
+    return (a == INVALID_SLOT) ? 0.0 : PoolSrc[a];
+}
+
+// --------------------------------------------------------------------------------------------
+// 毎フレームの割り当て
+//
+// 割り当ては **粒子の数に比例** させる。ドメイン全体を毎フレーム走査すると、
+// 描画範囲を広げた分だけコストが増えてしまい、「範囲を広げても軽い」という
+// プール方式の利点が消える。
+//
+// 前フレームの消し残し対策（BrickResident）はプール方式では不要になった。
+// 未割当の Brick は密度 0 として読まれ、割り当てた Brick は毎フレーム
+// ClearPool で 0 にされるので、古い密度が残る経路が構造的に存在しない。
+// --------------------------------------------------------------------------------------------
+
+// 起動時に 1 度だけ。全 Brick を未割当にする。
 [numthreads(THREADS, 1, 1)]
-void MarkBricks(uint3 id : SV_DispatchThreadID)
+void ResetSlots(uint3 id : SV_DispatchThreadID)
+{
+    uint b = id.x + id.y * ClearStride;
+    if (b >= BrickTotal) return;
+    BrickSlot[b] = INVALID_SLOT;
+}
+
+// 毎フレームの先頭。**前フレームに使った Brick だけ**を未割当へ戻す。
+// AllocCounter はまだ前フレームの値を保持している（リセットはこの後）。
+[numthreads(64, 1, 1)]
+void ClearSlots(uint3 id : SV_DispatchThreadID)
+{
+    uint n = min(AllocCounter[0], PoolCapacity);
+    if (id.x >= n) return;
+    BrickSlot[ActiveBricks[id.x]] = INVALID_SLOT;
+}
+
+// 粒子の影響が届く範囲の Brick へ、その場でスロットを配る。
+//
+// 範囲は **voxel 半径から導く**。以前は「粒子の Brick から Brick 単位で 2 個ぶん」
+// という取り方をしていたが、それは 5x5x5 = 125 Brick で、実際に必要な範囲
+// （Splat 半径 5 + Blur の到達 4 + Marching Cubes/法線 3 = 12 voxel = 1.5 Brick）の
+// 4 倍以上あった。地面に散った液滴 1 粒ごとに 125 Brick を確保してしまい、
+// 実測 2966 粒でプール 16384 を使い切って 1901 Brick が確保できず、
+// 液体が虫食いになった。voxel 半径から取ると同じ条件で 3x3x3 前後に収まる。
+//
+// 「まだ誰も取っていなければ自分が取る」を CompareExchange で 1 回だけ成立させる。
+// 敗者はそのまま抜ける（値を読む必要が無い。実際に読むのは次のディスパッチ以降）。
+[numthreads(THREADS, 1, 1)]
+void MarkAndAllocate(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= ParticleCount) return;
 
     float3 local = (Particles[i] - FieldOrigin) / VoxelSize;
     int3 vc = (int3)floor(local);
-    int3 bc = vc / (int)BRICK;
-    int m = (int)BrickMargin;
+    if (any(vc < 0) || any(vc >= (int3)VoxelDims)) return;   // ドメイン外の粒子は無視
 
-    int3 lo = max(bc - m, int3(0, 0, 0));
-    int3 hi = min(bc + m, (int3)BrickDims - 1);
+    int r = MarkRadiusVoxels;
+    int3 loV = max(vc - r, int3(0, 0, 0));
+    int3 hiV = min(vc + r, (int3)VoxelDims - 1);
+    int3 lo = loV >> 3;
+    int3 hi = hiV >> 3;
 
     [loop] for (int z = lo.z; z <= hi.z; z++)
     [loop] for (int y = lo.y; y <= hi.y; y++)
     [loop] for (int x = lo.x; x <= hi.x; x++)
-        BrickMarks[BrickIndex(uint3(x, y, z))] = 1;
+    {
+        uint b = BrickIndex(uint3(x, y, z));
+        uint prev;
+        InterlockedCompareExchange(BrickSlot[b], INVALID_SLOT, SLOT_RESERVED, prev);
+        if (prev != INVALID_SLOT) continue;      // 既に誰かが取った
+
+        uint slot;
+        InterlockedAdd(AllocCounter[0], 1, slot);
+        if (slot >= PoolCapacity)
+        {
+            // 容量超過。ここを黙って無視すると液体が虫食いになるので数える (§36)。
+            uint dummy;
+            InterlockedAdd(AllocCounter[1], 1, dummy);
+            BrickSlot[b] = INVALID_SLOT;
+            continue;
+        }
+        ActiveBricksRW[slot] = b;
+        BrickSlot[b] = slot;                     // ここで確定値を公開する
+    }
 }
 
-// 今フレーム有効な Brick に加えて、前フレームだけ有効だった Brick も 1 度だけ拾う。
-// そうしないと、液体が去った跡の密度が消えずに残る。
-[numthreads(THREADS, 1, 1)]
-void CollectBricks(uint3 id : SV_DispatchThreadID)
+// DispatchIndirect の引数。
+//   [0..2] = Brick ごとのディスパッチ (有効 Brick 数, 1, 1)
+//   [3..5] = 次フレームの ClearSlots 用 (ceil(有効 Brick 数 / 64), 1, 1)
+[numthreads(1, 1, 1)]
+void WriteBrickArgs(uint3 id : SV_DispatchThreadID)
 {
-    uint b = id.x;
-    uint total = BrickDims.x * BrickDims.y * BrickDims.z;
-    if (b >= total) return;
-
-    uint mark = BrickMarks[b];
-    uint res  = BrickResident[b];
-    if (mark != 0 || res != 0) ActiveBricksAppend.Append(b);
-
-    BrickResident[b] = mark;
-    BrickMarks[b] = 0;              // 次フレームのために戻す
+    uint n = min(AllocCounter[0], PoolCapacity);
+    BrickArgs[0] = n;
+    BrickArgs[1] = 1u;
+    BrickArgs[2] = 1u;
+    BrickArgs[3] = (n + 63u) / 64u;
+    BrickArgs[4] = 1u;
+    BrickArgs[5] = 1u;
 }
 
-// 有効 Brick だけを 0 クリアする。全ドメインを毎フレーム触らないための要 (§14)。
+// 実体化した Brick だけを 0 クリアする。ドメイン全体は決して触らない (§14)。
 [numthreads(BRICK, BRICK, BRICK)]
-void ClearBricks(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
+void ClearPool(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
 {
-    uint3 v = BrickCoord(ActiveBricks[gid.x]) * BRICK + gtid;
-    if (any(v >= VoxelDims)) return;
-    DensityAccum[VoxelIndex(v)] = 0;
-    DensityOut[v] = 0;
-    DensityClearB[v] = 0;
+    uint slot = gid.x;
+    uint addr = slot * BRICK_VOXELS + LocalIndex(gtid);
+    PoolAccum[addr] = 0;
+    PoolOut[addr] = 0;
+    PoolOutB[addr] = 0;
 }
 
 // 粒子ごとに、影響半径内のボクセルへカーネル値を加算する。
@@ -188,6 +263,10 @@ void SplatDensity(uint3 id : SV_DispatchThreadID)
     [loop] for (int y = c0.y; y <= c1.y; y++)
     [loop] for (int x = c0.x; x <= c1.x; x++)
     {
+        int3 v = int3(x, y, z);
+        uint addr = PoolAddress(v);
+        if (addr == INVALID_SLOT) continue;      // 容量超過などで実体が無い
+
         float3 vc = FieldOrigin + (float3(x, y, z) + 0.5) * VoxelSize;
         float3 d = vc - p;
         float w = SplatKernel(dot(d, d), SplatRadius);
@@ -195,66 +274,81 @@ void SplatDensity(uint3 id : SV_DispatchThreadID)
         uint add = (uint)(w * DensityScale);
         if (add == 0) continue;
         uint old;
-        InterlockedAdd(DensityAccum[VoxelIndex(uint3(x, y, z))], add, old);
+        InterlockedAdd(PoolAccum[addr], add, old);
     }
 }
 
 [numthreads(BRICK, BRICK, BRICK)]
 void DecodeDensity(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
 {
-    uint3 id = BrickCoord(ActiveBricks[gid.x]) * BRICK + gtid;
-    if (any(id >= VoxelDims)) return;
-    DensityOut[id] = (float)DensityAccum[VoxelIndex(id)] / DensityScale;
+    uint slot = gid.x;
+    uint addr = slot * BRICK_VOXELS + LocalIndex(gtid);
+    PoolOut[addr] = (float)PoolAccum[addr] / DensityScale;
 }
 
 // 分離ガウシアン (§14 Density Smoothing)。BlurAxis で軸を切り替えて 3 回まわす。
 [numthreads(BRICK, BRICK, BRICK)]
 void BlurDensity(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
 {
-    uint3 id = BrickCoord(ActiveBricks[gid.x]) * BRICK + gtid;
-    if (any(id >= VoxelDims)) return;
+    uint slot = gid.x;
+    int3 v = (int3)(BrickCoord(ActiveBricks[slot]) * BRICK + gtid);
 
     const float w0 = 0.38774, w1 = 0.24477, w2 = 0.06136;
     int3 a = BlurAxis;
-    int3 maxIdx = (int3)VoxelDims - 1;
 
-    float sum = DensitySrc[clamp((int3)id, int3(0,0,0), maxIdx)] * w0;
-    sum += DensitySrc[clamp((int3)id + a, int3(0,0,0), maxIdx)] * w1;
-    sum += DensitySrc[clamp((int3)id - a, int3(0,0,0), maxIdx)] * w1;
-    sum += DensitySrc[clamp((int3)id + a * 2, int3(0,0,0), maxIdx)] * w2;
-    sum += DensitySrc[clamp((int3)id - a * 2, int3(0,0,0), maxIdx)] * w2;
-    DensityOut[id] = sum;
+    float sum = ReadField(v) * w0;
+    sum += ReadField(v + a) * w1;
+    sum += ReadField(v - a) * w1;
+    sum += ReadField(v + a * 2) * w2;
+    sum += ReadField(v - a * 2) * w2;
+
+    PoolOut[slot * BRICK_VOXELS + LocalIndex(gtid)] = sum;
 }
 
 // --------------------------------------------------------------------------------------------
 // 等値面抽出（四面体分解）
 // --------------------------------------------------------------------------------------------
-float SampleDensity(int3 c)
-{
-    c = clamp(c, int3(0, 0, 0), (int3)VoxelDims - 1);
-    return DensitySrc[c];
-}
+float SampleDensity(int3 c) { return ReadField(c); }
 
 float3 VoxelPos(int3 c) { return FieldOrigin + (float3)c * VoxelSize; }
 
 // 密度場を **トリリニア** で補間して勾配を取る。
-// 最近傍 (DensitySrc[int3]) で微分すると法線がボクセル単位で階段状になり、
-// 表面に鋭いスペキュラの筋として現れる。等値面の頂点はボクセル境界上の任意の位置に
-// あるので、そこで滑らかな法線を得るには補間サンプリングが必要。
+// 最近傍で微分すると法線がボクセル単位で階段状になり、表面に鋭いスペキュラの筋として
+// 現れる。等値面の頂点はボクセル境界上の任意の位置にあるので、そこで滑らかな法線を
+// 得るには補間サンプリングが必要。
+// プール方式ではハードウェアのフィルタリングが使えないので手で補間する。
+//
+// **8 タップは必ず [loop] で回す。** 展開すると ReadField の本体（境界判定 +
+// Brick 索引 + バッファ読み）が 8 個に増え、それが FieldNormal で 6 倍、
+// EmitTriangle で 3 倍、MarchTetra の分岐で 18 倍、立方体 1 個あたり 6 倍される。
+// 実測で FXC が「Lost connection with shader compiler process」で落ちた。
+// テクスチャ読みだった頃は 1 命令だったので展開しても問題にならなかった。
 float SampleDensitySmooth(float3 wp)
 {
-    float3 uvw = (wp - FieldOrigin) / (VoxelSize * (float3)VoxelDims);
-    uvw = saturate(uvw);
-    return DensitySrc.SampleLevel(samplerDensitySrc, uvw, 0);
+    float3 f = (wp - FieldOrigin) / VoxelSize - 0.5;
+    int3 b = (int3)floor(f);
+    float3 t = f - (float3)b;
+
+    float acc = 0.0;
+    [loop] for (int k = 0; k < 8; k++)
+    {
+        int3 o = int3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        float3 w3 = lerp(1.0 - t, t, (float3)o);
+        acc += ReadField(b + o) * (w3.x * w3.y * w3.z);
+    }
+    return acc;
 }
 
 float3 FieldNormal(float3 wp)
 {
     float e = VoxelSize * SurfaceNormalEps;
-    float dx = SampleDensitySmooth(wp + float3(e, 0, 0)) - SampleDensitySmooth(wp - float3(e, 0, 0));
-    float dy = SampleDensitySmooth(wp + float3(0, e, 0)) - SampleDensitySmooth(wp - float3(0, e, 0));
-    float dz = SampleDensitySmooth(wp + float3(0, 0, e)) - SampleDensitySmooth(wp - float3(0, 0, e));
-    float3 g = float3(dx, dy, dz);
+    float3 g = float3(0, 0, 0);
+    [loop] for (int a = 0; a < 3; a++)
+    {
+        float3 axis = float3(a == 0 ? 1 : 0, a == 1 ? 1 : 0, a == 2 ? 1 : 0);
+        float3 d = axis * e;
+        g += axis * (SampleDensitySmooth(wp + d) - SampleDensitySmooth(wp - d));
+    }
     float len = length(g);
     // 等値面は密度が下がる向きが外側なので符号を反転する。
     return (len > 1e-8) ? -g / len : float3(0, 1, 0);
@@ -279,11 +373,19 @@ void EmitTriangle(float3 a, float3 b, float3 c)
     }
 
     // 三角形 1 枚は連続した 3 スロットに書く。ここが混ざらないことが重要。
+    //
+    // **法線はここでは計算しない。** BuildSurface の中では EmitTriangle が
+    // 四面体 6 個 x 分岐 18 通り = 100 箇所以上に展開される。そこへ FieldNormal
+    // （トリリニア 8 タップ x 中央差分 6 回 = ReadField 48 回）を埋め込むと
+    // 命令数が桁違いになり、FXC が「Lost connection with shader compiler process」で
+    // 落ちた。法線は出来上がった頂点に対して別カーネルで 1 回だけ計算する。
+    // 同じ場を同じ式で読むので結果は変わらない。
     uint base = tri * 3u;
     SurfaceVertex v;
-    v.normal = FieldNormal(a); v.position = a; SurfaceVertices[base + 0u] = v;
-    v.normal = FieldNormal(b); v.position = b; SurfaceVertices[base + 1u] = v;
-    v.normal = FieldNormal(c); v.position = c; SurfaceVertices[base + 2u] = v;
+    v.normal = float3(0, 1, 0);
+    v.position = a; SurfaceVertices[base + 0u] = v;
+    v.position = b; SurfaceVertices[base + 1u] = v;
+    v.position = c; SurfaceVertices[base + 2u] = v;
 }
 
 // 四面体 1 個の等値面。内側頂点の個数だけで分割が決まるのでテーブルが要らない。
@@ -378,4 +480,18 @@ void WriteDrawArgs(uint3 id : SV_DispatchThreadID)
     DrawArgs[1] = 1u;          // インスタンス数
     DrawArgs[2] = 0u;
     DrawArgs[3] = 0u;
+    // [4..6] = ComputeVertexNormals の DispatchIndirect 引数
+    DrawArgs[4] = (tris * 3u + THREADS - 1u) / THREADS;
+    DrawArgs[5] = 1u;
+    DrawArgs[6] = 1u;
+    DrawArgs[7] = 0u;
+}
+
+// 出来上がった頂点に法線を付ける。等値面を作ったのと同じ密度場を同じ式で読む。
+[numthreads(THREADS, 1, 1)]
+void ComputeVertexNormals(uint3 id : SV_DispatchThreadID)
+{
+    uint count = min(SurfaceCounters[1], MaxTriangles) * 3u;
+    if (id.x >= count) return;
+    SurfaceVertices[id.x].normal = FieldNormal(SurfaceVertices[id.x].position);
 }

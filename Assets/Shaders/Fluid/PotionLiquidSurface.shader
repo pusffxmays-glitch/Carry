@@ -77,11 +77,35 @@ Shader "Custom/PotionLiquidSurface"
             };
             StructuredBuffer<SurfaceVertex> _SurfaceVertices;
 
-            TEXTURE3D(_DensityField);
-            SAMPLER(sampler_DensityField);
+            // 密度場は 3D テクスチャではなく **Sparse Brick Pool** から読む (§14)。
+            // FluidSurface.compute と同じ間接参照を使う。ここを 3D テクスチャのままに
+            // すると、等値面は部屋全体に出るのに厚み（＝色と発光）だけが壺の周りでしか
+            // 出ない、という壊れ方をする。
+            StructuredBuffer<uint>  _BrickSlot;
+            StructuredBuffer<float> _Pool;
+            float3 _VoxelDims;
+            float3 _BrickDims;
+            float  _VoxelSize;
+            float  _PoolCapacity;
             float3 _FieldOrigin;
             float3 _FieldSize;
             float  _IsoValue;
+
+            #define POOL_BRICK_VOXELS 512
+
+            float ReadField(int3 v)
+            {
+                int3 dims = (int3)_VoxelDims;
+                if (any(v < 0) || any(v >= dims)) return 0.0;
+                uint3 b = (uint3)v >> 3u;
+                uint bd = (uint)_BrickDims.x;
+                uint bdy = (uint)_BrickDims.y;
+                uint bi = b.x + b.y * bd + b.z * bd * bdy;
+                uint slot = _BrickSlot[bi];
+                if (slot >= (uint)_PoolCapacity) return 0.0;     // 未割当 = そこに液体は無い
+                uint3 l = (uint3)v & 7u;
+                return _Pool[slot * POOL_BRICK_VOXELS + l.x + l.y * 8u + l.z * 64u];
+            }
 
             CBUFFER_START(UnityPerMaterial)
                 float4 _ShallowColor;
@@ -120,26 +144,61 @@ Shader "Custom/PotionLiquidSurface"
                 return o;
             }
 
+            // プールにはハードウェアのフィルタリングが無いので手でトリリニア補間する。
             float SampleDensity(float3 wp)
             {
-                float3 uvw = (wp - _FieldOrigin) / max(_FieldSize, 1e-5);
-                if (any(uvw < 0.0) || any(uvw > 1.0)) return 0.0;
-                return SAMPLE_TEXTURE3D_LOD(_DensityField, sampler_DensityField, uvw, 0).r;
+                float3 f = (wp - _FieldOrigin) / _VoxelSize - 0.5;
+                int3 b = (int3)floor(f);
+                float3 t = f - (float3)b;
+
+                float c000 = ReadField(b + int3(0,0,0));
+                float c100 = ReadField(b + int3(1,0,0));
+                float c010 = ReadField(b + int3(0,1,0));
+                float c110 = ReadField(b + int3(1,1,0));
+                float c001 = ReadField(b + int3(0,0,1));
+                float c101 = ReadField(b + int3(1,0,1));
+                float c011 = ReadField(b + int3(0,1,1));
+                float c111 = ReadField(b + int3(1,1,1));
+
+                float c00 = lerp(c000, c100, t.x);
+                float c10 = lerp(c010, c110, t.x);
+                float c01 = lerp(c001, c101, t.x);
+                float c11 = lerp(c011, c111, t.x);
+                return lerp(lerp(c00, c10, t.y), lerp(c01, c11, t.y), t.z);
             }
 
-            // 表面から視線方向へ密度場を積分し、実際に液体が何メートル分あるかを測る。
+            // 表面から視線方向へ密度場を辿り、実際に液体が何メートル分あるかを測る。
             // 見た目のための近似ではなく、等値面を作ったのと同じ場を使う。
+            //
+            // **裏側の等値面を横切る位置は線形補間で求める。**
+            // 以前は「サンプル点が内側なら stepLen を足す」という数え方をしていたので、
+            // 厚みが stepLen (既定 0.45m / 12 = 37.5mm) 刻みに量子化されていた。
+            // 厚みは色と発光をそのまま決めるため、量子化がそのまま**等高線状の縞**として
+            // 液面に出る（ユーザー報告の「線上のノイズ」）。交点を補間すれば厚みは連続に
+            // なり、縞は原理的に発生しない。サンプル数を増やすより正確でもある。
             float MeasureThickness(float3 startWS, float3 dirWS)
             {
                 int steps = (int)_ThicknessSteps;
                 float stepLen = _ThicknessRef / max(1.0, (float)steps);
-                float thickness = 0.0;
+
+                // 始点は表面そのものなので、ここでの密度はほぼ _IsoValue。
+                float prevD = SampleDensity(startWS);
+                float travelled = 0.0;
+
                 [loop] for (int i = 1; i <= steps; i++)
                 {
-                    float3 p = startWS + dirWS * (stepLen * i);
-                    if (SampleDensity(p) > _IsoValue) thickness += stepLen;
+                    float ti = stepLen * i;
+                    float d = SampleDensity(startWS + dirWS * ti);
+                    if (d <= _IsoValue)
+                    {
+                        // 直前のサンプルとの間で等値面を抜けた。その交点までの距離が厚み。
+                        float f = saturate((prevD - _IsoValue) / max(1e-6, prevD - d));
+                        return ti - stepLen + f * stepLen;
+                    }
+                    prevD = d;
+                    travelled = ti;
                 }
-                return thickness;
+                return travelled;   // 参照厚みより厚い = 飽和
             }
 
             half4 frag(Varyings IN) : SV_Target

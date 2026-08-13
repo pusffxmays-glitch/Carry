@@ -1019,7 +1019,7 @@ MonoBehaviour:
   groundMargin: 0.12
   topMargin: 1.2
   rimOpeningHeight: 0.08
-  groundLifetime: 45
+  groundLifetime: 10
   escapeAboveRim: 1
   escapeMarginSpacings: 2
   boundsRestitution: 0.02
@@ -1045,8 +1045,9 @@ MonoBehaviour:
   smoothingPasses: 2
   normalEpsVoxels: 1.2
   densityFixedPointScale: 16384
-  maxVoxelsPerAxis: 384
-  maxTriangles: 900000
+  domainSize: {x: 24, y: 4.5, z: 24}
+  poolBrickCapacity: 16384
+  maxTriangles: 2400000
   liquidMaterial: {fileID: 0}
   liquidShader: {fileID: 4800000, guid: 01d274dfaa867904f87c7d6fcc7fb0bc, type: 3}
   logCapacity: 0
@@ -1073,6 +1074,7 @@ MonoBehaviour:
   debugForceCylinderRadius: 0
   simMaxSpeed: 5
   simMaxAngularSpeed: 240
+  simMaxAccel: 70
   teleportDistance: 0.6
   teleportAngle: 100
 --- !u!1660057539 &9223372036854775807

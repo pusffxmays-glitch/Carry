@@ -60,6 +60,12 @@ public static class CarrySetupFluidGame
         if (srf == null) srf = pot.gameObject.AddComponent<FluidSurface>();
         srf.surfaceCompute = AssetDatabase.LoadAssetAtPath<ComputeShader>(SurfacePath);
         srf.liquidShader = Shader.Find("Custom/PotionLiquidSurface");
+        // §14 Sparse Brick Pool。描画ドメインは 24m 角で、こぼした液体は 12m 離れるまで
+        // 描画され続ける（以前は 1.8m の箱だったので、少し歩くと地面の液体が消え、
+        // 箱の縁が四角い境界線として見えていた）。
+        srf.domainSize = new Vector3(24f, 4.5f, 24f);
+        srf.poolBrickCapacity = 16384;
+        srf.maxTriangles = 2400000;   // 地面の液滴は 1 粒ずつ閉曲面になるので枚数が要る
 
         // §17: ゲージは Fluid の状態を読むだけ。逆向きに書く経路は無い。
         var gauge = Object.FindObjectOfType<PotionGaugeUI>();
