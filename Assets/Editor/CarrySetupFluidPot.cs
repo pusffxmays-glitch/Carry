@@ -67,6 +67,11 @@ public static class CarrySetupFluidPot
         core.particleCount = 16384;
         core.fillFraction = 0.45f;
         core.simPadding = 0.45f;
+        core.groundY = 0f;              // Floor の上面 (y=0)
+        core.lateralSpread = 0.55f;     // 注ぎ出した液体が横へ広がる余地 (Phase 7 実測)
+        core.groundMargin = 0.12f;
+        core.topMargin = 0.18f;
+        core.rimOpeningHeight = 0.08f;
 
         var surface = pot.AddComponent<FluidSurface>();
         surface.surfaceCompute = AssetDatabase.LoadAssetAtPath<ComputeShader>(SurfacePath);

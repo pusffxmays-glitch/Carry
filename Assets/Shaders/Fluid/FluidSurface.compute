@@ -17,6 +17,9 @@
 // ============================================================================================
 
 #pragma kernel ClearDensity
+#pragma kernel MarkBricks
+#pragma kernel CollectBricks
+#pragma kernel ClearBricks
 #pragma kernel SplatDensity
 #pragma kernel DecodeDensity
 #pragma kernel BlurDensity
@@ -24,6 +27,20 @@
 
 #define THREADS 256
 #define THREADS3 4
+#define BRICK 8         // 1 Brick = 8^3 voxel (§14)
+
+uint ClearStride;   // ClearDensity の 2 次元タイル幅
+
+// ---- Sparse Brick (§14) ----
+// 場そのものは全ドメインで 1 つ・連続。Brick は「同じ 1 つの場のどこを計算するか」を
+// 決めるだけで、別の場を作らない。したがって Brick 境界に継ぎ目は発生しない。
+uint3 BrickDims;
+uint  BrickMargin;                          // 粒子の Brick からこの数だけ外側も有効にする
+RWStructuredBuffer<uint>     BrickMarks;    // 今フレーム粒子が居る Brick
+RWStructuredBuffer<uint>     BrickResident; // 前フレームに使っていた Brick（消し残し防止）
+AppendStructuredBuffer<uint> ActiveBricksAppend;
+StructuredBuffer<uint>       ActiveBricks;
+RWTexture3D<float>           DensityClearB;  // ClearBricks 用の 2 枚目
 
 RWStructuredBuffer<uint> DensityAccum;      // 固定小数。atomic 用
 RWTexture3D<float>       DensityOut;        // Visual 用
@@ -69,9 +86,77 @@ uint VoxelIndex(uint3 c) { return c.x + c.y * VoxelDims.x + c.z * VoxelDims.x * 
 [numthreads(THREADS, 1, 1)]
 void ClearDensity(uint3 id : SV_DispatchThreadID)
 {
+    // 初期化時に 1 度だけ場全体を 0 にする。有効 Brick が 65535 グループを超えうる
+    // 初回クリアを DispatchIndirect に任せないための経路。
+    // 1 次元ディスパッチではグループ数が 65535 を超えるので 2 次元へタイルする。
     uint total = VoxelDims.x * VoxelDims.y * VoxelDims.z;
-    if (id.x >= total) return;
-    DensityAccum[id.x] = 0;
+    uint idx = id.x + id.y * ClearStride;
+    if (idx >= total) return;
+    DensityAccum[idx] = 0;
+
+    uint xy = VoxelDims.x * VoxelDims.y;
+    uint3 v = uint3(idx % VoxelDims.x, (idx / VoxelDims.x) % VoxelDims.y, idx / xy);
+    DensityOut[v] = 0;
+    DensityClearB[v] = 0;
+}
+
+uint BrickIndex(uint3 b) { return b.x + b.y * BrickDims.x + b.z * BrickDims.x * BrickDims.y; }
+
+uint3 BrickCoord(uint idx)
+{
+    uint xy = BrickDims.x * BrickDims.y;
+    return uint3(idx % BrickDims.x, (idx / BrickDims.x) % BrickDims.y, idx / xy);
+}
+
+// 粒子の居る Brick とその周囲 BrickMargin 個を「有効」にする。
+// マージンは Splat 半径 + Blur の到達範囲より広くしておく。そうしないと、
+// 有効でない Brick の古い値を Blur が読んでしまう。
+[numthreads(THREADS, 1, 1)]
+void MarkBricks(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= ParticleCount) return;
+
+    float3 local = (Particles[i] - FieldOrigin) / VoxelSize;
+    int3 vc = (int3)floor(local);
+    int3 bc = vc / (int)BRICK;
+    int m = (int)BrickMargin;
+
+    int3 lo = max(bc - m, int3(0, 0, 0));
+    int3 hi = min(bc + m, (int3)BrickDims - 1);
+
+    [loop] for (int z = lo.z; z <= hi.z; z++)
+    [loop] for (int y = lo.y; y <= hi.y; y++)
+    [loop] for (int x = lo.x; x <= hi.x; x++)
+        BrickMarks[BrickIndex(uint3(x, y, z))] = 1;
+}
+
+// 今フレーム有効な Brick に加えて、前フレームだけ有効だった Brick も 1 度だけ拾う。
+// そうしないと、液体が去った跡の密度が消えずに残る。
+[numthreads(THREADS, 1, 1)]
+void CollectBricks(uint3 id : SV_DispatchThreadID)
+{
+    uint b = id.x;
+    uint total = BrickDims.x * BrickDims.y * BrickDims.z;
+    if (b >= total) return;
+
+    uint mark = BrickMarks[b];
+    uint res  = BrickResident[b];
+    if (mark != 0 || res != 0) ActiveBricksAppend.Append(b);
+
+    BrickResident[b] = mark;
+    BrickMarks[b] = 0;              // 次フレームのために戻す
+}
+
+// 有効 Brick だけを 0 クリアする。全ドメインを毎フレーム触らないための要 (§14)。
+[numthreads(BRICK, BRICK, BRICK)]
+void ClearBricks(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
+{
+    uint3 v = BrickCoord(ActiveBricks[gid.x]) * BRICK + gtid;
+    if (any(v >= VoxelDims)) return;
+    DensityAccum[VoxelIndex(v)] = 0;
+    DensityOut[v] = 0;
+    DensityClearB[v] = 0;
 }
 
 // 粒子ごとに、影響半径内のボクセルへカーネル値を加算する。
@@ -106,17 +191,19 @@ void SplatDensity(uint3 id : SV_DispatchThreadID)
     }
 }
 
-[numthreads(THREADS3, THREADS3, THREADS3)]
-void DecodeDensity(uint3 id : SV_DispatchThreadID)
+[numthreads(BRICK, BRICK, BRICK)]
+void DecodeDensity(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
 {
+    uint3 id = BrickCoord(ActiveBricks[gid.x]) * BRICK + gtid;
     if (any(id >= VoxelDims)) return;
     DensityOut[id] = (float)DensityAccum[VoxelIndex(id)] / DensityScale;
 }
 
 // 分離ガウシアン (§14 Density Smoothing)。BlurAxis で軸を切り替えて 3 回まわす。
-[numthreads(THREADS3, THREADS3, THREADS3)]
-void BlurDensity(uint3 id : SV_DispatchThreadID)
+[numthreads(BRICK, BRICK, BRICK)]
+void BlurDensity(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
 {
+    uint3 id = BrickCoord(ActiveBricks[gid.x]) * BRICK + gtid;
     if (any(id >= VoxelDims)) return;
 
     const float w0 = 0.38774, w1 = 0.24477, w2 = 0.06136;
@@ -236,9 +323,10 @@ void MarchTetra(float3 p0, float v0, float3 p1, float v1, float3 p2, float v2, f
     }
 }
 
-[numthreads(THREADS3, THREADS3, THREADS3)]
-void BuildSurface(uint3 id : SV_DispatchThreadID)
+[numthreads(BRICK, BRICK, BRICK)]
+void BuildSurface(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
 {
+    uint3 id = BrickCoord(ActiveBricks[gid.x]) * BRICK + gtid;
     if (any(id + 1 >= VoxelDims)) return;
     int3 c = (int3)id;
 

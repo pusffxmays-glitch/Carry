@@ -31,6 +31,7 @@
 #pragma kernel ComputeNormals
 #pragma kernel ApplyViscosityTension
 #pragma kernel Finalize
+#pragma kernel ClassifyRegions
 
 #define THREADS 256
 #define SCAN_BLOCK 256
@@ -44,6 +45,10 @@
 // RW 名で、読むカーネルには RO 名でバインドする。1 つのカーネルに両方を同時にバインドしない
 // ことは C# 側の per-kernel バインドで保証する。
 RWStructuredBuffer<float3> Positions;
+// 分類カーネル用の読み取り専用エイリアス。
+// RimOpening 判定が液体を押し出すことがコード上不可能になるよう、
+// ClassifyRegions には位置・速度を SRV としてしかバインドしない (§11/追加修正1)。
+StructuredBuffer<float3>   PositionsIn;
 RWStructuredBuffer<float3> PredictedPositions;
 StructuredBuffer<float3>   PredictedIn;
 RWStructuredBuffer<float3> Velocities;
@@ -133,12 +138,23 @@ StructuredBuffer<float> PotProfileBuf;
 uint   PotProfileCount;
 float  PotFloorY;
 float  PotRimY;
+float  SafetyTopY;   // ここより上では SafetyCorrection を一切かけない（リムは出口であって壁ではない）
 float  PotMaxRadius;
+float  PotRimR;            // リム半径。Rim Opening 領域の判定に使う
 float  SafetyMargin;
 int    SafetyEnabled;
 float4x4 WorldToPotSafety;
 float4x4 PotToWorldSafety;
 RWStructuredBuffer<uint> SafetyCounters;   // [0] = 発動粒子数
+
+// ---- 領域分類 / Overflow 判定 (§11, §14) ----
+// ここは「観測」しかしない。粒子の生成も移動も速度変更も一切行わない。
+RWStructuredBuffer<uint> RegionFlags;
+RWStructuredBuffer<uint> RegionCounters;
+// [0]=Inside [1]=RimOpening [2]=Airborne [3]=Ground [4]=正常Overflow遷移 [5]=貫通(異常)
+float RimOpeningHeight;
+float GroundY;
+float GroundBandHeight;   // 地面から上へこの高さまでを Ground 領域とみなす (§20)
 
 // ============================================================================ SPH kernels
 static const float PI = 3.14159265359;
@@ -456,7 +472,9 @@ void ComputeNormals(uint3 id : SV_DispatchThreadID)
     FOREACH_NEIGHBOUR(pi,
     {
         if (j == i || j >= FluidCount) continue;
-        float3 rij = pi - SortPositions[j];
+        // 読み取り専用エイリアスを使う。RW 版 (SortPositions) を書くと、
+        // このカーネルには束縛されていないため未束縛バッファを読んでしまう。
+        float3 rij = pi - SortPositionsIn[j];
         float r2 = dot(rij, rij);
         if (r2 >= h * h) continue;
         n += (ParticleMass / max(DensitiesIn[j], 1e-6)) * SpikyGrad(rij, h);
@@ -494,9 +512,17 @@ void ApplyViscosityTension(uint3 id : SV_DispatchThreadID)
         {
             // §2 の補正項: 境界粘性。圧力結合が伝えるのは法線成分、これは接線成分。
             // 直交する独立成分なので疑似重力のような二重計上にならない。
+            //
+            // **接線成分だけに射影すること。** 相対速度をそのまま使うと、壁は「壁から
+            // 離れていく動き」まで減速する。これは圧力（法線）と二重計上であり、
+            // 実測では壺のリムを越えようとする薄い流出層を壁に貼り付けてしまい、
+            // 液体が溢れ出せなくなった（Phase 7: bv=0.55 で残存 90.5%、bv=0 で 77.4%）。
+            // rij は境界粒子から流体粒子への向きなので、局所法線の近似として使える。
             float psi = BoundaryVolumes[j - FluidCount];
             float w = Poly6(r2, h);
-            boundaryDrag += psi * w * (BoundaryVelocities[j - FluidCount] - vi);
+            float3 nb = rij / r;
+            float3 dv = BoundaryVelocities[j - FluidCount] - vi;
+            boundaryDrag += psi * w * (dv - dot(dv, nb) * nb);
         }
         else
         {
@@ -539,8 +565,8 @@ float PotRadiusAt(float localY)
     return lerp(PotProfileBuf[i0], PotProfileBuf[i1], saturate(f - (float)i0));
 }
 
-// 世界境界（グリッド外周 = 数値的な最終防壁）と、壺内部からの一時貫通の回収。
-// 壺の壁そのものは Boundary Particle が担当する (§10)。ここは例外処理。
+// 世界境界（グリッド外周 = 数値的な最終防壁）と、地面、壺内部からの一時貫通の回収。
+// 壺の壁そのものは Boundary Particle が担当する (§10)。ここは例外処理と地面。
 [numthreads(THREADS, 1, 1)]
 void Finalize(uint3 id : SV_DispatchThreadID)
 {
@@ -551,6 +577,14 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     float3 v = Velocities[i];
     if (any(isnan(p)) || any(isinf(p))) { p = clamp(Positions[i], BoundsMin, BoundsMax); v = float3(0, 0, 0); }
     float3 before = p;
+
+    // 地面 (§9 Collision)。Overflow した液体はここへ落ちる。
+    if (p.y < GroundY)
+    {
+        p.y = GroundY;
+        if (v.y < 0.0) v.y = -v.y * BoundsRestitution;
+        v.xz *= (1.0 - BoundsFriction);
+    }
 
     [unroll] for (int a = 0; a < 3; a++)
     {
@@ -570,11 +604,13 @@ void Finalize(uint3 id : SV_DispatchThreadID)
 
         if (lp.y < PotFloorY - SafetyMargin && lp.y > PotFloorY - PotMaxRadius)
         {
-            // 床より下、かつ壺の真下にいる = 底を抜けた
             float r = length(lp.xz);
             if (r < PotMaxRadius) { lp.y = PotFloorY + SafetyMargin; fixedUp = true; }
         }
-        else if (lp.y >= PotFloorY && lp.y <= PotRimY)
+        // リム付近では絶対に補正しない。ここで補正すると、リムを越えようとしている
+        // 粒子を内側へ引き戻すことになり、SafetyCorrection が「液体を容器に留める堰」
+        // として常態化する（追加修正2 が禁止している状態）。
+        else if (lp.y >= PotFloorY && lp.y <= SafetyTopY)
         {
             float r = length(lp.xz);
             float rIn = PotRadiusAt(lp.y);
@@ -596,4 +632,77 @@ void Finalize(uint3 id : SV_DispatchThreadID)
 
     Positions[i] = p;
     Velocities[i] = v;
+}
+
+// ============================================================================
+// 領域分類 / Overflow 判定 (§11, §14, 追加修正1)
+//
+// **このカーネルは観測しかしない。** 書き込むのは RegionFlags と RegionCounters だけで、
+// 位置・速度は SRV (PositionsIn) としてしか渡されていない。したがって RimOpening 判定が
+// 液体を外へ押し出すことはコード上不可能である。液体が壺の外へ出る原因は、
+// World Gravity / 慣性 / PBF 圧力 / 粘性 / 表面張力 / Moving Boundary だけ。
+//
+// Rim Opening を「通過した」粒子だけを正常な Overflow とみなす。壁や底から直接外へ
+// 出た粒子は Boundary Failure として別に数え、Overflow には計上しない。
+// ============================================================================
+#define REGION_INSIDE  0u
+#define REGION_RIM     1u
+#define REGION_AIR     2u
+#define REGION_GROUND  3u
+#define FLAG_PASSED_RIM 8u
+#define FLAG_EVER_OUT  16u    // 一度でも壺の外へ出た。戻っても消さない（重複計上を防ぐラッチ）
+
+[numthreads(THREADS, 1, 1)]
+void ClassifyRegions(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+
+    float3 p = PositionsIn[i];
+    uint prev = RegionFlags[i];
+    uint prevRegion = prev & 7u;
+    bool passedRim = (prev & FLAG_PASSED_RIM) != 0u;
+    bool everOut   = (prev & FLAG_EVER_OUT) != 0u;
+
+    uint region;
+    if (p.y <= GroundY + GroundBandHeight)
+    {
+        region = REGION_GROUND;
+    }
+    else
+    {
+        float3 lp = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
+        float r = length(lp.xz);
+
+        if (lp.y >= PotFloorY && lp.y <= PotRimY && r <= PotRadiusAt(lp.y))
+        {
+            region = REGION_INSIDE;
+            passedRim = false;                     // 中に戻ったら通過履歴はリセット
+        }
+        else if (lp.y > PotRimY && lp.y <= PotRimY + RimOpeningHeight && r <= PotRimR)
+        {
+            region = REGION_RIM;                   // ここが Open Boundary の「出口」
+            passedRim = true;                      // 通過を観測しただけ。押し出してはいない
+        }
+        else
+        {
+            region = REGION_AIR;
+        }
+    }
+
+    uint dummy;
+    InterlockedAdd(RegionCounters[region], 1, dummy);
+
+    // 遷移の判定: Inside から出た瞬間だけを見る。
+    // 液面付近の粒子は Inside と RimOpening を何度も往復するので、遷移をそのまま数えると
+    // 「溢れた量」としては読めない。粒子ごとに FLAG_EVER_OUT でラッチし、
+    // **初めて外へ出たときだけ**数える。
+    if (prevRegion == REGION_INSIDE && region != REGION_INSIDE && !everOut)
+    {
+        everOut = true;
+        if (region == REGION_RIM || passedRim) InterlockedAdd(RegionCounters[4], 1, dummy);   // 正常な Overflow
+        else                                   InterlockedAdd(RegionCounters[5], 1, dummy);   // 貫通 = 異常
+    }
+
+    RegionFlags[i] = region | (passedRim ? FLAG_PASSED_RIM : 0u) | (everOut ? FLAG_EVER_OUT : 0u);
 }

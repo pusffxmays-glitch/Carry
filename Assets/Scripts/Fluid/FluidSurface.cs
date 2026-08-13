@@ -29,6 +29,8 @@ public class FluidSurface : MonoBehaviour
     public float densityFixedPointScale = 16384f;
 
     [Header("Capacity (§13/修正9)")]
+    [Tooltip("密度場 1 軸あたりのボクセル数上限。これで切り詰められると表面が領域端で欠けるため、警告を出す。")]
+    [Range(64, 512)] public int maxVoxelsPerAxis = 384;
     [Tooltip("生成できる三角形の上限。超過分は書き込まずカウンタに積む。容量不足を理由に簡易表現へ切り替えることはしない。")]
     public int maxTriangles = 900000;
 
@@ -51,17 +53,21 @@ public class FluidSurface : MonoBehaviour
     public ComputeShader surfaceCompute;
 
     GraphicsBuffer densityAccum, vertexBuffer, argsBuffer, counters;
+    GraphicsBuffer brickMarks, brickResident, activeBricks, brickArgs;
     RenderTexture densityA, densityB;
-    Vector3Int voxelDims;
+    Vector3Int voxelDims, brickDims;
+    int brickTotal;
     Vector3 fieldOrigin;
     float voxelSize, splatRadius;
     MaterialPropertyBlock mpb;
     uint[] counterReset = new uint[4];
     uint[] counterRead = new uint[4];
 
-    int kClear, kSplat, kDecode, kBlur, kBuild;
+    int kClear, kMark, kCollect, kClearBricks, kSplat, kDecode, kBlur, kBuild;
     const int Threads = 256;
     const int Threads3 = 4;
+    const int Brick = 8;        // FluidSurface.compute の BRICK と一致させること
+    const int BrickMargin = 2;  // Splat 半径 + Blur 到達範囲を覆う余裕
 
     static readonly int IdVerts = Shader.PropertyToID("_SurfaceVertices");
     static readonly int IdDensityTex = Shader.PropertyToID("_DensityField");
@@ -84,6 +90,10 @@ public class FluidSurface : MonoBehaviour
     void Release()
     {
         densityAccum?.Release(); densityAccum = null;
+        brickMarks?.Release(); brickMarks = null;
+        brickResident?.Release(); brickResident = null;
+        activeBricks?.Release(); activeBricks = null;
+        brickArgs?.Release(); brickArgs = null;
         vertexBuffer?.Release(); vertexBuffer = null;
         argsBuffer?.Release(); argsBuffer = null;
         counters?.Release(); counters = null;
@@ -105,6 +115,9 @@ public class FluidSurface : MonoBehaviour
 
         cs = surfaceCompute;
         kClear = cs.FindKernel("ClearDensity");
+        kMark = cs.FindKernel("MarkBricks");
+        kCollect = cs.FindKernel("CollectBricks");
+        kClearBricks = cs.FindKernel("ClearBricks");
         kSplat = cs.FindKernel("SplatDensity");
         kDecode = cs.FindKernel("DecodeDensity");
         kBlur = cs.FindKernel("BlurDensity");
@@ -138,10 +151,20 @@ public class FluidSurface : MonoBehaviour
         Vector3 pad = Vector3.one * (splatRadius * 2f + voxelSize * 2f);
         Vector3 span = b.size + pad * 2f;
 
+        // 上限で切り詰めると密度場がシミュレーション領域を覆いきれず、表面が領域端で
+        // 平らに欠ける。黙って切り詰めるのは性能を理由に品質を落とすことなので (§36)、
+        // 切り詰めが起きたら必ず警告を出す。
+        var want = new Vector3Int(
+            Mathf.CeilToInt(span.x / voxelSize) + 1,
+            Mathf.CeilToInt(span.y / voxelSize) + 1,
+            Mathf.CeilToInt(span.z / voxelSize) + 1);
         voxelDims = new Vector3Int(
-            Mathf.Clamp(Mathf.CeilToInt(span.x / voxelSize) + 1, 8, 320),
-            Mathf.Clamp(Mathf.CeilToInt(span.y / voxelSize) + 1, 8, 320),
-            Mathf.Clamp(Mathf.CeilToInt(span.z / voxelSize) + 1, 8, 320));
+            Mathf.Clamp(want.x, 8, maxVoxelsPerAxis),
+            Mathf.Clamp(want.y, 8, maxVoxelsPerAxis),
+            Mathf.Clamp(want.z, 8, maxVoxelsPerAxis));
+        if (want.x > voxelDims.x || want.y > voxelDims.y || want.z > voxelDims.z)
+            Debug.LogWarning($"FluidSurface: 密度場がシミュレーション領域を覆えていません。必要 {want} / 実際 {voxelDims}。" +
+                             "maxVoxelsPerAxis を上げるか FluidCore の領域を狭めてください。表面が領域端で平らに欠けます。", this);
 
         UpdateFieldOrigin();
 
@@ -149,8 +172,49 @@ public class FluidSurface : MonoBehaviour
         densityAccum?.Release();
         densityAccum = new GraphicsBuffer(GraphicsBuffer.Target.Structured, total, sizeof(uint));
 
+        // Sparse Brick (§14)。場は 1 つのまま、毎フレーム触る範囲だけを液体の周囲に限る。
+        // Brick は「同じ 1 つの場のどこを計算するか」を決めるだけで、別の場は作らない。
+        brickDims = new Vector3Int(
+            Mathf.CeilToInt(voxelDims.x / (float)Brick),
+            Mathf.CeilToInt(voxelDims.y / (float)Brick),
+            Mathf.CeilToInt(voxelDims.z / (float)Brick));
+        brickTotal = brickDims.x * brickDims.y * brickDims.z;
+
+        brickMarks?.Release(); brickResident?.Release(); activeBricks?.Release(); brickArgs?.Release();
+        brickMarks = new GraphicsBuffer(GraphicsBuffer.Target.Structured, brickTotal, sizeof(uint));
+        brickResident = new GraphicsBuffer(GraphicsBuffer.Target.Structured, brickTotal, sizeof(uint));
+        activeBricks = new GraphicsBuffer(GraphicsBuffer.Target.Append | GraphicsBuffer.Target.Structured,
+                                          brickTotal, sizeof(uint));
+        brickArgs = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 3, sizeof(uint));
+        brickArgs.SetData(new uint[] { 0, 1, 1 });
+
+        brickResident.SetData(new uint[brickTotal]);
+        brickMarks.SetData(new uint[brickTotal]);
+
         densityA = MakeVolume(densityA, "FluidDensityA");
         densityB = MakeVolume(densityB, "FluidDensityB");
+
+        ClearWholeField(total);
+
+        // 場の広さは毎フレームのコストではなく VRAM のコスト。Sparse Brick により
+        // 計算量は液体の体積に比例する。実測値を必ず残しておく。
+        float mb = (total * 4f + total * 2f * 2f) / (1024f * 1024f);
+        Debug.Log($"FluidSurface: voxel {voxelSize * 1000f:F1}mm / dims {voxelDims} = {total / 1000000f:F1}M voxel, " +
+                  $"brick {brickDims} = {brickTotal}, VRAM {mb:F0}MB", this);
+    }
+
+    // 場全体を 1 度だけ 0 にする。以後は有効 Brick だけを触る (§14)。
+    void ClearWholeField(int total)
+    {
+        cs.SetInts("VoxelDims", voxelDims.x, voxelDims.y, voxelDims.z);
+        int groupsX = Mathf.Min(32768, Mathf.CeilToInt(total / (float)Threads));
+        int stride = groupsX * Threads;
+        int groupsY = Mathf.CeilToInt(total / (float)stride);
+        cs.SetInt("ClearStride", stride);
+        cs.SetBuffer(kClear, "DensityAccum", densityAccum);
+        cs.SetTexture(kClear, "DensityOut", densityA);
+        cs.SetTexture(kClear, "DensityClearB", densityB);
+        cs.Dispatch(kClear, groupsX, groupsY, 1);
     }
 
     void UpdateFieldOrigin()
@@ -188,9 +252,10 @@ public class FluidSurface : MonoBehaviour
     void BuildSurface()
     {
         UpdateFieldOrigin();     // 容器が動くので密度場も追従する
-        int total = voxelDims.x * voxelDims.y * voxelDims.z;
 
         cs.SetInts("VoxelDims", voxelDims.x, voxelDims.y, voxelDims.z);
+        cs.SetInts("BrickDims", brickDims.x, brickDims.y, brickDims.z);
+        cs.SetInt("BrickMargin", BrickMargin);
         cs.SetVector("FieldOrigin", fieldOrigin);
         cs.SetFloat("VoxelSize", voxelSize);
         cs.SetFloat("SplatRadius", splatRadius);
@@ -200,21 +265,39 @@ public class FluidSurface : MonoBehaviour
         cs.SetInt("ParticleCount", core.FluidCount);
         cs.SetInt("MaxTriangles", maxTriangles);
 
-        // 1. clear
-        cs.SetBuffer(kClear, "DensityAccum", densityAccum);
-        cs.Dispatch(kClear, Mathf.CeilToInt(total / (float)Threads), 1, 1);
+        // 1. 粒子が居る Brick を立てる (§14)
+        cs.SetBuffer(kMark, "BrickMarks", brickMarks);
+        cs.SetBuffer(kMark, "Particles", core.PositionsBuffer);
+        cs.Dispatch(kMark, Mathf.CeilToInt(core.FluidCount / (float)Threads), 1, 1);
 
-        // 2. splat: 粒子 -> uint 固定小数の atomic 蓄積 (§11/修正3)
+        // 2. 今フレーム分 + 前フレームの残りを集める（液体が去った跡の消し残しを防ぐ）
+        activeBricks.SetCounterValue(0);
+        cs.SetBuffer(kCollect, "BrickMarks", brickMarks);
+        cs.SetBuffer(kCollect, "BrickResident", brickResident);
+        cs.SetBuffer(kCollect, "ActiveBricksAppend", activeBricks);
+        cs.Dispatch(kCollect, Mathf.CeilToInt(brickTotal / (float)Threads), 1, 1);
+        GraphicsBuffer.CopyCount(activeBricks, brickArgs, 0);
+
+        // 3. clear: 有効 Brick だけ。全ドメインを毎フレーム触らない
+        cs.SetBuffer(kClearBricks, "ActiveBricks", activeBricks);
+        cs.SetBuffer(kClearBricks, "DensityAccum", densityAccum);
+        cs.SetTexture(kClearBricks, "DensityOut", densityA);
+        cs.SetTexture(kClearBricks, "DensityClearB", densityB);
+        cs.DispatchIndirect(kClearBricks, brickArgs);
+
+        // 4. splat: 粒子 -> uint 固定小数の atomic 蓄積 (§11/修正3)
         cs.SetBuffer(kSplat, "DensityAccum", densityAccum);
         cs.SetBuffer(kSplat, "Particles", core.PositionsBuffer);
         cs.Dispatch(kSplat, Mathf.CeilToInt(core.FluidCount / (float)Threads), 1, 1);
 
-        // 3. decode: uint -> float 3D texture（Atomic 用と Visual 用の分離）
+        // 5. decode: uint -> float 3D texture（Atomic 用と Visual 用の分離）
+        cs.SetBuffer(kDecode, "ActiveBricks", activeBricks);
         cs.SetBuffer(kDecode, "DensityAccum", densityAccum);
         cs.SetTexture(kDecode, "DensityOut", densityA);
-        DispatchVolume(kDecode);
+        cs.DispatchIndirect(kDecode, brickArgs);
 
-        // 4. smoothing (§14)
+        // 6. smoothing (§14)
+        cs.SetBuffer(kBlur, "ActiveBricks", activeBricks);
         RenderTexture src = densityA, dst = densityB;
         for (int p = 0; p < smoothingPasses; p++)
         {
@@ -223,18 +306,19 @@ public class FluidSurface : MonoBehaviour
                 cs.SetInts("BlurAxis", axis == 0 ? 1 : 0, axis == 1 ? 1 : 0, axis == 2 ? 1 : 0);
                 cs.SetTexture(kBlur, "DensitySrc", src);
                 cs.SetTexture(kBlur, "DensityOut", dst);
-                DispatchVolume(kBlur);
+                cs.DispatchIndirect(kBlur, brickArgs);
                 var tmp = src; src = dst; dst = tmp;
             }
         }
 
-        // 5. iso surface
+        // 7. iso surface
         counters.SetData(counterReset);
         vertexBuffer.SetCounterValue(0);
+        cs.SetBuffer(kBuild, "ActiveBricks", activeBricks);
         cs.SetTexture(kBuild, "DensitySrc", src);
         cs.SetBuffer(kBuild, "SurfaceVertices", vertexBuffer);
         cs.SetBuffer(kBuild, "SurfaceCounters", counters);
-        DispatchVolume(kBuild);
+        cs.DispatchIndirect(kBuild, brickArgs);
 
         GraphicsBuffer.CopyCount(vertexBuffer, argsBuffer, 0);
         surfaceSrc = src;
@@ -251,12 +335,16 @@ public class FluidSurface : MonoBehaviour
 
     RenderTexture surfaceSrc;
 
-    void DispatchVolume(int kernel)
+    public Vector3Int BrickDims => brickDims;
+    public int BrickTotal => brickTotal;
+
+    // Debug 用。CPU 同期が入るので毎フレーム呼ばないこと。
+    public int ReadActiveBrickCount()
     {
-        cs.Dispatch(kernel,
-            Mathf.CeilToInt(voxelDims.x / (float)Threads3),
-            Mathf.CeilToInt(voxelDims.y / (float)Threads3),
-            Mathf.CeilToInt(voxelDims.z / (float)Threads3));
+        if (brickArgs == null) return 0;
+        var a = new uint[3];
+        brickArgs.GetData(a);
+        return (int)a[0];
     }
 
     void OnBeginCamera(ScriptableRenderContext ctx, Camera cam)

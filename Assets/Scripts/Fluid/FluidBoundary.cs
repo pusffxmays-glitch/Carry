@@ -31,6 +31,8 @@ public class FluidBoundary : MonoBehaviour
     public Transform container;
     [Tooltip("壁シェルの厚み。カーネル半径の倍数。1 未満だと液体がカーネルの穴から染み出す。")]
     [Range(1f, 2.5f)] public float shellThicknessPerKernel = 1.15f;
+    [Tooltip("Akinci psi の開口端クランプ。壁内部の sum に対してこの倍率までしか psi を上げない。1 に近いほど強くクランプする。リムで液体が堰き止められるのを防ぐ。")]
+    [Range(1.05f, 4f)] public float edgeVolumeClamp = 1.25f;
 
     // ---- 生成結果（容器ローカル） ----
     public Vector3[] LocalPositions { get; private set; }
@@ -188,6 +190,7 @@ public class FluidBoundary : MonoBehaviour
             if (!buckets.TryGetValue(key, out var list)) { list = new List<int>(); buckets[key] = list; }
             list.Add(i);
         }
+        var sums = new float[n];
         for (int i = 0; i < n; i++)
         {
             var key = new Vector3Int(Mathf.FloorToInt(world[i].x / cell), Mathf.FloorToInt(world[i].y / cell), Mathf.FloorToInt(world[i].z / cell));
@@ -200,8 +203,33 @@ public class FluidBoundary : MonoBehaviour
                         for (int k = 0; k < list.Count; k++)
                             sum += Poly6((world[i] - world[list[k]]).sqrMagnitude, h);
                     }
-            Volumes[i] = 1f / Mathf.Max(sum, 1e-6f);
+            sums[i] = sum;
         }
+
+        // psi = 1/sum は「層の重なりが不均一でも密度が暴れない」ための補正だが、
+        // **開口端（リム）では別の意味を持ってしまう**。リム上の境界粒子は隣の境界粒子が
+        // 少ないので sum が小さくなり、psi が跳ね上がって、出口のちょうどそこに
+        // 強い斥力の壁ができる。これは「壁の形」ではなく「壁の端」に由来する数値的な産物で、
+        // 液体がリムを越えられなくなる原因になる（Phase 7 実測: 最低リム点より 15cm 上に
+        // 水平な液面が止まり、傾け続けても流れ出さなかった）。
+        //
+        // 壁の内部（層の真ん中）の sum を基準として、sum の下限をそこに合わせる。
+        // これで壁としての振る舞いは変えずに、開口端だけの発散を止める。
+        var sorted = (float[])sums.Clone();
+        System.Array.Sort(sorted);
+        float bulkSum = sorted[Mathf.Clamp(Mathf.RoundToInt(0.5f * (n - 1)), 0, n - 1)];
+        float minSum = bulkSum / Mathf.Max(1.0001f, edgeVolumeClamp);
+
+        float psiMin = float.MaxValue, psiMax = 0f;
+        int clamped = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (sums[i] < minSum) clamped++;
+            Volumes[i] = 1f / Mathf.Max(sums[i], Mathf.Max(minSum, 1e-6f));
+            psiMin = Mathf.Min(psiMin, Volumes[i]); psiMax = Mathf.Max(psiMax, Volumes[i]);
+        }
+        Debug.Log($"FluidBoundary: psi bulk={1f / bulkSum:F6} min={psiMin:F6} max={psiMax:F6} " +
+                  $"（開口端でクランプした粒子 {clamped}/{n}）", this);
     }
 
     static float Poly6(float r2, float h)

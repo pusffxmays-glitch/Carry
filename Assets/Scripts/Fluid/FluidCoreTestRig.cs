@@ -15,6 +15,7 @@ public class FluidCoreTestRig : MonoBehaviour
         ShakeX = 3,     // 横揺れ。粘性で遅れて追従するか
         HardStop = 4,   // 急停止。慣性で前方へ寄るか
         SpinY = 5,      // 回転。境界粘性で中身が引きずられるか
+        Pour = 6,       // 傾け続けて実際に Overflow させる (§37 Phase 7)
     }
 
     public Case current = Case.Settle;
@@ -37,6 +38,7 @@ public class FluidCoreTestRig : MonoBehaviour
         transform.SetPositionAndRotation(restPosition, Quaternion.identity);
         if (core == null) core = GetComponent<FluidCore>();
         core.SeedFluid();
+        core.ResetOverflowCounters();
     }
 
     void Update()
@@ -49,6 +51,7 @@ public class FluidCoreTestRig : MonoBehaviour
             if (kb.digit3Key.wasPressedThisFrame) SetCase(Case.ShakeX);
             if (kb.digit4Key.wasPressedThisFrame) SetCase(Case.HardStop);
             if (kb.digit5Key.wasPressedThisFrame) SetCase(Case.SpinY);
+            if (kb.digit6Key.wasPressedThisFrame) SetCase(Case.Pour);
             if (kb.rKey.wasPressedThisFrame) core.SeedFluid();
         }
         if (autoDrive) Drive(Time.deltaTime);
@@ -98,6 +101,11 @@ public class FluidCoreTestRig : MonoBehaviour
             case Case.SpinY:
                 rot = Quaternion.Euler(0f, t * 90f, 0f);
                 break;
+            case Case.Pour:
+                // カメラ側へ傾け続けて、実際にリムから溢れさせる。
+                // 横移動は入れない: 連続した液柱を見るのが目的で、横移動は流れを散らす。
+                rot = Quaternion.Euler(-Mathf.SmoothStep(0f, 62f, Mathf.Clamp01(t / 1.4f)), 0f, 0f);
+                break;
         }
 
         transform.SetPositionAndRotation(pos, rot);
@@ -113,7 +121,12 @@ public class FluidCoreTestRig : MonoBehaviour
                 "particles " + core.FluidCount + "  boundary " + core.BoundaryCount +
                 "  spacing " + core.ParticleSpacing.ToString("F4") + "  h " + core.KernelRadius.ToString("F4") +
                 "  substeps " + core.LastSubStepCount, style);
-        GUI.Label(new Rect(12, 56, 900, 24), "1..5 = case,  R = reseed", style);
+        if (core != null && core.IsReady)
+            GUI.Label(new Rect(12, 56, 900, 24),
+                "inside " + core.InsideCount + "  rim " + core.RimCount + "  air " + core.AirborneCount +
+                "  ground " + core.GroundCount + "   overflow " + core.OverflowEvents +
+                "  penetration " + core.PenetrationEvents + "   fill " + (core.FillFraction01 * 100f).ToString("F1") + "%", style);
+        GUI.Label(new Rect(12, 80, 900, 24), "1..6 = case,  R = reseed", style);
     }
 #endif
 }
