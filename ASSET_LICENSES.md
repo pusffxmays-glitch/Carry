@@ -85,6 +85,20 @@
 - **ゲーム内での使用箇所**: 通常の森ステージ ― スタート地点の石橋本体(`Assets/Stage/Forest/Bridge/Prefabs/StoneBridge.prefab`)。マテリアルは `Assets/Stage/Forest/Bridge/Mat_MeshyStoneBridge.mat`(BaseMap/Normal/合成Metallic-Smoothnessテクスチャを設定済み)。歩行用Colliderはメッシュそのものではなく簡易Box Collider(デッキ用・両端の橋台用)を別途使用。
 - **注記**: ポリゴン削減はBlender 5.2.0 LTS(`C:\Program Files (x86)\blender.exe`、headless `--background --python`)で実施。デシメート後もワールド寸法はほぼ変わらず(Extents (1.00, 0.31, 0.71) → (1.00, 0.31, 0.71))、インポート時の変換もクリーンな単位トランスフォームになった。
 
+## 7. Meshy AI 生成モデル ― AzureCrystal(魔力を帯びた湖のクリスタル、2026-08-14導入)
+
+- **作成方法**: ユーザー自身がMeshyで作成した5種一体のクリスタルモデル(Azure Crystal Outcrop)。第三者配布物ではなくユーザー自身の生成物のため、外部配布ライセンスの確認対象ではないが、記録として残す。
+- **格納場所**: `Assets/Stage/Forest/Crystal/` 配下。`Source/` にMeshyオリジナル(FBX 約25.6万ポリゴン + BaseColor/Normal/Metallic/Roughness 4枚、元ファイル名のまま無改変で保持)。`Models/Separated/` にBlenderで5分割・軽量化(合計約8.9万ポリゴン、各35%)・ピボット調整(各底面中央)・軸補正済みの `AzureCrystal_LakeFloor/CliffWall/RockGap/CliffCrack/Rock.fbx`。`Textures/` に整理名のテクスチャコピー(`AzureCrystal_BaseColor/Normal/Metallic/Roughness.png`)+生成した `AzureCrystal_Emission.png`(BaseColorの青色度マスクから自動生成 — 結晶部分のみ発光させ岩部分は光らせないため)と `AzureCrystal_MetallicSmoothness.png`(URP Lit用にMetallic+Roughness→1枚へ合成)。`Materials/MAT_AzureCrystal.mat`(URP Lit、控えめな青Emission)。`Prefabs/PF_AzureCrystal_*.prefab` 5種。
+- **ゲーム内での使用箇所**: 通常の森ステージの湖 ― 「湖の水に魔力が宿っている理由」を景観で伝えるEnvironment Asset。滝の岩盤亀裂(CliffCrack/RockGap、195°・225°・255°周辺の滝の水源部)、湖底(LakeFloor、水面下に完全に沈む高さ制限付き+微弱な青Point Light 1灯)、崖壁(CliffWall 210°/115°)、湖岸の岩場(Rock 108°/132°)へ、`CarryBuildTerrainForest.BuildAzureCrystals()` がRaycastベースの接地ルールで自動配置(計10個、鉱脈のように滝周辺へ集中配置、均等散布はしない)。
+- **注記**: 分割時、モデル内に含まれていた微小な浮遊破片(259頂点)はRock型クリスタルへ結合して保持。Rock型のConvex MeshColliderはUnityの256ポリゴン制限により部分ハルで近似(装飾物のため実用上問題なし)。
+
+## 8. Meshy AI 生成モデル ― Ancient Forest Guardian(太古の森の守護者、2026-08-14導入)
+
+- **作成方法**: ユーザー自身がMeshyで作成した古木モデル。第三者配布物ではなくユーザー自身の生成物のため、外部配布ライセンスの確認対象ではないが、記録として残す。
+- **格納場所**: `Assets/Stage/Forest/Trees/AncientForestGuardian/` 配下(元は `Assets/Stage/Forest/Trees/tree/` に生ファイル名のまま置かれていたものを`Carry/Setup Ancient Forest Guardian Tree`エディタスクリプトで整理・移動)。`Source/` にMeshyオリジナル(FBX + BaseColor/Normal/Metallic/Roughness 4枚、元ファイル名のまま無改変で保持)。`Textures/` に整理名のテクスチャコピー(`AncientForestGuardian_BaseColor/Normal/Metallic/Roughness.png`)+ 生成した `AncientForestGuardian_MetallicSmoothness.png`(URP Lit用にMetallic+Roughness→1枚へ合成)。`Materials/MAT_AncientForestGuardian.mat`(URP Lit)。`Prefabs/PF_AncientForestGuardian.prefab`。
+- **ゲーム内での使用箇所**: 未配置(格納・マテリアル整備のみ完了、ステージへの配置は別途対応)。
+- **注記**: 他のMeshy生成FBXと同様、インポート時に単位スケール差があり(ルートTransformが100倍スケール、メッシュ自体はネイティブでごく小さい)、配置時は他アセット同様スケール補正が必要。
+
 ## 運用ルール
 
 1. 新しい外部アセットを追加したら、上記と同じ形式でこのファイルに追記する。

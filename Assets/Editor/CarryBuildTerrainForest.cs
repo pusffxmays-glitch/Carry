@@ -148,6 +148,29 @@ public static class CarryBuildTerrainForest
 
             BuildSkyFogLighting(root, log);
             var terrain = BuildTerrain(root, log);
+
+            // 2026-08-14 FIX (user-reported: several CliffBoulder/HeroCoastalCliffBase instances
+            // floating 10-20m in mid-air, at heights the current terrain heightmap doesn't reach
+            // anywhere nearby -- confirmed via direct re-raycast after the build: querying the SAME
+            // xz post-build always returns the correct low height, but the object was placed high at
+            // build time). Root cause: this scene's old root GameObjects (including the previous
+            // Terrain + TerrainCollider) were just DestroyImmediate'd above and a brand-new Terrain
+            // was created via BuildTerrain immediately after, all inside one synchronous call with no
+            // frame boundary -- PhysX's broadphase can still be holding stale collision data (from the
+            // just-destroyed old terrain, or an uncooked new TerrainCollider heightfield) at the exact
+            // moment TryGetTerrainSurface's raycasts run for the very next builders (BuildLakeCliffWall
+            // etc.), producing a "successful" raycast hit against the WRONG (old/uncooked) surface.
+            // Forcing the terrain collider's heightfield to recook and flushing the physics scene
+            // before any raycast-based placement runs eliminates that stale-data window.
+            var terrainCollider = terrain.GetComponent<TerrainCollider>();
+            if (terrainCollider != null)
+            {
+                var terrainDataRef = terrainCollider.terrainData;
+                terrainCollider.terrainData = null;
+                terrainCollider.terrainData = terrainDataRef;
+            }
+            Physics.SyncTransforms();
+
             BuildWater(root, terrain, log);
             BuildLakeWater(root, log);
             BuildLakeCliffWall(root, terrain, log);
@@ -199,11 +222,13 @@ public static class CarryBuildTerrainForest
             BuildRiverGimmick(root, terrain, refWaterY, spawnPos, log);
             BuildTrees(terrain, log);
             BuildLakeHeroLeaningTrees(root, terrain, log);
+            BuildAncientForestGuardianTree(root, terrain, log);
             BuildGroundVegetation(terrain, log);
             BuildGroundDetail(root, terrain, log);
             BuildForestFloorClutter(root, terrain, log);
             BuildFootholds(root, terrain, log);
             BuildCliffVines(root, terrain, log);
+            BuildAzureCrystals(root, terrain, log);
 
             ValidateNoFloatingObjects(root, log);
 
@@ -1430,20 +1455,34 @@ public static class CarryBuildTerrainForest
         wfRoot.transform.SetParent(root.transform, false);
         var center = new Vector2(LakeCenterX, LakeCenterZ);
 
+        // 2026-08-14 REDESIGN (user request): replaced the previous 5 scattered falls with a single
+        // grand "sacred" waterfall -- this is planned as the game's potion-source landmark (ゴブリン
+        // がポーションを汲みに戻ってくる場所), so it needs to read as ONE unmistakable, important
+        // focal point rather than ambient cliff decoration. Placed at 190deg, matching
+        // HeroCoastalCliffBand's own 180deg backdrop (already documented as "the single most
+        // important viewpoint -- directly across the water from the bridge") so the fall pours down
+        // the face of that existing hero cliff rather than competing with it for a separate spot.
         var falls = new (float ang, float width)[]
         {
-            (195f, 2.4f),
-            (165f, 0.8f),
-            (225f, 0.65f),
-            (255f, 1.1f),
-            (300f, 0.6f),
+            (190f, 6.0f),
         };
 
         var mat = GetOrCreateMat("Mat_Waterfall", null, Vector2.one);
-        mat.color = new Color(0.86f, 0.93f, 0.94f, 0.55f);
+        // Brighter and slightly warm-white rather than the old plain pale-blue, plus a soft emissive
+        // glow -- reads as "水そのものが淡く光る神聖な滝" (the water gently glowing) instead of
+        // ordinary falling water, echoing the same quiet-glow language already used for the
+        // AzureCrystal veins elsewhere on this cliff, but warm/white here to stay visually distinct
+        // as this fall's own thing (the potion source), not just another crystal vein.
+        mat.color = new Color(0.90f, 0.95f, 0.92f, 0.6f);
         if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", 0.95f);
         SetTransparent(mat);
         mat.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+        if (mat.HasProperty("_EmissionColor"))
+        {
+            mat.EnableKeyword("_EMISSION");
+            mat.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
+            mat.SetColor("_EmissionColor", new Color(0.65f, 0.70f, 0.60f) * 0.5f);
+        }
 
         var splashMat = GetOrCreateMat("Mat_WaterfallSplash", null, Vector2.one);
         splashMat.color = new Color(0.92f, 0.97f, 0.97f, 0.7f);
@@ -1514,6 +1553,21 @@ public static class CarryBuildTerrainForest
             splash.transform.localScale = new Vector3(f.width * 2.0f, 0.06f, f.width * 1.5f);
             splash.GetComponent<MeshRenderer>().sharedMaterial = splashMat;
 
+            // Soft warm glow at the landing pool -- reinforces "神聖な滝" as a lit, important
+            // landmark visible from across the lake at night/dusk, not just a bright material.
+            // Deliberately gentle (per this project's established "quiet glow, not a searchlight"
+            // convention for every other magical light source) and warm/white to read as distinct
+            // from the AzureCrystal veins' cool blue glow elsewhere on the same cliff.
+            var glowGo = new GameObject("Waterfall_" + placed + "_SacredGlow");
+            glowGo.transform.SetParent(wfRoot.transform, false);
+            glowGo.transform.position = new Vector3(fallPos.x, LakeWaterY + 1.0f, fallPos.y);
+            var glowLight = glowGo.AddComponent<Light>();
+            glowLight.type = LightType.Point;
+            glowLight.color = new Color(1.0f, 0.96f, 0.85f);
+            glowLight.intensity = 1.8f;
+            glowLight.range = f.width * 2.5f;
+            glowLight.shadows = LightShadows.None;
+
             // ---- Flanking rock crevice: two big rock masses embedded into the wall on either
             // side of the fall, so the water reads as emerging from a gap BETWEEN rocks rather
             // than a plane stuck to bare cliff. ----
@@ -1529,7 +1583,14 @@ public static class CarryBuildTerrainForest
             for (int side2 = -1; side2 <= 1; side2 += 2)
             {
                 if (boulderPrefab == null) continue;
-                float flankScale = (1.6f + f.width * 0.8f) * (0.85f + (float)wfRng.NextDouble() * 0.3f);
+                // Rock size capped against a reference width (not the fall's own, now much larger,
+                // width) -- 2026-08-14: at the new 6m hero-fall width the old `1.6+width*0.8` formula
+                // grew the flanking rocks to ~5.4-7.4 scale, big enough that the two rocks' own bulk
+                // met in the middle and nearly swallowed the opening (confirmed via screenshot -- the
+                // fall was almost entirely hidden behind rock). Flanking rocks should scale with how
+                // DEEP/tall a crevice needs to look, not grow unbounded with how wide the water is.
+                float flankRefWidth = Mathf.Min(f.width, 2.4f);
+                float flankScale = (1.6f + flankRefWidth * 0.8f) * (0.85f + (float)wfRng.NextDouble() * 0.3f);
                 Vector2 flankXZ = fallPos + dir * (0.3f + (float)wfRng.NextDouble() * 0.3f) + sideDir * side2 * (f.width * 0.55f + flankScale * 0.35f);
                 float flankGroundY = SampleWorldHeightConservative(terrain, flankXZ.x, flankXZ.y, flankScale * 0.5f);
                 var flankInst = (GameObject)PrefabUtility.InstantiatePrefab(boulderPrefab, wfRoot.transform);
@@ -1547,7 +1608,10 @@ public static class CarryBuildTerrainForest
             var capPrefab = flankMossRocks.Length > 0 ? flankMossRocks[wfRng.Next(flankMossRocks.Length)] : null;
             if (capPrefab != null)
             {
-                float capScale = 1.0f + f.width * 0.5f;
+                // Same width-cap reasoning as the flanking rocks above -- this cap is meant to
+                // partially hide the water's own source point, not grow into a boulder that hangs
+                // over and obscures the whole opening.
+                float capScale = 1.0f + Mathf.Min(f.width, 2.4f) * 0.5f;
                 Vector2 capXZ = fallPos + dir * (0.5f + (float)wfRng.NextDouble() * 0.4f);
                 float capGroundY = SampleWorldHeightConservative(terrain, capXZ.x, capXZ.y, capScale * 0.6f);
                 float capBottomY = GetPrefabBottomLocalY(capPrefab);
@@ -1580,7 +1644,9 @@ public static class CarryBuildTerrainForest
             // (bare wet rock stays visible between clumps).
             if (fernPrefab != null)
             {
-                int fernCount = 3 + wfRng.Next(3);
+                // Now the single hero waterfall (not one of five), so its own surroundings can
+                // afford to read as noticeably lusher than an ordinary fall.
+                int fernCount = 8 + wfRng.Next(5);
                 for (int fi = 0; fi < fernCount; fi++)
                 {
                     float fa = (float)wfRng.NextDouble() * Mathf.PI * 2f;
@@ -2463,6 +2529,20 @@ public static class CarryBuildTerrainForest
         var ray = new Ray(new Vector3(worldX, rayTopY, worldZ), Vector3.down);
         if (col != null && col.Raycast(ray, out RaycastHit hit, terrain.terrainData.size.y + 40f))
         {
+            // Sanity check against the always-reliable heightmap sample (terrain.SampleHeight reads
+            // TerrainData directly, no PhysX involved) -- guards against the PhysX heightfield
+            // collider occasionally returning a stale hit (e.g. right after a same-frame
+            // destroy+recreate of the Terrain GameObject, before its broadphase data is flushed; see
+            // the Physics.SyncTransforms() fix in Run()). A real terrain hit should land within a
+            // couple meters of the direct heightmap sample at the same xz; a bigger mismatch means
+            // the raycast found the wrong surface, so fall back to the trusted sample instead.
+            float sampledY = SampleWorldHeight(terrain, worldX, worldZ);
+            if (Mathf.Abs(hit.point.y - sampledY) > 2f)
+            {
+                hitPoint = new Vector3(worldX, sampledY, worldZ);
+                hitNormal = Vector3.up;
+                return true;
+            }
             hitPoint = hit.point;
             hitNormal = hit.normal;
             return true;
@@ -2599,6 +2679,7 @@ public static class CarryBuildTerrainForest
             "HeroCliffFace", "HeroCoastRocks", "CliffBoulder_", "HeroClusterRock_", "HeroClusterRoot_",
             "LakeShore_", "LakebedRock_", "WaterfallFlankRock_", "WaterfallSourceRock_", "WaterfallBaseRock_",
             "HeroLeaningTree_", "HeroCoastalCliffBand", "HeroCoastalCliffBase_", "WaterfallFern_",
+            "AncientForestGuardian",
         };
         var all = root.GetComponentsInChildren<Transform>(true);
         int checkedCount = 0, flaggedCount = 0;
@@ -3572,6 +3653,168 @@ public static class CarryBuildTerrainForest
         log.AppendLine("Terrain tree instances: " + instances.Count);
     }
 
+    // ---- AzureCrystal (Meshy-generated, 2026-08-14): the "魔力を帯びたポーションの源" -- the
+    // environmental explanation for WHY this lake's water carries magic. Placed as a sparse,
+    // vein-like concentration (NOT even distribution): the waterfall crevices get the crack/gap
+    // variants so the "underground crystal vein -> magic water seeps from the rock -> waterfall ->
+    // sapphire lake" causal chain reads in the landscape itself, the lakebed gets a faint
+    // underwater glow, and a couple of accents sit among ordinary shore rocks. All placement is
+    // raycast-based per CLAUDE.md 接地ルール; the crystals' pivots are at their rock-base
+    // bottom-center (set in Blender during the 5-way split), and each grows along its local +Y, so
+    // orienting +Y along the surface normal and pushing back along -normal embeds the rock base
+    // into the host surface with only the blue crystal tips exposed. ----
+    static void BuildAzureCrystals(GameObject root, Terrain terrain, StringBuilder log)
+    {
+        const string PrefabDir = "Assets/Stage/Forest/Crystal/Prefabs/";
+        var pfLakeFloor = AssetDatabase.LoadAssetAtPath<GameObject>(PrefabDir + "PF_AzureCrystal_LakeFloor.prefab");
+        var pfCliffWall = AssetDatabase.LoadAssetAtPath<GameObject>(PrefabDir + "PF_AzureCrystal_CliffWall.prefab");
+        var pfRockGap = AssetDatabase.LoadAssetAtPath<GameObject>(PrefabDir + "PF_AzureCrystal_RockGap.prefab");
+        var pfCliffCrack = AssetDatabase.LoadAssetAtPath<GameObject>(PrefabDir + "PF_AzureCrystal_CliffCrack.prefab");
+        var pfRock = AssetDatabase.LoadAssetAtPath<GameObject>(PrefabDir + "PF_AzureCrystal_Rock.prefab");
+        if (pfLakeFloor == null && pfCliffCrack == null)
+        {
+            log.AppendLine("AzureCrystal prefabs not found -- run Carry/Setup Azure Crystals first. Skipped.");
+            return;
+        }
+
+        var crystalRoot = new GameObject("AzureCrystals");
+        crystalRoot.transform.SetParent(root.transform, false);
+        var center = new Vector2(LakeCenterX, LakeCenterZ);
+        var rng = new System.Random(4242);
+        int placed = 0;
+
+        // Embed a crystal into the surface at (worldX, worldZ): local +Y (growth axis) follows the
+        // real surface normal, random spin around that axis, rock base buried by embedFrac of the
+        // model's own scaled height.
+        GameObject PlaceCrystal(GameObject prefab, float worldX, float worldZ, float scale, float embedFrac, string name)
+        {
+            if (prefab == null) return null;
+            TryGetTerrainSurface(terrain, worldX, worldZ, out Vector3 hitPoint, out Vector3 hitNormal);
+            var bounds = GetPrefabLocalBounds(prefab);
+            float heightWorld = bounds.size.y * scale;
+
+            Quaternion spin = Quaternion.AngleAxis((float)rng.NextDouble() * 360f, Vector3.up);
+            Quaternion tilt = Quaternion.FromToRotation(Vector3.up, hitNormal);
+            var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab, crystalRoot.transform);
+            inst.name = name;
+            inst.transform.rotation = tilt * spin;
+            inst.transform.localScale = Vector3.one * scale;
+            inst.transform.position = hitPoint - hitNormal * (heightWorld * embedFrac);
+            placed++;
+            return inst;
+        }
+
+        // ---- Lakebed cluster: 2 formations on the lake floor, off-center toward the far shore so
+        // they read from the bridge as a faint blue glow through the water, not a centerpiece.
+        // Scale is capped so the TIP stays safely below the water surface -- the spec explicitly
+        // bans crystals bursting up out of the lake.
+        if (pfLakeFloor != null)
+        {
+            // NOTE: a "move them deeper toward the center" attempt (rFrac 0.34/0.30) actually
+            // SKIPPED both formations -- this lake's carved bed turns out to be shallowest near
+            // the center (flat-bottomed carve + a slight central mound from GroundNoise), so the
+            // mid-radius band is the deepest available water. The formations stay modest (~0.8m)
+            // by physical necessity; that also happens to match the brief ("湖底から淡い青色の魔力
+            // が見える程度" -- a faint glow, not a centerpiece).
+            // Mixed formation sizes: 2 statement clusters (as before) plus 3 smaller satellite
+            // formations, so the bed reads as a vein spilling out at varying scale rather than two
+            // uniform blobs.
+            var bedSpots = new[]
+            {
+                (ang: 200f, rFrac: 0.55f, s: 5.5f),
+                (ang: 155f, rFrac: 0.45f, s: 4.0f),
+                (ang: 175f, rFrac: 0.50f, s: 2.3f),
+                (ang: 220f, rFrac: 0.42f, s: 1.3f),
+                (ang: 165f, rFrac: 0.38f, s: 0.8f),
+            };
+            foreach (var spot in bedSpots)
+            {
+                Vector2 shore = FindShoreAtAngle(spot.ang);
+                float shoreR = Vector2.Distance(shore, center);
+                Vector2 dir = (shore - center).normalized;
+                Vector2 p = center + dir * (shoreR * spot.rFrac);
+                TryGetTerrainSurface(terrain, p.x, p.y, out Vector3 bedPt, out _);
+                float nativeH = GetPrefabLocalBounds(pfLakeFloor).size.y;
+                float maxScale = (LakeWaterY - 0.35f - bedPt.y) / Mathf.Max(0.01f, nativeH); // tip >= 0.35m under the surface
+                if (maxScale <= 0.15f) continue; // bed at/above waterline here -- skip rather than poke out of the water
+                float s = Mathf.Min(spot.s, maxScale);
+                var inst = PlaceCrystal(pfLakeFloor, p.x, p.y, s, 0.12f, "AzureCrystal_LakeFloor_" + (int)spot.ang);
+                // One very soft blue point light on the main formation only -- "湖底から淡い青色の
+                // 魔力が見える程度",範囲も強度も控えめ (NOT a searchlight).
+                if (inst != null && spot.ang == 200f)
+                {
+                    var lightGo = new GameObject("AzureCrystal_GlowLight");
+                    lightGo.transform.SetParent(inst.transform, false);
+                    lightGo.transform.localPosition = new Vector3(0f, nativeH * 0.5f, 0f);
+                    var l = lightGo.AddComponent<Light>();
+                    l.type = LightType.Point;
+                    l.color = new Color(0.45f, 0.72f, 1f);
+                    l.intensity = 1.1f;
+                    l.range = 6f;
+                    l.shadows = LightShadows.None;
+                }
+            }
+        }
+
+        // ---- Waterfall crevice vein: the story centerpiece. CliffCrack embedded in the rock right
+        // beside the two most prominent falls (195=main, 225), where the flanking crevice rocks
+        // already are, plus RockGap tucked between those flank rocks -- the "地下鉱脈から魔力水が
+        // 湧く" concentration point. Buried deep (only crystal tips out of the rock).
+        var veinSpots = new (GameObject pf, float ang, float rMul, float scale, float embed, string nm)[]
+        {
+            (pfCliffCrack, 191f, 1.06f, 3.6f, 0.42f, "AzureCrystal_CliffCrack_Fall195"),
+            (pfCliffCrack, 228f, 1.07f, 3.0f, 0.45f, "AzureCrystal_CliffCrack_Fall225"),
+            (pfRockGap,    198f, 1.04f, 2.6f, 0.38f, "AzureCrystal_RockGap_Fall195"),
+            (pfRockGap,    252f, 1.05f, 2.4f, 0.40f, "AzureCrystal_RockGap_Fall255"),
+            // Cliff wall accents away from the falls -- sparse single spots, not a coating.
+            (pfCliffWall,  210f, 1.10f, 3.2f, 0.30f, "AzureCrystal_CliffWall_210"),
+            (pfCliffWall,  115f, 1.09f, 2.7f, 0.32f, "AzureCrystal_CliffWall_115"),
+            (pfCliffCrack, 303f, 1.09f, 2.8f, 0.45f, "AzureCrystal_CliffCrack_305"),
+            // Small satellite fragments around the same crevices/walls -- the vein "spilling"
+            // outward at a smaller scale, not just uniform-sized statement pieces.
+            (pfRockGap,    205f, 1.03f, 1.1f, 0.35f, "AzureCrystal_RockGap_Fall205_Small"),
+            (pfRock,       194f, 1.05f, 0.9f, 0.35f, "AzureCrystal_Rock_Fall194_Small"),
+            (pfRock,       231f, 1.06f, 0.7f, 0.35f, "AzureCrystal_Rock_Fall231_Small"),
+            (pfCliffWall,  245f, 1.08f, 1.4f, 0.28f, "AzureCrystal_CliffWall_245_Small"),
+            (pfCliffWall,  190f, 1.11f, 0.9f, 0.28f, "AzureCrystal_CliffWall_190_Tiny"),
+            (pfCliffCrack, 218f, 1.06f, 1.6f, 0.40f, "AzureCrystal_CliffCrack_218_Small"),
+        };
+        foreach (var v in veinSpots)
+        {
+            if (v.pf == null) continue;
+            Vector2 shore = FindShoreAtAngle(v.ang);
+            float shoreR = Vector2.Distance(shore, center);
+            Vector2 dir = (shore - center).normalized;
+            Vector2 p = center + dir * (shoreR * v.rMul);
+            PlaceCrystal(v.pf, p.x, p.y, v.scale, v.embed, v.nm);
+        }
+
+        // ---- Shore rock accents: crystallized rocks mixed in among the ordinary boulders of the
+        // BoulderOverhang zone and the mossy-bank arc -- not standalone gems on open ground.
+        if (pfRock != null)
+        {
+            var rockSpots = new[]
+            {
+                (ang: 108f, rMul: 1.12f, s: 2.6f),
+                (ang: 132f, rMul: 1.15f, s: 2.0f),
+                (ang: 95f,  rMul: 1.10f, s: 1.0f),
+                (ang: 120f, rMul: 1.18f, s: 1.6f),
+                (ang: 148f, rMul: 1.14f, s: 0.7f),
+                (ang: 142f, rMul: 1.09f, s: 3.0f),
+            };
+            foreach (var spot in rockSpots)
+            {
+                Vector2 shore = FindShoreAtAngle(spot.ang);
+                float shoreR = Vector2.Distance(shore, center);
+                Vector2 dir = (shore - center).normalized;
+                Vector2 p = center + dir * (shoreR * spot.rMul);
+                PlaceCrystal(pfRock, p.x, p.y, spot.s, 0.25f, "AzureCrystal_Rock_" + (int)spot.ang);
+            }
+        }
+
+        log.AppendLine("Azure crystals placed: " + placed);
+    }
+
     // ---- Vines on the cliff face -- no free/CC0 vine or ivy asset exists on Poly Haven, Quaternius,
     // Kenney, or itch.io after two separate research passes this project (confirmed 2026-08-13), so
     // rather than leave this gap or fake it with an unrelated asset, this builds simple procedural
@@ -3736,20 +3979,34 @@ public static class CarryBuildTerrainForest
             Vector2 dir = (shore - center).normalized; // outward, shore -> land
             float shoreR = Vector2.Distance(shore, center);
             Vector2 anchor = center + dir * (shoreR * radiusMul); // cliff-top, back from the edge
-            float baseY = SampleWorldHeightConservative(terrain, anchor.x, anchor.y, 1.2f * scale);
+
+            // 2026-08-14 FIX (user-reported: HeroLeaningTree_245 etc. reading as "parallel to the
+            // wall" instead of rooted into it): these anchors sit on the steep cliff shoulder, not
+            // flat ground -- e.g. HeroLeaningTree_245's surface normal there is (0.59,0.57,0.57), a
+            // ~55deg slope. The old code only ever applied a yaw (world Y-up trunk regardless of
+            // slope), so on a slope that steep the trunk ran visually alongside the rock face rather
+            // than growing OUT of it. A real tree rooted in a crevice on a slope like this grows
+            // roughly perpendicular to the surface at its base (then often curves toward the light --
+            // which is exactly what this species' own baked-in lean already represents once yawed
+            // toward the lake), so tilt the trunk's base to the real local surface normal the same
+            // way PlaceBoulderEmbedded does for rocks, instead of forcing it to stay world-vertical.
+            TryGetTerrainSurface(terrain, anchor.x, anchor.y, out Vector3 hitPoint, out Vector3 hitNormal);
 
             Vector2 towardLake = -dir;
             float desiredAngle = Mathf.Atan2(towardLake.x, towardLake.y) * Mathf.Rad2Deg;
             float yaw = desiredAngle - thisLeanAngle + yawJitterDeg;
 
+            Quaternion yawRot = Quaternion.Euler(0f, yaw, 0f);
+            Quaternion tiltToNormal = Quaternion.FromToRotation(Vector3.up, hitNormal);
+
             var inst = (GameObject)PrefabUtility.InstantiatePrefab(thisPrefab, heroRoot.transform);
             inst.name = name;
             inst.transform.localScale = Vector3.one * scale;
-            inst.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+            inst.transform.rotation = tiltToNormal * yawRot;
             // Small embed so the exposed root flare isn't a hard seam against the slope, same
             // convention as every other grounded hero prop in this file.
             float embed = 0.15f * scale;
-            inst.transform.position = new Vector3(anchor.x, baseY - thisBottomY * scale - embed, anchor.y);
+            inst.transform.position = hitPoint - hitNormal * (thisBottomY * scale) - hitNormal * embed;
             placed++;
 
             if (rootPrefab != null)
@@ -3757,12 +4014,17 @@ public static class CarryBuildTerrainForest
                 float rootScale = scale * (0.35f + (float)rng.NextDouble() * 0.2f);
                 Vector2 rootOff = new Vector2((float)(rng.NextDouble() - 0.5) * 0.8f, (float)(rng.NextDouble() - 0.5) * 0.8f);
                 Vector2 rp = anchor + rootOff;
-                float rootY = SampleWorldHeightConservative(terrain, rp.x, rp.y, 0.4f * rootScale);
+                // Same slope-following tilt as the trunk above (rather than a flat Y-only placement)
+                // so the root flare hugs the same sloped/rock surface the trunk is actually rooted
+                // into, instead of sitting flat while the trunk emerges at an angle above it.
+                TryGetTerrainSurface(terrain, rp.x, rp.y, out Vector3 rootHitPoint, out Vector3 rootHitNormal);
+                Quaternion rootTilt = Quaternion.FromToRotation(Vector3.up, rootHitNormal);
+                Quaternion rootYaw = Quaternion.Euler(0f, yaw + 90f * (rng.Next(2) == 0 ? 1 : -1), 0f);
                 var rootInst = (GameObject)PrefabUtility.InstantiatePrefab(rootPrefab, heroRoot.transform);
                 rootInst.name = name + "_Roots";
                 rootInst.transform.localScale = Vector3.one * rootScale;
-                rootInst.transform.rotation = Quaternion.Euler(0f, yaw + 90f * (rng.Next(2) == 0 ? 1 : -1), 0f);
-                rootInst.transform.position = new Vector3(rp.x, rootY - rootBottomY * rootScale, rp.y);
+                rootInst.transform.rotation = rootTilt * rootYaw;
+                rootInst.transform.position = rootHitPoint - rootHitNormal * (rootBottomY * rootScale);
                 placed++;
             }
         }
@@ -3780,6 +4042,57 @@ public static class CarryBuildTerrainForest
         PlaceHero(160f, 1.14f, 4.2f, 20f, "HeroLeaningTree_160", useSpecies2: true); // island_tree_03 is only ~2.6m native, needs a bigger multiplier to read as a mature specimen
 
         log.AppendLine("Lake hero leaning trees placed: " + placed);
+    }
+
+    // ---- Ancient Forest Guardian (2026-08-14, user-supplied Meshy model, see
+    // CarrySetupAncientForestGuardianTree.cs / ASSET_LICENSES.md #8): a single, unique hero
+    // specimen -- not part of the mass-placed forest or the 5-tree leaning-tree set. Placed on the
+    // clifftop directly above/behind the new sacred waterfall (190deg, the potion-source landmark),
+    // standing watch over it from the rim -- the "guardian" the model's own name implies, visually
+    // tying the game's central gameplay landmark (goblin returns here for potions) to a deliberately
+    // singular, unmistakable tree rather than blending into the ordinary tree cover. ----
+    static void BuildAncientForestGuardianTree(GameObject root, Terrain terrain, StringBuilder log)
+    {
+        var prefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Stage/Forest/Trees/AncientForestGuardian/Prefabs/PF_AncientForestGuardian.prefab");
+        if (prefab == null) { log.AppendLine("AncientForestGuardian prefab not found -- run Carry/Setup Ancient Forest Guardian Tree first. Skipped."); return; }
+
+        var center = new Vector2(LakeCenterX, LakeCenterZ);
+        // 2026-08-14: the first attempt used radiusMul=1.62, which turned out to sit on the steep
+        // MID-climb of the cliff shoulder (surface normal.y ~0.4, a ~65deg slope) rather than the
+        // clifftop -- the tree ended up tilted almost sideways, reading as another leaning tree
+        // rather than a dignified standing guardian. A normal-probe sweep along this angle found the
+        // climb only actually levels out into a real plateau around radiusMul=2.0 (normal.y=0.99,
+        // height ~20.7) -- moved there instead so it stands upright on genuinely flat ground.
+        const float ang = 183f;
+        const float radiusMul = 2.0f; // the real clifftop plateau above the sacred waterfall, not the mid-slope
+        const float scale = 4.5f; // native bounds ~2m -> ~9m tall, an old-growth "guardian" presence
+
+        Vector2 shore = FindShoreAtAngle(ang);
+        Vector2 dir = (shore - center).normalized;
+        float shoreR = Vector2.Distance(shore, center);
+        Vector2 anchor = center + dir * (shoreR * radiusMul);
+
+        // Same raycast-based grounding + normal-tilt convention as PlaceBoulderEmbedded/PlaceHero
+        // (接地ルール) -- the clifftop here is fairly flat, but this keeps the tree correctly
+        // grounded even if the rim happens to be locally sloped at this exact spot.
+        TryGetTerrainSurface(terrain, anchor.x, anchor.y, out Vector3 hitPoint, out Vector3 hitNormal);
+        var bounds = GetPrefabLocalBounds(prefab);
+        float bottomLocalY = bounds.min.y;
+
+        // Face generally back toward the lake/waterfall it's watching over, not a random spin.
+        Vector2 towardLake = -dir;
+        float yaw = Mathf.Atan2(towardLake.x, towardLake.y) * Mathf.Rad2Deg;
+        Quaternion tiltToNormal = Quaternion.FromToRotation(Vector3.up, hitNormal);
+        Quaternion yawRot = Quaternion.Euler(0f, yaw, 0f);
+
+        var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab, root.transform);
+        inst.name = "AncientForestGuardian";
+        inst.transform.localScale = Vector3.one * scale;
+        inst.transform.rotation = tiltToNormal * yawRot;
+        float embed = 0.15f * scale; // same modest root-flare burial as every other grounded hero prop here
+        inst.transform.position = hitPoint - hitNormal * (bottomLocalY * scale) - hitNormal * embed;
+
+        log.AppendLine("Ancient Forest Guardian tree placed at " + inst.transform.position);
     }
 
     // ---- Ground vegetation (grass/fern/moss) via Unity's Terrain Detail system instead of
