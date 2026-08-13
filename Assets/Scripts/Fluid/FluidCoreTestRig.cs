@@ -67,14 +67,19 @@ public class FluidCoreTestRig : MonoBehaviour
     {
         bool prevDrive = autoDrive;
         bool prevStep = core.autoStep;
+        bool prevSync = core.synchronousReadback;
         autoDrive = false;
         core.autoStep = false;
+        // 本番は非同期リードバック (§16)。ただしこのハーネスは戻った直後に
+        // 数値を読むので、ここだけ同期にしないと 1 フレーム前の値が返る。
+        core.synchronousReadback = true;
 
         int steps = Mathf.Max(1, Mathf.RoundToInt(seconds / dt));
         for (int i = 0; i < steps; i++) { Drive(dt); core.Step(dt); }
 
         autoDrive = prevDrive;
         core.autoStep = prevStep;
+        core.synchronousReadback = prevSync;
     }
 
     public void Drive(float dt)

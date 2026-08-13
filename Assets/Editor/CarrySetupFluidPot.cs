@@ -66,6 +66,7 @@ public static class CarrySetupFluidPot
         var core = pot.AddComponent<FluidCore>();
         core.fluidCompute = AssetDatabase.LoadAssetAtPath<ComputeShader>(CorePath);
         core.particleCount = 16384;
+        core.minSubSteps = 6;        // Phase 12: 品質を保てる下限 (実測)
         core.viscosity = 2.8f;          // dt 比例化後の値 (Phase 6 と同じ効き)
         core.boundaryViscosity = 0.55f; // 剛体回転比 0.844 (実測)
         core.boundaryPressureScale = 1.6f;  // 壁の貫通 465 -> 309 個 (実測)

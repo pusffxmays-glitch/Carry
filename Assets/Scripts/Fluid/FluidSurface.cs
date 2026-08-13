@@ -249,6 +249,19 @@ public class FluidSurface : MonoBehaviour
         BuildSurface();
     }
 
+    /// <summary>計測用。1 回だけ表面生成を走らせる (§36 Phase 12)。</summary>
+    public void BuildNow()
+    {
+        if (!Initialise()) return;
+        BuildSurface();
+    }
+
+    /// <summary>計測用。GPU の完了を待つ（カウンタの読み戻しで同期する）。</summary>
+    public void SyncGpu()
+    {
+        if (counters != null) counters.GetData(counterRead);
+    }
+
     void BuildSurface()
     {
         UpdateFieldOrigin();     // 容器が動くので密度場も追従する

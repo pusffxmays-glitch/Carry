@@ -994,8 +994,9 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::FluidCore
   particleCount: 16384
   solverIterations: 4
-  minSubSteps: 2
+  minSubSteps: 6
   maxSubSteps: 10
+  cflSpeedMargin: 1.6
   kernelRadiusScale: 2
   viscosity: 2.8
   boundaryViscosity: 0.55
@@ -1023,6 +1024,7 @@ MonoBehaviour:
   boundsFriction: 0.15
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
+  synchronousReadback: 1
 --- !u!114 &2131736044
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1066,6 +1068,9 @@ MonoBehaviour:
   shellThicknessPerKernel: 1.15
   edgeVolumeClamp: 1.25
   rimFadePerKernel: 1
+  debugForceCylinderRadius: 0
+  teleportSpeed: 12
+  teleportAngularSpeed: 900
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

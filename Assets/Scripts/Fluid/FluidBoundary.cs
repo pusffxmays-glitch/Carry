@@ -35,6 +35,8 @@ public class FluidBoundary : MonoBehaviour
     [Range(1.05f, 4f)] public float edgeVolumeClamp = 1.25f;
     [Tooltip("リム(開口端)から下へ、この本数分のカーネル半径だけ境界の密度寄与をフェードさせる。0 で無効。壁の斥力が開口部で液体を持ち上げ、実際のリムより高い堰を作るのを防ぐ (OI-1)。")]
     [Range(0f, 2.5f)] public float rimFadePerKernel = 1.0f;
+    [Tooltip("切り分け用。壺の内径プロファイルを半径一定の円筒に置き換える。0 で無効。本番では使わない (OI-1 解析)。")]
+    public float debugForceCylinderRadius = 0f;
 
     // ---- 生成結果（容器ローカル） ----
     public Vector3[] LocalPositions { get; private set; }
@@ -139,6 +141,7 @@ public class FluidBoundary : MonoBehaviour
     {
         var mf = (meshSource != null ? meshSource : Container).GetComponentInChildren<MeshFilter>();
         Profile = PotInteriorProfile.FromMesh(mf != null ? mf.sharedMesh : null);
+        if (debugForceCylinderRadius > 0f) Profile.ForceCylinder(debugForceCylinderRadius);
 
         float s = spacing / containerScale;      // ローカル単位の粒子間隔
         var pts = new List<Vector3>();

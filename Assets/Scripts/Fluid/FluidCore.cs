@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Rendering;
 
 // ============================================================================================
 // FluidCore -- Position Based Fluids solver driver (GPU).
@@ -17,8 +18,14 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public int particleCount = 16384;
     [Tooltip("PBF の密度投影反復数 (§7)。")]
     [Range(1, 10)] public int solverIterations = 4;
-    [Range(1, 8)] public int minSubSteps = 2;
+    // Phase 12 実測: サブステップ数はソルバーの収束にも効く。適応 CFL だけに任せて
+    // 3 まで落とすと、静止時の液面が 0.189 -> 0.287、平均速さが 0.005 -> 0.589 m/s に
+    // 悪化した（＝落ち着かない）。下限を 6 に固定すると 10 と同等の品質を保ったまま
+    // 静止時の物理コストが 17.1 -> 10.4 ms/frame になる。
+    [Range(1, 12)] public int minSubSteps = 6;
     [Range(1, 16)] public int maxSubSteps = 10;
+    [Tooltip("CFL に使う実測最大速度への安全率。実測値は 1 フレーム前のものなので、急加速に備えて余裕を持たせる。")]
+    [Range(1f, 4f)] public float cflSpeedMargin = 1.6f;
 
     [Header("Material")]
     [Range(1.5f, 3f)] public float kernelRadiusScale = 2f;
@@ -78,6 +85,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     [Tooltip("テストハーネスが明示的な dt で駆動できるようにするためのスイッチ。")]
     public bool autoStep = true;
+    // §16 は非同期リードバックを指定しており、実装もしてある（下の false 経路）。
+    // ただし **非同期にすると Play 中に FluidCore を無効化→有効化しただけで
+    // エディタが固まる**（最小再現で確認）。保留中の読み戻しとバッファ解放の
+    // 組み合わせが原因と見ているが、まだ特定できていない。
+    // エディタが固まる状態は出荷できないので、既定は同期に戻してある。
+    // 非同期の効果自体は実測済み（Step() の CPU コスト 13.2ms -> 0.12ms）なので、
+    // 原因を特定したら既定を false に戻す。OPEN_ISSUES.md の OI-4 を参照。
+    [Tooltip("領域カウンタを同期読み戻しする。false にすると CPU が GPU を待たなくなるが、現在は再初期化でエディタが固まる不具合がある (OI-4)。")]
+    public bool synchronousReadback = true;
 
     // ---- public state ----
     public bool IsReady => positions != null;
@@ -93,6 +109,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public float ParticleVolume => particleVolume;
     public float RefSumGradSq => refSumGradSq;
     public int LastSubStepCount { get; private set; }
+    /// <summary>直近フレームで実測した流体の最大速さ (m/s)。CFL のサブステップ数はこれで決まる。</summary>
+    public float MeasuredMaxSpeed { get; private set; }
     /// <summary>SafetyCorrection の発動粒子数（直近の読み取り時点）。常態化していたら壁の扱いが破綻しているサイン (§10)。</summary>
     public int SafetyCorrectionCount { get; private set; }
     public int SafetyConsecutiveFrames { get; private set; }
@@ -134,7 +152,14 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     GraphicsBuffer boundaryLocal, boundaryPositions, boundaryVelocities, boundaryVolumes;
     GraphicsBuffer sortPositions, cellCounts, cellStart, cellCursor, blockSums, sortedIndices;
     GraphicsBuffer potProfile, safetyCounters;
-    GraphicsBuffer regionFlags, regionCounters, ages, retiredFlags;
+    // §16「非同期リードバック」。同期 GetData は CPU が GPU の完了を待つので、
+    // 毎フレーム丸ごとパイプラインが止まる。ここで欲しいのは統計値だけで、
+    // 1 フレーム遅れても困らない。リング状に持って、書き込み中のバッファを
+    // 読み戻さないようにする。
+    GraphicsBuffer[] regionCountersRing;
+    int regionRingIndex;
+    GraphicsBuffer regionFlags, ages, retiredFlags;
+    static readonly uint[] ZeroCounters = new uint[8];
     uint[] safetyRead = new uint[4];
     uint[] regionRead = new uint[8];
 
@@ -159,6 +184,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     void OnEnable() { Initialise(); }
     void OnDisable() { Release(); }
+
+    void OnDestroy()
+    {
+        if (regionCountersRing != null)
+        {
+            foreach (var b in regionCountersRing) b?.Release();
+            regionCountersRing = null;
+        }
+    }
 
     void Initialise()
     {
@@ -359,8 +393,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         regionFlags?.Release();
         regionFlags = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount, sizeof(uint));
         regionFlags.SetData(new uint[fluidCount]);          // 全員 Inside から開始
-        regionCounters?.Release();
-        regionCounters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 8, sizeof(uint));
+        if (regionCountersRing == null)
+        {
+            regionCountersRing = new GraphicsBuffer[3];
+            for (int i = 0; i < regionCountersRing.Length; i++)
+                regionCountersRing[i] = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 8, sizeof(uint));
+        }
+        regionRingIndex = 0;
 
         ages?.Release(); retiredFlags?.Release();
         ages = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount, sizeof(float));
@@ -450,6 +489,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     void Release()
     {
+
         positions?.Release(); positions = null;
         predicted?.Release(); predicted = null;
         velocities?.Release(); velocities = null;
@@ -471,7 +511,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         potProfile?.Release(); potProfile = null;
         safetyCounters?.Release(); safetyCounters = null;
         regionFlags?.Release(); regionFlags = null;
-        regionCounters?.Release(); regionCounters = null;
+        // 領域カウンタのリングバッファはここで解放しない。
+        // 非同期リードバックの宛先なので、保留中の要求が完了する前に解放すると
+        // 解放済みメモリへの書き戻しになり、エディタごと固まる（実測）。
+        // 生存期間はコンポーネント自体に合わせ、OnDestroy でだけ解放する。
         ages?.Release(); ages = null;
         retiredFlags?.Release(); retiredFlags = null;
     }
@@ -503,7 +546,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // 壁がそれより速く動くと、境界粒子が流体を貫通して飲み込む。
         float containerSpeed = boundary.LinearVelocity.magnitude
                              + boundary.AngularVelocity.magnitude * regionSize.magnitude * 0.5f;
-        float worstSpeed = Mathf.Max(maxSpeed, containerSpeed);
+        // 流体側は「速度クランプ値 (maxSpeed) 」ではなく **前フレームの実測最大速さ** を使う。
+        // クランプ値は理論上の最悪値なので、それを使うとどんなに静かでも常に
+        // maxSubSteps に張り付き、静止状態でも 10 サブステップ回っていた（実測 17ms/frame）。
+        // CFL の定義は「1 サブステップで粒子間隔の一定割合以上動かさない」なので、
+        // 実測速度を使うのが本来の実装。1 フレーム遅れる分は cflSpeedMargin で見る。
+        float fluidSpeed = Mathf.Min(MeasuredMaxSpeed * cflSpeedMargin, maxSpeed);
+        float worstSpeed = Mathf.Max(fluidSpeed, containerSpeed);
         int sub = Mathf.Clamp(Mathf.CeilToInt(worstSpeed * dt / (0.4f * spacing)), minSubSteps, maxSubSteps);
         LastSubStepCount = sub;
 
@@ -516,20 +565,43 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     void ClassifyAndRead()
     {
-        regionCounters.SetData(new uint[8]);
-        Bind(kClassify, ("PositionsIn", positions), ("RegionFlags", regionFlags),
-                        ("RegionCounters", regionCounters), ("PotProfileBuf", potProfile),
+        var buf = regionCountersRing[regionRingIndex];
+        regionRingIndex = (regionRingIndex + 1) % regionCountersRing.Length;
+
+        buf.SetData(ZeroCounters);
+        Bind(kClassify, ("PositionsIn", positions), ("VelocitiesIn", velocities),
+                        ("RegionFlags", regionFlags),
+                        ("RegionCounters", buf), ("PotProfileBuf", potProfile),
                         ("RetiredFlagsIn", retiredFlags));
         fluidCompute.Dispatch(kClassify, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
 
-        regionCounters.GetData(regionRead);
-        InsideCount = (int)regionRead[0];
-        RimCount = (int)regionRead[1];
-        AirborneCount = (int)regionRead[2];
-        GroundCount = (int)regionRead[3];
-        RetiredCount = (int)regionRead[4];
-        OverflowEvents += (int)regionRead[5];
-        PenetrationEvents += (int)regionRead[6];
+        if (synchronousReadback)
+        {
+            buf.GetData(regionRead);
+            ApplyRegionCounters(regionRead);
+        }
+        else
+        {
+            AsyncGPUReadback.Request(buf, req =>
+            {
+                if (req.hasError || positions == null) return;
+                var data = req.GetData<uint>();
+                for (int i = 0; i < 8 && i < data.Length; i++) regionRead[i] = data[i];
+                ApplyRegionCounters(regionRead);
+            });
+        }
+    }
+
+    void ApplyRegionCounters(uint[] r)
+    {
+        InsideCount = (int)r[0];
+        RimCount = (int)r[1];
+        AirborneCount = (int)r[2];
+        GroundCount = (int)r[3];
+        RetiredCount = (int)r[4];
+        OverflowEvents += (int)r[5];
+        PenetrationEvents += (int)r[6];
+        MeasuredMaxSpeed = r[7] / 1000f;
     }
 
     public void ResetOverflowCounters()
@@ -542,7 +614,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         ages?.SetData(new float[fluidCount]);
         retiredFlags?.SetData(new uint[fluidCount]);
         RetiredCount = 0;
-        regionCounters?.SetData(new uint[8]);
+        if (regionCountersRing != null)
+            foreach (var b in regionCountersRing) b?.SetData(ZeroCounters);
     }
 
     void SubStep(float dt, float lerpT)

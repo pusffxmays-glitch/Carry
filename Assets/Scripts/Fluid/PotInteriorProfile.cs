@@ -32,6 +32,24 @@ public class PotInteriorProfile
         return p;
     }
 
+    /// <summary>切り分け用。半径一定の円筒に置き換える。実際の壺形状に依存しない挙動を
+    /// 確認するためだけのもので、本番では使わない (OI-1 解析)。</summary>
+    public void ForceCylinder(float radius)
+    {
+        for (int i = 0; i < Radii.Length; i++) Radii[i] = radius;
+        RimR = radius;
+        MaxRadius = radius;
+        float cum = 0f;
+        CumulativeVolume[0] = 0f;
+        for (int i = 1; i < Heights.Length; i++)
+        {
+            float dy = Heights[i] - Heights[i - 1];
+            cum += Mathf.PI * radius * radius * dy;
+            CumulativeVolume[i] = cum;
+        }
+        profileTex = null;   // GPU 側は作り直させる
+    }
+
     void Build(Mesh mesh)
     {
         if (mesh == null)

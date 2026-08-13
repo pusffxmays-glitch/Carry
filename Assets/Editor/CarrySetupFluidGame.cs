@@ -42,6 +42,7 @@ public static class CarrySetupFluidGame
         core.fluidCompute = AssetDatabase.LoadAssetAtPath<ComputeShader>(CorePath);
         core.particleCount = 16384;
         core.fillFraction = 0.45f;
+        core.minSubSteps = 6;        // Phase 12: 品質を保てる下限 (実測)
         core.viscosity = 2.8f;
         core.boundaryViscosity = 0.55f;
         core.boundaryPressureScale = 1.6f;

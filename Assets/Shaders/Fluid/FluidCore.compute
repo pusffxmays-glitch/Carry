@@ -50,6 +50,7 @@ RWStructuredBuffer<float3> Positions;
 // RimOpening 判定が液体を押し出すことがコード上不可能になるよう、
 // ClassifyRegions には位置・速度を SRV としてしかバインドしない (§11/追加修正1)。
 StructuredBuffer<float3>   PositionsIn;
+StructuredBuffer<float3>   VelocitiesIn;   // 分類カーネル用（CFL の実測最大速度を取るため）
 RWStructuredBuffer<float3> PredictedPositions;
 StructuredBuffer<float3>   PredictedIn;
 RWStructuredBuffer<float3> Velocities;
@@ -154,7 +155,7 @@ RWStructuredBuffer<uint> SafetyCounters;   // [0] = 発動粒子数
 RWStructuredBuffer<uint> RegionFlags;
 RWStructuredBuffer<uint> RegionCounters;
 // [0]=Inside [1]=RimOpening [2]=Airborne [3]=Ground [4]=Retired
-// [5]=正常Overflow遷移 [6]=貫通(異常)
+// [5]=正常Overflow遷移 [6]=貫通(異常) [7]=流体の最大速さ（固定小数 x1000）
 //
 // Retired (§16/§20): 地面に一定時間留まった粒子は「ゲーム世界から消滅した」扱いになる。
 // 消滅の実行は Finalize が行い（位置を動かすのは物理カーネルの仕事）、
@@ -738,6 +739,14 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= FluidCount) return;
+
+    // §3 CFL 用の実測最大速さ。次フレームのサブステップ数を決めるのに使う。
+    // ここは既に全粒子を 1 回なめているので、追加のディスパッチは要らない。
+    {
+        uint sp = (uint)(length(VelocitiesIn[i]) * 1000.0);
+        uint old;
+        InterlockedMax(RegionCounters[7], sp, old);
+    }
 
     float3 p = PositionsIn[i];
     uint prev = RegionFlags[i];
