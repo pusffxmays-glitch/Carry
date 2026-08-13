@@ -1,0 +1,271 @@
+// ============================================================================================
+// FluidSurface.compute -- Particle -> 3D Density Field -> Iso Surface (Phase 2)
+//
+// FLUID_DESIGN.md §11 / §12 / §13 / §14 に対応。
+//
+// ORIGIN / LICENCE: first-party code。等値面抽出は立方体を 6 個の四面体へ分解する方式で、
+// 256 ケースの三角形テーブルのような「データ」を一切使わない。全ての三角形分割は
+// 四面体 1 個あたり「内側の頂点が何個か」から一次原理で導出される。したがって外部の
+// テーブルを持ち込む必要がなく、ライセンス上の依存も、記憶から書き起こしたテーブルに
+// 誤りが混入する危険も無い。生成される等値面は標準 Marching Cubes と同じもので、
+// watertight である（隣接四面体は共有面上で同じ辺補間点を必ず生成するため）。
+//
+// 設計上の要点:
+//  * 粒子位置を直接メッシュ化しない。Kernel で 3D 密度場へ広げてから等値面を取る (§11)。
+//  * Atomic 蓄積は uint 固定小数、Visual 用は float の 3D テクスチャ。両者を分離する (§11/修正3)。
+//  * 壺内部・Overflow・Ground Fluid を区別しない。全部この 1 つの場に入る (§12/修正7)。
+// ============================================================================================
+
+#pragma kernel ClearDensity
+#pragma kernel SplatDensity
+#pragma kernel DecodeDensity
+#pragma kernel BlurDensity
+#pragma kernel BuildSurface
+
+#define THREADS 256
+#define THREADS3 4
+
+RWStructuredBuffer<uint> DensityAccum;      // 固定小数。atomic 用
+RWTexture3D<float>       DensityOut;        // Visual 用
+Texture3D<float>         DensitySrc;
+SamplerState             samplerDensitySrc;
+
+StructuredBuffer<float3> Particles;
+uint  ParticleCount;
+
+uint3  VoxelDims;
+float3 FieldOrigin;
+float  VoxelSize;
+
+float SplatRadius;          // 密度カーネル半径 (m)
+float DensityScale;         // 固定小数のスケール
+float IsoValue;
+int3  BlurAxis;
+float SurfaceNormalEps;
+
+// ---- 出力（等値面） ----
+struct SurfaceVertex
+{
+    float3 position;
+    float3 normal;
+};
+AppendStructuredBuffer<SurfaceVertex> SurfaceVertices;
+RWStructuredBuffer<uint> SurfaceCounters;   // [0] = 容量超過で捨てた三角形数
+uint MaxTriangles;
+
+static const float PI = 3.14159265359;
+
+float SplatKernel(float r2, float h)
+{
+    float h2 = h * h;
+    if (r2 >= h2) return 0.0;
+    float d = 1.0 - r2 / h2;
+    return d * d * d;      // 正規化しない: IsoValue 側で吸収する
+}
+
+uint VoxelIndex(uint3 c) { return c.x + c.y * VoxelDims.x + c.z * VoxelDims.x * VoxelDims.y; }
+
+// --------------------------------------------------------------------------------------------
+[numthreads(THREADS, 1, 1)]
+void ClearDensity(uint3 id : SV_DispatchThreadID)
+{
+    uint total = VoxelDims.x * VoxelDims.y * VoxelDims.z;
+    if (id.x >= total) return;
+    DensityAccum[id.x] = 0;
+}
+
+// 粒子ごとに、影響半径内のボクセルへカーネル値を加算する。
+// ボクセル側から粒子を集めるより、粒子が疎な領域で無駄が出ない。
+[numthreads(THREADS, 1, 1)]
+void SplatDensity(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= ParticleCount) return;
+
+    float3 p = Particles[i];
+    float3 local = (p - FieldOrigin) / VoxelSize;
+    int rad = (int)ceil(SplatRadius / VoxelSize);
+
+    int3 c0 = (int3)floor(local) - rad;
+    int3 c1 = (int3)floor(local) + rad;
+    c0 = max(c0, int3(0, 0, 0));
+    c1 = min(c1, (int3)VoxelDims - 1);
+
+    [loop] for (int z = c0.z; z <= c1.z; z++)
+    [loop] for (int y = c0.y; y <= c1.y; y++)
+    [loop] for (int x = c0.x; x <= c1.x; x++)
+    {
+        float3 vc = FieldOrigin + (float3(x, y, z) + 0.5) * VoxelSize;
+        float3 d = vc - p;
+        float w = SplatKernel(dot(d, d), SplatRadius);
+        if (w <= 0.0) continue;
+        uint add = (uint)(w * DensityScale);
+        if (add == 0) continue;
+        uint old;
+        InterlockedAdd(DensityAccum[VoxelIndex(uint3(x, y, z))], add, old);
+    }
+}
+
+[numthreads(THREADS3, THREADS3, THREADS3)]
+void DecodeDensity(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= VoxelDims)) return;
+    DensityOut[id] = (float)DensityAccum[VoxelIndex(id)] / DensityScale;
+}
+
+// 分離ガウシアン (§14 Density Smoothing)。BlurAxis で軸を切り替えて 3 回まわす。
+[numthreads(THREADS3, THREADS3, THREADS3)]
+void BlurDensity(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= VoxelDims)) return;
+
+    const float w0 = 0.38774, w1 = 0.24477, w2 = 0.06136;
+    int3 a = BlurAxis;
+    int3 maxIdx = (int3)VoxelDims - 1;
+
+    float sum = DensitySrc[clamp((int3)id, int3(0,0,0), maxIdx)] * w0;
+    sum += DensitySrc[clamp((int3)id + a, int3(0,0,0), maxIdx)] * w1;
+    sum += DensitySrc[clamp((int3)id - a, int3(0,0,0), maxIdx)] * w1;
+    sum += DensitySrc[clamp((int3)id + a * 2, int3(0,0,0), maxIdx)] * w2;
+    sum += DensitySrc[clamp((int3)id - a * 2, int3(0,0,0), maxIdx)] * w2;
+    DensityOut[id] = sum;
+}
+
+// --------------------------------------------------------------------------------------------
+// 等値面抽出（四面体分解）
+// --------------------------------------------------------------------------------------------
+float SampleDensity(int3 c)
+{
+    c = clamp(c, int3(0, 0, 0), (int3)VoxelDims - 1);
+    return DensitySrc[c];
+}
+
+float3 VoxelPos(int3 c) { return FieldOrigin + (float3)c * VoxelSize; }
+
+// 密度場を **トリリニア** で補間して勾配を取る。
+// 最近傍 (DensitySrc[int3]) で微分すると法線がボクセル単位で階段状になり、
+// 表面に鋭いスペキュラの筋として現れる。等値面の頂点はボクセル境界上の任意の位置に
+// あるので、そこで滑らかな法線を得るには補間サンプリングが必要。
+float SampleDensitySmooth(float3 wp)
+{
+    float3 uvw = (wp - FieldOrigin) / (VoxelSize * (float3)VoxelDims);
+    uvw = saturate(uvw);
+    return DensitySrc.SampleLevel(samplerDensitySrc, uvw, 0);
+}
+
+float3 FieldNormal(float3 wp)
+{
+    float e = VoxelSize * SurfaceNormalEps;
+    float dx = SampleDensitySmooth(wp + float3(e, 0, 0)) - SampleDensitySmooth(wp - float3(e, 0, 0));
+    float dy = SampleDensitySmooth(wp + float3(0, e, 0)) - SampleDensitySmooth(wp - float3(0, e, 0));
+    float dz = SampleDensitySmooth(wp + float3(0, 0, e)) - SampleDensitySmooth(wp - float3(0, 0, e));
+    float3 g = float3(dx, dy, dz);
+    float len = length(g);
+    // 等値面は密度が下がる向きが外側なので符号を反転する。
+    return (len > 1e-8) ? -g / len : float3(0, 1, 0);
+}
+
+float3 EdgeLerp(float3 pa, float va, float3 pb, float vb)
+{
+    float t = (IsoValue - va) / (vb - va);
+    return lerp(pa, pb, saturate(t));
+}
+
+void EmitTriangle(float3 a, float3 b, float3 c)
+{
+    // 容量チェックを書き込みの「前」に行う。AppendStructuredBuffer は容量を超えると
+    // 未定義動作になるため、超過分は捨ててカウンタに積むだけにする (§13/修正9)。
+    uint used;
+    InterlockedAdd(SurfaceCounters[1], 1, used);
+    if (used >= MaxTriangles)
+    {
+        uint dummy;
+        InterlockedAdd(SurfaceCounters[0], 1, dummy);
+        return;
+    }
+
+    SurfaceVertex v;
+    v.normal = FieldNormal(a); v.position = a; SurfaceVertices.Append(v);
+    v.normal = FieldNormal(b); v.position = b; SurfaceVertices.Append(v);
+    v.normal = FieldNormal(c); v.position = c; SurfaceVertices.Append(v);
+}
+
+// 四面体 1 個の等値面。内側頂点の個数だけで分割が決まるのでテーブルが要らない。
+void MarchTetra(float3 p0, float v0, float3 p1, float v1, float3 p2, float v2, float3 p3, float v3)
+{
+    uint mask = (v0 > IsoValue ? 1u : 0u) | (v1 > IsoValue ? 2u : 0u)
+              | (v2 > IsoValue ? 4u : 0u) | (v3 > IsoValue ? 8u : 0u);
+    if (mask == 0u || mask == 15u) return;
+
+    // 内側の頂点が 1 個（または 3 個 = 反転）なら三角形 1 枚、2 個なら四辺形 = 三角形 2 枚。
+    // 下の分岐は「どの頂点が単独で内側／外側か」を列挙しているだけで、外部データではない。
+    switch (mask)
+    {
+        case 1u:  EmitTriangle(EdgeLerp(p0,v0,p1,v1), EdgeLerp(p0,v0,p2,v2), EdgeLerp(p0,v0,p3,v3)); break;
+        case 14u: EmitTriangle(EdgeLerp(p0,v0,p1,v1), EdgeLerp(p0,v0,p3,v3), EdgeLerp(p0,v0,p2,v2)); break;
+
+        case 2u:  EmitTriangle(EdgeLerp(p1,v1,p0,v0), EdgeLerp(p1,v1,p3,v3), EdgeLerp(p1,v1,p2,v2)); break;
+        case 13u: EmitTriangle(EdgeLerp(p1,v1,p0,v0), EdgeLerp(p1,v1,p2,v2), EdgeLerp(p1,v1,p3,v3)); break;
+
+        case 4u:  EmitTriangle(EdgeLerp(p2,v2,p0,v0), EdgeLerp(p2,v2,p1,v1), EdgeLerp(p2,v2,p3,v3)); break;
+        case 11u: EmitTriangle(EdgeLerp(p2,v2,p0,v0), EdgeLerp(p2,v2,p3,v3), EdgeLerp(p2,v2,p1,v1)); break;
+
+        case 8u:  EmitTriangle(EdgeLerp(p3,v3,p0,v0), EdgeLerp(p3,v3,p2,v2), EdgeLerp(p3,v3,p1,v1)); break;
+        case 7u:  EmitTriangle(EdgeLerp(p3,v3,p0,v0), EdgeLerp(p3,v3,p1,v1), EdgeLerp(p3,v3,p2,v2)); break;
+
+        case 3u:  { float3 a = EdgeLerp(p0,v0,p2,v2), b = EdgeLerp(p0,v0,p3,v3);
+                    float3 c = EdgeLerp(p1,v1,p3,v3), d = EdgeLerp(p1,v1,p2,v2);
+                    EmitTriangle(a, b, c); EmitTriangle(a, c, d); } break;
+        case 12u: { float3 a = EdgeLerp(p0,v0,p2,v2), b = EdgeLerp(p0,v0,p3,v3);
+                    float3 c = EdgeLerp(p1,v1,p3,v3), d = EdgeLerp(p1,v1,p2,v2);
+                    EmitTriangle(a, c, b); EmitTriangle(a, d, c); } break;
+
+        case 5u:  { float3 a = EdgeLerp(p0,v0,p1,v1), b = EdgeLerp(p0,v0,p3,v3);
+                    float3 c = EdgeLerp(p2,v2,p3,v3), d = EdgeLerp(p2,v2,p1,v1);
+                    EmitTriangle(a, b, c); EmitTriangle(a, c, d); } break;
+        case 10u: { float3 a = EdgeLerp(p0,v0,p1,v1), b = EdgeLerp(p0,v0,p3,v3);
+                    float3 c = EdgeLerp(p2,v2,p3,v3), d = EdgeLerp(p2,v2,p1,v1);
+                    EmitTriangle(a, c, b); EmitTriangle(a, d, c); } break;
+
+        case 9u:  { float3 a = EdgeLerp(p0,v0,p1,v1), b = EdgeLerp(p0,v0,p2,v2);
+                    float3 c = EdgeLerp(p3,v3,p2,v2), d = EdgeLerp(p3,v3,p1,v1);
+                    EmitTriangle(a, b, c); EmitTriangle(a, c, d); } break;
+        case 6u:  { float3 a = EdgeLerp(p0,v0,p1,v1), b = EdgeLerp(p0,v0,p2,v2);
+                    float3 c = EdgeLerp(p3,v3,p2,v2), d = EdgeLerp(p3,v3,p1,v1);
+                    EmitTriangle(a, c, b); EmitTriangle(a, d, c); } break;
+    }
+}
+
+[numthreads(THREADS3, THREADS3, THREADS3)]
+void BuildSurface(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id + 1 >= VoxelDims)) return;
+    int3 c = (int3)id;
+
+    // 立方体の 8 隅
+    float3 P[8];
+    float  V[8];
+    const int3 offs[8] =
+    {
+        int3(0,0,0), int3(1,0,0), int3(1,1,0), int3(0,1,0),
+        int3(0,0,1), int3(1,0,1), int3(1,1,1), int3(0,1,1)
+    };
+    bool anyIn = false, anyOut = false;
+    [unroll] for (int k = 0; k < 8; k++)
+    {
+        int3 cc = c + offs[k];
+        P[k] = VoxelPos(cc);
+        V[k] = SampleDensity(cc);
+        if (V[k] > IsoValue) anyIn = true; else anyOut = true;
+    }
+    if (!anyIn || !anyOut) return;   // 完全に内側/外側のセルは等値面を含まない
+
+    // 立方体を 6 個の四面体へ分解する。全ての四面体が対角 0-6 を共有するので、
+    // 隣接セルとの間で辺の補間点が一致し、継ぎ目のない面になる。
+    MarchTetra(P[0],V[0], P[1],V[1], P[2],V[2], P[6],V[6]);
+    MarchTetra(P[0],V[0], P[2],V[2], P[3],V[3], P[6],V[6]);
+    MarchTetra(P[0],V[0], P[3],V[3], P[7],V[7], P[6],V[6]);
+    MarchTetra(P[0],V[0], P[7],V[7], P[4],V[4], P[6],V[6]);
+    MarchTetra(P[0],V[0], P[4],V[4], P[5],V[5], P[6],V[6]);
+    MarchTetra(P[0],V[0], P[5],V[5], P[1],V[1], P[6],V[6]);
+}

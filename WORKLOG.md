@@ -1760,3 +1760,261 @@ Overflow分だけ正しく減少すること、をそれぞれ確認した。初
 という手順は、既存のUnityMCPベースの数値シミュレーション手法(実質的に
 同じ検証目的を果たす)で代替したが、実際のプレイ画面での最終確認は
 ユーザー自身の環境で行ってもらう必要がある。
+
+### 液体表現の全面再設計: Surface → Dynamic Liquid Volume (2026-08-13)
+
+「現在の表現を改善するのではなく、表現方式そのものを変更せよ」という15項目の
+指示を受領。要点は2つ: (1) 液体を透明なSurfaceではなく厚みを持ったVolumeとして
+扱う、(2) Overflowを線状Particleではなく「Liquid Volumeの一部がリムを越えて
+外へ移動したもの」として扱う。
+
+**採用方式**: SDF Metaball(陰関数曲面)のRaymarchingレンダリング + CPU側の
+粒子流体シミュレーション。Marching Cubesは前回同様不採用(256パターンテーブルの
+手書きは実装リスクが高い)だが、今回はRaymarchingにより同じ陰関数場をより滑らかに、
+かつ厚み・光沢・内部濃度を体積から直接導いて描画できるため、面ではなく体積として
+成立する。
+
+**新規/全面書き換えファイル**:
+- `PotionLiquid.cs` (全面書き換え。クラス名は維持しPotionGaugeUIとの互換を保持)
+- `PotionLiquidRenderer.cs` (新規: blob配列をシェーダーへ転送、marchボックス管理)
+- `PotionPuddleField.cs` (新規: 旧StreamからPuddleのみ分離)
+- `Pot/Shaders/PotionVolumeSDF.shader` (新規: Raymarcher)
+- `LiquidTestRig.cs` + `Editor/CarrySetupLiquidTest.cs` + `Scenes/LiquidTest.unity` (新規: 検証環境)
+- 削除: `PotionOverflowStream.cs` (線状/チューブ状Overflowの本体)
+
+**到達までに潰した実装上の落とし穴(いずれも再発しやすいので記録)**:
+
+1. **smin初期値1e6によるfloat32精度崩壊**: 距離場の畳み込みを`d=1e6`から始めて
+   いたため、`lerp(b,a,h)=b+(a-b)*h`が b=1e6 の位置で ulp≈0.06 に丸められ、
+   距離場が階段状に量子化。Sphere tracingは当たるしThickness(符号判定)も動くが、
+   四面体勾配が4点とも同値になり`normalize(0)=NaN`。結果は「アルベドは正しいのに
+   光が一切当たらない真っ黒な液体」。最初の実blobから畳み込みを開始して解決。
+
+2. **力ベースの斥力では液体が潰れる**: 静止時に液面が0.36→0.26まで沈み、
+   半径も0.18→0.10に収縮。
+
+3. **対距離の非貫通拘束(PBD)は「砂」であって液体ではない**: 安息角ができるため
+   30/40/50度に傾けても液面がほとんど動かず(0.277→0.291→0.288)、75度で
+   初めて崩れた。せん断抵抗を持たない**密度拘束(Position Based Fluids)**へ変更。
+
+4. **有限粒子数では自由表面の密度欠損で圧縮しすぎる**: 無限格子の理論静止密度を
+   使うと液面が0.219(目標0.301)まで沈む。シード配置(=正しい体積を占める格子)から
+   静止密度を自動較正して解決。
+
+5. **粒子を縮めると体積が減らせない**: 体積減少に合わせてblobを小さくすると
+   静止密度が上がり、既に疎な物体は圧縮のみの拘束では収縮できない。液面が
+   下がらないので溢れ続け、水平な壺が自力で100%→8%まで空になった。
+   **blobサイズを固定し、こぼれた分だけblobの個数を減らす**方式へ変更。
+   これにより仕様9「Overflowとは液体の一部が外へ移動したもの」が文字通りの実装になる。
+
+6. **Overflow判定を壺ローカル座標で行っていた**: 50度傾斜時、液体は最低リム点より
+   world基準で25cm上にあるのに、ローカルy比較では「リム未満」と判定され一滴も
+   こぼれなかった。**有効重力軸に沿った堰(weir)流量式**へ変更(仕様6準拠)。
+
+7. **エディタ非フォーカス時はPlayer Loopが進まない**: `Time.frameCount`が20で
+   停止したまま実時間だけ経過し、「Play→待つ→スクショ」が最初の1秒を撮り続けて
+   いた。`LiquidTestRig.SimulateSeconds()`で決定論的に手動ステップする方式に変更。
+
+**検証済み(数値)**: 静止時こぼれ0(仕様: 傾け/揺れだけでは減らない)、傾斜角に
+対して単調に流出(0°:100%残 / 20°:95% / 35°:57.5% / 50°:27.5%)、こぼれた体積と
+PotionVolume減少の一致、壺外への突き抜けなし(壺内部SDFとの交差で幾何学的に不可能)。
+
+**検証済み(目視)**: LiquidTestシーンで、厚みのある濃い緑・光沢・立体的な塊として
+描画されること、上面図で断面をほぼ満たすこと、傾斜で塊が片側へ寄ること、
+リムを越えた液滴が落下し地面にPuddleを作ること、CastleStageで実際にゴブリンが
+担ぐ壺に反映されていること。
+
+**未完了/既知の課題**:
+- 仕様14の10ケース全ての目視スイープ(静止/左右傾け/前後傾け/急加速/急停止/
+  連続方向転換/坂道/ジャンプ/着地/Overflow)は Overflow・静止・傾斜のみ実施済み。
+- Raymarchの実測プロファイリング未実施(`PotionLiquidRenderer.maxSteps`が調整点)。
+- 担いだ姿勢(壺が傾いている)での静止時に液面がリムより上に盛り上がる。
+  `radiusPerSpacing`(現0.70)を下げるか`maxPotionVolume`をさらに下げる必要がある。
+- Overflowの糸引き(strand)は成立しているが、壺の胴体に隠れる角度が多く、
+  リム上の盛り上がり→くびれ→液滴の連続性はまだ弱い。
+
+### 液体を自作GPU流体へ全面置換 (2026-08-13, 2回目の再設計)
+
+「Particleを直接描画せず、実際の流体をシミュレートしてSurfaceを再構成する」方式へ
+の変更指示を受領。前回のSDF Metaball実装(球Blobを落とすOverflowを含む)は全削除。
+
+**ライセンス方針**: 外部コードを一切使用しない完全自作。Sebastian LagueのFluid-Sim
+(MIT)は参考候補として挙げられていたが、**使わないのが最もリスクゼロ**のため不採用。
+参照したのは論文のアルゴリズムのみ(PBF: Macklin & Muller 2013 / Screen-Space Fluid
+Rendering: van der Laan 2009)で、これはコード著作物ではないためライセンス義務なし。
+`Assets/ThirdParty/`は不要。
+
+**採用方式**:
+- 物理: GPU Compute Shader上のPosition Based Fluids。8192粒子。近傍探索は
+  ソート不要の一様グリッド+アトミック挿入(bitonic sortチェーン丸ごと不要)。
+  **World空間**で計算するため、壺は「移動する衝突境界」でしかなく、リムを越えた
+  粒子は自動的に同じシミュレーションのまま落下する = Overflow専用処理が存在しない。
+- 描画: Screen-Space Fluid Rendering。粒子は画面外の深度バッファにインポスタとして
+  描くだけで、Narrow-Range filterで平滑化し、**平滑化後の深度の微分から法線を再構成**
+  する。Marching Cubes/3Dグリッドは、液体が壺から床まで数メートルに及ぶため
+  必要な解像度を確保できず不採用。
+- PotionVolumeは変数ではなく**GPUで壺内部の粒子数を数えて算出**。見た目と数値が
+  構造的に乖離しない。
+
+**新規ファイル**: `Shaders/Fluid/FluidSim.compute`,
+`FluidParticleDepth/FluidThickness/FluidBlur/FluidComposite.shader`,
+`Scripts/Fluid/PotionFluid.cs`, `PotInteriorProfile.cs`, `FluidSurfaceFeature.cs`,
+`FluidTestRig.cs`, `Editor/CarrySetupPotionFluid.cs`, `Scenes/PotionFluidTest.unity`
+**削除**: PotionLiquid / PotionLiquidRenderer / PotionPuddleField /
+PotionOverflowVFX / LiquidTestRig / CarrySetupLiquidTest / PotionVolumeSDF.shader ほか
+
+**動作している部分(スクリーンショットで確認済み)**: GPUソルバーの全9カーネル、
+RenderGraph unsafe passによる4パス描画、壺による正しい深度遮蔽、そして
+**壺内部の液面が球の集合ではない連続したSurfaceとして描画されること**。
+
+**未解決の不具合(次の作業の起点)**: 静止した壺から粒子が毎秒約15%漏れ続ける。
+切り分け済みの事実:
+- リムからではなく**壺の底方向**へ抜ける(aboveRim=0, belowFloor多数)。
+- 補正量クランプ導入前は自由落下速度(13.75m/s = 経過時間×g)に達していた。
+  クランプ後は速度上限7.00m/sに張り付いており、**境界付近でソルバーがエネルギーを
+  注入し続けている**ことを示す。
+- トンネリングではない(1サブステップの移動量 < シェル厚を確認済み)。
+- 壺底の「近い方へ押し出す」ロジック、内径プロファイルのテクスチャ参照、
+  捕捉半径が腹部の広さに届いていなかった件は、いずれも修正済みだが漏れは残存。
+
+**次に試すべきこと**: 現在の境界は「密度投影の各反復の後に位置をハードクランプする」
+方式であり、圧力ソルバーと綱引きになっている(押し込む→クランプで戻す→その位置差が
+ComputeVelocitiesで速度になる)。正攻法は**境界粒子(ghost particles)**: 壺内壁に
+動かない粒子の層を敷き、密度計算にだけ参加させる。こうすると壁は圧力ソルバーの
+「外」ではなく「中」の存在になり、綱引きが原理的に発生しない。SPH系で壁を扱う際の
+標準解法。
+
+### Phase 1: Fluid Core 実装 (2026-08-13)
+
+FLUID_DESIGN.md 確定後、§37 Phase 1（壺なし・テスト箱内で粘性流体が安定して動く）を実装。
+
+**構成**: `Shaders/Fluid/FluidCore.compute`（PBF 15 カーネル）、`Scripts/Fluid/FluidCore.cs`
+（ドライバ・境界粒子生成・CFL サブステップ）、`FluidCoreTestRig.cs`、`FluidDebugView.cs` +
+`FluidDebugParticles.shader`（**Phase 1 限定のデバッグ表示**。Phase 2 で既定オフ）、
+`Editor/CarrySetupFluidPhase1.cs`、`Scenes/FluidCoreTest.unity`。
+粒子 16384 / 境界粒子 10440 / 粒子間隔 0.036m / h=0.072m。
+
+**破棄**: 前回の Screen-Space 実装（PotionFluid / FluidSurfaceFeature / FluidSim.compute /
+深度・厚み・ブラー・合成の 4 shader / FluidTestRig）。§11 が 3D Density Field を必須と
+しており Screen-Space は非準拠のため。URP レンダラーからも FluidSurfaceFeature を除去済み。
+PotionGaugeUI は `IPotionVolumeSource` 経由に変更し、Phase 10 まで空参照でコンパイルを保つ。
+
+**実装中に潰した 4 つの破綻**（いずれも再発しやすいので記録）:
+
+1. **UAV スロット上限超過**: 全バッファを RWStructuredBuffer にしていたため
+   `ApplyViscosityTension` が 9 UAV を使い、D3D11 の上限 8 を超えて
+   「There are more uavs (9) than the maximum supported (8)」でカーネルごと実行されなかった。
+   粘性が一切効かず流体が最高速度に張り付いて箱いっぱいに膨張する、という形で表面化。
+   読み取り専用の使い方をするバッファを SRV 別名で宣言し、C# 側を per-kernel バインドに変更。
+
+2. **Akinci 表面張力の質量の扱い**: cohesion は F = -g m_i m_j C(r) r̂、
+   curvature は F = -g m_i (n_i - n_j) で、加速度に直すと **curvature には m_j が付かない**。
+   両方を「力」として足してから一括で m で割っていたため curvature だけが 1/m（約 30000 倍）
+   され、加速度 9000 m/s^2 に達して全粒子が 1 秒で NaN になった。
+
+3. **人工圧力・緩和係数を絶対値で持っていた**: どちらも lambda と同じスケールで効く量だが、
+   lambda のスケールは粒子間隔とカーネル半径に依存して桁で動く。人工圧力 0.0005 は
+   lambda（約 1e-4）の 10 倍の反発になり、流体が常時押し広げられて目標の 2 倍に膨張した。
+   理想格子での sum|gradC|^2 を CPU で計算し、それに対する**比率**で指定する方式に変更。
+
+4. **PBF の緩和係数 (SOR) が無かった**（最大の原因）: 詳細は FLUID_DESIGN.md の
+   「Solver Under-Relaxation」節。反復数 0/1/4 で液面が 0.425 / 1.197 / 1.350 と
+   **反復するほど吹き上がる**ことから、圧力投影自体がエネルギー源だと特定。
+   表面張力・境界粘性・人工圧力・境界圧力を個別にゼロにしても膨張が止まらないことも確認済み。
+   SOR=0.12 導入で解決。
+
+**設計変更（§43 に基づく報告事項）**: 近傍探索のソートを Bitonic からカウンティングソートへ。
+要件（セル毎上限のない完全ソート）は同一で品質は不変、ディスパッチ数が 105 → 7。
+
+**Phase 1 の検証結果（決定論ステップ + Game View）**:
+- 静止: 箱外への漏れ **0 粒子**、最大速度 0.80 m/s、重心 Y=0.431（目標 0.420）、
+  平均 rho/rho0 ≈ 1.0、液面が平坦。安定して静定する。
+- 既知の軽微な残り: 壁際に数粒子が這い上がる／初期整定時の飛沫が数十粒子残る。
+
+**未実装のためこのリグでは評価できない項目**: TiltBox / ShakeX / SpinY / HardStop は
+境界粒子の World 更新（Moving Boundary、設計 §3）がまだ入っていないため、箱を回しても
+境界が動かず意味を持たない。これは Phase 4〜6 の作業。
+
+### Phase 2 / Phase 3: Density Field + 等値面 + Liquid Material (2026-08-13)
+
+完成イメージ（`C:\work\Blender\流体イメージ.png`）を受領。設計書のアーキテクチャと
+一致していることを確認したうえで Phase 2/3 を実装。
+
+**新規**: `Shaders/Fluid/FluidSurface.compute`（密度蓄積・デコード・平滑化・等値面抽出）、
+`Scripts/Fluid/FluidSurface.cs`、`Shaders/Fluid/PotionLiquidSurface.shader`。
+
+**設計変更（§41/§43 に基づく報告事項）: 等値面抽出を四面体分解方式に**
+- 困難: 標準 Marching Cubes は 256 ケース x 16 の三角形テーブルという「データ」が必要。
+  外部から持ち込むとライセンス要件（§3/§15）に抵触し、記憶から書き起こすと誤りが
+  混入して検証困難なバグになる
+- 影響する仕様: §12（第一候補は GPU Marching Cubes）
+- 代替: 立方体を 6 個の四面体へ分解。テーブル不要で全分割が一次原理から導出でき、
+  同じ等値面を watertight に生成する（全四面体が対角 0-6 を共有するため隣接セル間で
+  辺の補間点が一致する）。§12 が明示的に許容する「その他の自作 Surface Reconstruction 方式」
+- 品質: 同一の Density Field から同一の等値面。三角形数は約 2 倍だが GPU 的には誤差の範囲
+
+**実装中に潰した問題**:
+1. **厚みの色マッピングが飽和して本体が真っ黒**: 壺/箱の中の液体は視線方向に 0.5m 近い
+   厚みがあるため、厚み 1.0 で _DeepColor まで振り切ると本体が黒くなる。完成イメージは
+   「濃いが読める緑」。深色は上限 0.55 までの色味付けに留めるよう変更。
+2. **表面に筋が走る（巻き順不一致）**: 四面体分解はケースによって三角形の巻き順が
+   揃わない。法線は三角形ではなく Density Field の勾配から取っているので巻き順に依存する
+   必要がそもそも無く、Cull Off にして解決。
+3. **法線が階段状（最近傍サンプリング）**: 等値面の頂点はボクセル境界上の任意の位置に
+   あるため、`DensitySrc[int3]` の整数インデックスで微分すると法線がボクセル単位で
+   量子化され、鋭いスペキュラの筋になる。トリリニア補間サンプリングに変更。
+
+**Phase 2/3 の検証結果**:
+- 物理: 液面 0.677（目標 0.690）、重心 Y 0.419（目標 0.420）、最大速度 0.03 m/s、
+  箱外への漏れ 0 粒子。静止状態がほぼ理論値どおりに成立。
+- 表面: **粒子・球・粒状感なし**。連続した watertight な等値面。
+- マテリアル: 濃い緑・不透明・高 Smoothness・明確なスペキュラ・厚みによる明暗変化。
+  「透明な緑色の膜」には見えない (§16)。
+- 解像度: ボクセル 12mm / 107x124x107。粒子数（物理）とは独立に調整可能 (§13)。
+
+**既知の残り（Phase 8 の液滴検証前に要調整）**: 平坦な上面の中央に細いスペキュラの筋が
+わずかに残る。密度勾配が最も弱い場所で残留ノイズが出ている。voxelsPerSpacing を上げるか
+smoothingPasses を増やすことで軽減できる。§38 の「Surface が粒状」には該当しない
+（粒状ではなく線状の微細ノイズ）が、Phase 8 の液滴品質検証時に再評価する。
+
+### Phase 4 / 5 / 6: 壺内部境界・Moving Boundary・慣性 (2026-08-13)
+
+**新規/変更**: `Scripts/Fluid/FluidBoundary.cs`（Box / PotProfile の両モード、境界粒子生成、
+Akinci の psi 算出、容器の線速度・角速度の実測、サブステップ間の姿勢補間）、
+`FluidCore.compute` に `UpdateBoundary` カーネルと SafetyCorrection を追加、
+`FluidCore.cs` を移動境界対応に全面書き換え、`Editor/CarrySetupFluidPot.cs` +
+`Scenes/FluidPotTest.unity`。
+
+**壺境界の作り方**: 実測内径プロファイルに沿って、各高さで R(y) から外側へ 2 層以上の
+シェルを敷く。**リム高さで打ち切る**ことが Open Boundary (§22)。壁シェルは 1 組で
+内側・外側の両方に効く（SPH の境界は密度で押し返すので、内側の液体も外壁を伝う液体も
+同じ粒子群が壁として機能する）。壺 12542 個 / 流体 16384 個。
+
+**Moving Boundary**: 境界粒子は容器ローカル固定、World では毎サブステップ
+`UpdateBoundary` カーネルが再計算する。速度は `V_b = v_container + cross(omega, p_b - center)`。
+姿勢は前フレーム→現フレームをサブステップ間で補間する（補間しないと壁が瞬間移動して
+流体を弾き飛ばす）。サブステップ数は容器速度も含めた CFL で決まる。
+
+**実装中に潰した問題**:
+1. **シード余りが壺の床下に置かれていた**: 目標高さまでの格子で 15542 個しか置けず、
+   残り 842 個を容器原点に置いていたため、床より下 = 「漏れ」として計上されていた。
+   リムまで積み増し、それでも足りなければ内部の有効位置で埋めるよう変更。
+2. **急停止で 0.9% の粒子が壺底を貫通**（throughWall 21 / belowFloor 131）:
+   設計 §10 の SafetyCorrection を実装。壺プロファイルを GPU に渡し、`Finalize` で
+   壁/床を抜けた粒子だけを引き戻す。**`Finalize` は `ComputeVelocity` より後に走るので、
+   この位置変更は構造的に速度へ混入しない**（前回のバグの再発が原理的に起きない）。
+
+**検証結果**:
+
+| ケース | 結果 |
+|---|---|
+| Phase 4 静止 | INSIDE 16384 / aboveRim 0 / throughWall 0 / belowFloor 0、最大速度 0.02 m/s、液面 0.1825（目標 0.1910） |
+| Phase 5 傾斜 25 度 | 全粒子が壺内。**液面がワールド水平のまま低い側へ寄る**（重心 x = -0.235、localTop 0.191 -> 0.276）。§19 準拠を実測で確認 |
+| Phase 6 急停止 | 液体が進行方向へ **7.6cm 突出**（重心 z 2.876 対 壺 2.80）、**リムを越える**（localTop 0.3672 > rimY 0.3601）。貫通 0 |
+| Phase 6 回転 | 角速度 1.57 rad/s で全粒子が壺内、境界粘性により中身が引きずられる（最大速度 0.88 m/s） |
+
+急停止で aboveRim = 49 が出るのは**正常**で、これが Phase 7 の Overflow の入口になる。
+
+**未着手**: Phase 7（Rim Opening / Overflow 判定）、Phase 8（液だれ・液滴）、
+Phase 9（Ground Fluid）、Phase 10（Fluid Mass / PotionVolume）、Phase 11（ゴブリン統合）、
+Phase 12（最適化）。

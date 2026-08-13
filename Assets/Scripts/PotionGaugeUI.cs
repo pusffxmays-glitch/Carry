@@ -3,14 +3,17 @@ using UnityEngine.UI;
 
 // Screen-edge UI gauge showing the pot's remaining potion volume, added per request
 // ("画面のはじのほうにツボの中の残量とリンクするゲージを用意"). Builds its own Canvas/Image
-// hierarchy at runtime (same reasoning as PotionLiquid's own mesh/VFX children: avoids hand-editing
-// scene YAML for new UI GameObjects) and reads PotionLiquid.FillFraction01 every frame. No changes
-// to PotionLiquid itself -- FillFraction01 already existed as a public property.
+// hierarchy at runtime (avoids hand-editing scene YAML for new UI GameObjects) and reads
+// PotionFluid.FillFraction01 every frame. That value is measured on the GPU from how many fluid
+// particles are still inside the pot, so the gauge cannot drift away from what is actually on screen.
 [DefaultExecutionOrder(150)]
 public class PotionGaugeUI : MonoBehaviour
 {
     [Header("Target (auto-found if empty)")]
-    public PotionLiquid potionLiquid;
+    // Phase 10 で FluidCore ベースの PotionVolume 供給元を実装するまで、ゲージは
+    // インターフェース越しに参照する。Phase 1〜9 の流体テストシーンにゲージは無い。
+    public MonoBehaviour potionSourceBehaviour;
+    IPotionVolumeSource potionLiquid;
 
     [Header("Layout")]
     public Vector2 barSize = new Vector2(48f, 340f);
@@ -64,12 +67,12 @@ public class PotionGaugeUI : MonoBehaviour
     {
         try
         {
-            if (potionLiquid == null) potionLiquid = FindFirstObjectByType<PotionLiquid>();
+            if (potionLiquid == null) potionLiquid = potionSourceBehaviour as IPotionVolumeSource;
             if (potionLiquid == null)
-                Debug.LogError("PotionGaugeUI: no PotionLiquid found in the scene -- the gauge will build but always show empty/default fill.");
+                Debug.LogError("PotionGaugeUI: no IPotionVolumeSource assigned in the scene -- the gauge will build but always show empty/default fill.");
             BuildUI();
             PositionAtRenderedEdge();
-            Debug.Log("PotionGaugeUI: gauge built successfully. potionLiquid=" + (potionLiquid != null ? potionLiquid.name : "NULL") +
+            Debug.Log("PotionGaugeUI: gauge built successfully. potionLiquid=" + (potionSourceBehaviour != null ? potionSourceBehaviour.name : "NULL") +
                 " Screen=" + Screen.width + "x" + Screen.height);
         }
         catch (System.Exception e)

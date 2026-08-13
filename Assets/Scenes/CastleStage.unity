@@ -986,33 +986,44 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5ee242642a19d02408a1299c4effffba, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PotionLiquid
-  maxPotionVolume: 0.044
-  initialPotionVolume: 0.044
-  inertiaSpringStrength: 55
-  inertiaDamping: 5.5
-  maxTiltAngle: 42
+  maxPotionVolume: 0.032
+  initialPotionVolume: 0.032
+  insideBlobCount: 40
+  maxOverflowBlobs: 16
+  spacingScale: 1.1225
+  radiusPerSpacing: 0.7
+  solverIterations: 3
+  solverStiffness: 1
+  kernelRadiusScale: 2
+  artificialPressure: 0.0002
+  cohesionStrength: 8
+  cohesionRange: 1.9
+  velocityCoupling: 0.35
+  damping: 1.2
+  maxBlobSpeed: 6
   accelerationSensitivity: 1.15
   groundSlopeInfluence: 0.35
-  ringNodeCount: 16
-  nodeSpringStrength: 40
-  nodeCoupleStrength: 260
-  nodeDamping: 3.2
-  nodeForcingGain: 3.5
-  maxNodeAmplitude: 0.07
-  waveRadialFalloff: 1.5
-  smallWaveAmplitude: 0.004
-  smallWaveSpeed: 1.3
-  overflowRate: 6
-  overflowSplashSpeed: 0.45
-  radialSegments: 40
-  capRings: 6
-  sideWallRings: 4
-  liquidMaterial: {fileID: 2100000, guid: 7621d19193d05544bb56afe72083c440, type: 2}
-  overflowStream: {fileID: 0}
-  overflowMaterial: {fileID: 2100000, guid: 07bd178d93f047b41bbd8e8aa0920154, type: 2}
+  maxMeasuredAcceleration: 60
+  dropsPerBlob: 4
+  overflowRate: 2.5
+  overflowEjectSpeed: 0.12
+  overflowSplashSpeed: 3
+  overflowGravityScale: 0.9
+  overflowDrag: 0.12
+  strandSpringStrength: 18
+  strandBreakStretch: 3.2
+  overflowLifetime: 3.5
+  groundLayerMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  volumeMaterial: {fileID: 2100000, guid: 7b2a570d5612ff6449899d281571fce2, type: 2}
+  volumeRenderer: {fileID: 0}
+  puddleField: {fileID: 0}
+  puddleMaterial: {fileID: 2100000, guid: 6ea62b105bfb9a0429a2b342cae61b74, type: 2}
   overflowVfx: {fileID: 0}
   overflowSplashMaterial: {fileID: 2100000, guid: a4e87d618d73cb349a4ad043f3bfe97d, type: 2}
   potMeshSource: {fileID: 0}
+  autoStep: 1
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
