@@ -141,4 +141,15 @@ public class GoblinLocomotion : MonoBehaviour
         ApplyVerticalVelocity();
         controller.Move(new Vector3(0f, verticalVelocity, 0f) * Time.deltaTime);
     }
+
+    // Stage-gimmick hook (used by RiverFlowController): teleport the character
+    // controller to a world position -- e.g. a recovery point or checkpoint --
+    // without it fighting the move via collision resolution.
+    public void SnapTo(Vector3 worldPosition, bool resetVerticalVelocity = true)
+    {
+        controller.enabled = false;
+        transform.position = worldPosition;
+        controller.enabled = true;
+        if (resetVerticalVelocity) verticalVelocity = -1f;
+    }
 }
