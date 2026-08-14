@@ -15,6 +15,18 @@ public class PotInteriorProfile
     public float[] Radii { get; private set; }
     public float[] CumulativeVolume { get; private set; }
 
+    // ---- 外形（壺の実体がどこまであるか） ----
+    //
+    // 内側の形だけでは「壺の壁の中」を判定できない。等値面は最外周の粒子から
+    // Splat 半径ぶん外側にふくらむので（実測 57.4mm）、壁の厚みより厚くふくらむと
+    // 液体が壺の側面や底を突き抜けて描画される。壁の中には液体は存在し得ないので、
+    // 密度場をここで 0 にして切り落とす。そのために外形が要る。
+    //
+    // 高さビンごとの **最大** 半径。内側 (Radii) が最小半径なのと対になる。
+    public float[] OuterRadii { get; private set; }
+    public float MeshMinY { get; private set; }
+    public float MeshMaxY { get; private set; }
+
     public float FloorY { get; private set; }
     public float RimY { get; private set; }
     public float RimR { get; private set; }
@@ -39,6 +51,8 @@ public class PotInteriorProfile
         for (int i = 0; i < Radii.Length; i++) Radii[i] = radius;
         RimR = radius;
         MaxRadius = radius;
+        if (OuterRadii != null)
+            for (int i = 0; i < OuterRadii.Length; i++) OuterRadii[i] = radius * 1.15f;
         float cum = 0f;
         CumulativeVolume[0] = 0f;
         for (int i = 1; i < Heights.Length; i++)
@@ -58,6 +72,8 @@ public class PotInteriorProfile
             Radii = new[] { 0.15f, 0.15f };
             CumulativeVolume = new[] { 0f, 0.021f };
             FloorY = 0f; RimY = 0.3f; RimR = 0.15f; MaxRadius = 0.15f;
+            MeshMinY = 0f; MeshMaxY = 0.3f;
+            OuterRadii = new[] { 0.17f, 0.17f };
             return;
         }
 
@@ -71,6 +87,7 @@ public class PotInteriorProfile
 
         const int bins = 24;
         var binMinR = new float[bins + 1];
+        var binMaxR = new float[bins + 1];
         var binHas = new bool[bins + 1];
         for (int b = 0; b <= bins; b++) binMinR[b] = float.MaxValue;
 
@@ -80,8 +97,13 @@ public class PotInteriorProfile
             int b = Mathf.Clamp(Mathf.RoundToInt((verts[i].y - minY) / span * bins), 0, bins);
             float r = Mathf.Sqrt(verts[i].x * verts[i].x + verts[i].z * verts[i].z);
             if (r < binMinR[b]) binMinR[b] = r;
+            if (r > binMaxR[b]) binMaxR[b] = r;
             binHas[b] = true;
         }
+
+        MeshMinY = minY;
+        MeshMaxY = maxY;
+        BuildOuter(binMaxR, binHas, bins);
 
         float widest = 0f;
         for (int b = 0; b <= bins; b++) if (binHas[b] && binMinR[b] < 10f) widest = Mathf.Max(widest, binMinR[b]);
@@ -127,6 +149,52 @@ public class PotInteriorProfile
             float a1 = Mathf.PI * Radii[i] * Radii[i];
             CumulativeVolume[i] = CumulativeVolume[i - 1] + 0.5f * (a0 + a1) * dy;
         }
+    }
+
+    // 外形を Samples 個に整えて持つ。空のビンは近傍から埋め、少しだけ滑らかにする。
+    // 縄の飾りが張り出している高さでは、その張り出しぶんまで「壺の実体」として扱う。
+    // 実体を広めに取る側の誤差は、液体が壺を突き抜けないという目的からは安全側。
+    void BuildOuter(float[] binMaxR, bool[] binHas, int bins)
+    {
+        var raw = new float[bins + 1];
+        float last = 0f;
+        for (int b = 0; b <= bins; b++)
+        {
+            if (binHas[b]) last = binMaxR[b];
+            raw[b] = last;
+        }
+        for (int b = bins; b >= 0; b--)
+        {
+            if (binHas[b]) last = binMaxR[b];
+            else raw[b] = Mathf.Max(raw[b], last);
+        }
+
+        OuterRadii = new float[Samples];
+        for (int i = 0; i < Samples; i++)
+        {
+            float f = i / (float)(Samples - 1) * bins;
+            int i0 = Mathf.Clamp(Mathf.FloorToInt(f), 0, bins);
+            int i1 = Mathf.Min(i0 + 1, bins);
+            OuterRadii[i] = Mathf.Lerp(raw[i0], raw[i1], f - i0);
+        }
+    }
+
+    /// <summary>壺の実体の外周半径。y は MeshMinY..MeshMaxY のローカル高さ。</summary>
+    public float OuterRadiusAt(float y)
+    {
+        if (OuterRadii == null || OuterRadii.Length == 0) return 0f;
+        float t = Mathf.InverseLerp(MeshMinY, MeshMaxY, y);
+        float f = Mathf.Clamp01(t) * (OuterRadii.Length - 1);
+        int i0 = Mathf.Clamp(Mathf.FloorToInt(f), 0, OuterRadii.Length - 1);
+        int i1 = Mathf.Min(i0 + 1, OuterRadii.Length - 1);
+        return Mathf.Lerp(OuterRadii[i0], OuterRadii[i1], f - i0);
+    }
+
+    /// <summary>外形半径を Samples 個で返す（GPU の切り落とし用）。</summary>
+    public float[] GetOuterProfileArray()
+    {
+        if (OuterRadii == null) return new float[Samples];
+        return (float[])OuterRadii.Clone();
     }
 
     public float RadiusAt(float y)

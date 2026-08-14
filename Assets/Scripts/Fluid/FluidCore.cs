@@ -71,6 +71,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Tooltip("容器の内容積に対する初期充填率。")]
     // 満タン。0.95 は「リムの直下まで」で、これ以上入れると静止時から溢れる。
     [Range(0.05f, 0.95f)] public float fillFraction = 0.95f;
+    [Tooltip("開始時に容器を静止させたまま液面を釣り合わせておく秒数。0 で無効。種の格子が緩む分の初期こぼれを防ぐ。")]
+    [Range(0f, 2f)] public float initialSettleSeconds = 0.7f;
     [Tooltip("シミュレーション領域の余白 (m)。容器の周囲にこれだけ広げる。")]
     public float simPadding = 0.45f;
     [Tooltip("容器の下へ領域を伸ばす量 (m)。Box モードでのみ使う。壺モードでは領域の底は groundY に固定される。")]
@@ -190,7 +192,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     GraphicsBuffer densities, lambdas;
     GraphicsBuffer boundaryLocal, boundaryPositions, boundaryVelocities, boundaryVolumes;
     GraphicsBuffer sortPositions, cellCounts, cellStart, cellCursor, blockSums, sortedIndices;
-    GraphicsBuffer potProfile, safetyCounters;
+    GraphicsBuffer potProfile, potOuterProfile, safetyCounters;
     // §16「非同期リードバック」。同期 GetData は CPU が GPU の完了を待つので、
     // 毎フレーム丸ごとパイプラインが止まる。ここで欲しいのは統計値だけで、
     // 1 フレーム遅れても困らない。リング状に持って、書き込み中のバッファを
@@ -476,16 +478,24 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         retiredFlags.SetData(new uint[fluidCount]);
 
         potProfile?.Release();
+        potOuterProfile?.Release();
         if (boundary.mode == FluidBoundary.Mode.PotProfile && boundary.Profile != null)
         {
             var arr = boundary.Profile.GetProfileArray();
             potProfile = new GraphicsBuffer(GraphicsBuffer.Target.Structured, arr.Length, sizeof(float));
             potProfile.SetData(arr);
+
+            // 外形。こぼれた液体が壺の実体を素通りしないために要る。
+            var outer = boundary.Profile.GetOuterProfileArray();
+            potOuterProfile = new GraphicsBuffer(GraphicsBuffer.Target.Structured, outer.Length, sizeof(float));
+            potOuterProfile.SetData(outer);
         }
         else
         {
             potProfile = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 2, sizeof(float));
             potProfile.SetData(new float[] { 1f, 1f });
+            potOuterProfile = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 2, sizeof(float));
+            potOuterProfile.SetData(new float[] { 1f, 1f });
         }
     }
 
@@ -577,6 +587,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         cellCursor?.Release(); cellCursor = null;
         blockSums?.Release(); blockSums = null;
         potProfile?.Release(); potProfile = null;
+        potOuterProfile?.Release(); potOuterProfile = null;
         safetyCounters?.Release(); safetyCounters = null;
         regionFlags?.Release(); regionFlags = null;
         // 領域カウンタのリングバッファはここで解放しない。
@@ -603,6 +614,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             pendingSeed = false;
             UpdateGridOrigin();
             SeedFluid();
+            PreSettle();
         }
 
         // §21: 容器が瞬間移動したら、中身を同じ剛体変換で連れて行く。
@@ -675,6 +687,33 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         ClassifyAndRead();
     }
 
+    // 種として置いた格子は PBF の密度拘束を満たしていない。そのままゲームを始めると、
+    // 最初の数フレームで格子が緩んで液面が一度大きく盛り上がり、リムを越えた分が
+    // こぼれる（実測: 開始 0.6 秒で 605 粒子が壺の外に出て PotionVolume が 0.962 へ）。
+    // これは運搬のしかたと関係の無い、初期条件だけが原因の損失。
+    //
+    // ゲームが始まる前に、容器を静止させたまま同じソルバで釣り合うまで進めておく。
+    // 別の緩和法に置き換えるのではなく本番と同じ SubStep をそのまま回すので、
+    // 得られる状態は「静かに置いておいたときの液面」そのもの。
+    void PreSettle()
+    {
+        if (initialSettleSeconds <= 0f) return;
+
+        // CFL を必ず満たす刻み。ここは 1 回きりなので刻みを細かく取って構わない。
+        float sdt = 0.4f * spacing / Mathf.Max(maxSpeed, 1e-6f);
+        int steps = Mathf.Clamp(Mathf.CeilToInt(initialSettleSeconds / sdt), 1, 2000);
+        settling = true;
+        for (int i = 0; i < steps; i++) SubStep(sdt, 1f);
+        settling = false;
+        PreSettleSteps = steps;
+    }
+
+    // 整定中フラグ。BindAll が見て「ふちを越えたら出て行く」判定を止める。
+    bool settling;
+
+    /// <summary>開始時の整定に使ったサブステップ数（Debug 用）。</summary>
+    public int PreSettleSteps { get; private set; }
+
     void ClassifyAndRead()
     {
         var buf = regionCountersRing[regionRingIndex];
@@ -684,6 +723,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         Bind(kClassify, ("PositionsIn", positions), ("VelocitiesIn", velocities),
                         ("RegionFlags", regionFlags),
                         ("RegionCounters", buf), ("PotProfileBuf", potProfile),
+                        ("PotOuterBuf", potOuterProfile),
                         ("RetiredFlagsIn", retiredFlags));
         fluidCompute.Dispatch(kClassify, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
 
@@ -821,7 +861,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // UAV: PredictedPositions / Positions / Velocities / SafetyCounters / Ages / RetiredFlags = 6。
         // D3D11 の上限 8 に収まっている。
         Bind(kFinalize, ("PredictedPositions", predicted), ("Positions", positions), ("Velocities", velocities),
-                        ("PotProfileBuf", potProfile), ("SafetyCounters", safetyCounters),
+                        ("PotProfileBuf", potProfile), ("PotOuterBuf", potOuterProfile),
+                        ("SafetyCounters", safetyCounters),
                         ("Ages", ages), ("RetiredFlags", retiredFlags));
 
         fluidCompute.SetInt("FluidCount", fluidCount);
@@ -880,6 +921,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             fluidCompute.SetInt("PotProfileCount", PotInteriorProfile.Samples);
             fluidCompute.SetFloat("PotFloorY", prof.FloorY);
             fluidCompute.SetFloat("PotRimY", prof.RimY);
+            fluidCompute.SetFloat("PotMeshMinY", prof.MeshMinY);
+            fluidCompute.SetFloat("PotMeshMaxY", prof.MeshMaxY);
             // SafetyCorrection は「壁を半径方向に突き抜けた粒子」だけを戻す。
             // リムを越える動きは半径方向ではなく上方向なので、リムまで有効にしても
             // 堰にはならない（実測でリム帯を除外しても堰の高さは不変だった）。
@@ -895,7 +938,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("RimOpeningHeight", rimOpeningHeight);
         fluidCompute.SetFloat("GroundY", groundY);
         fluidCompute.SetFloat("GroundBandHeight", spacing * 1.5f);
-        fluidCompute.SetInt("EscapeEnabled", escapeAboveRim ? 1 : 0);
+        // 開始時の整定中は「ふちを越えたら出て行く」を止める。容器は静止しているので、
+        // このとき外へ出るのは種の格子が緩む勢いだけが原因であり、運搬の結果ではない。
+        // 止めないと格子の緩みで弾かれた粒子がそのまま地面へ落ち、ゲーム開始の瞬間に
+        // 液滴が散らばる（実測 38 粒子）。止めれば SafetyCorrection が内側へ戻す。
+        fluidCompute.SetInt("EscapeEnabled", (escapeAboveRim && !settling) ? 1 : 0);
         fluidCompute.SetFloat("EscapeMargin", boundary.mode == FluidBoundary.Mode.PotProfile
             ? spacing * escapeMarginSpacings / Mathf.Max(1e-6f, boundary.ContainerScale) : 1e9f);
         fluidCompute.SetFloat("GroundLifetime", groundLifetime);

@@ -46,6 +46,14 @@ public class FluidSurface : MonoBehaviour
     public Material liquidMaterial;
     public Shader liquidShader;
 
+    [Header("Container clip")]
+    // 等値面は最外周の粒子から Splat 半径ぶん外へふくらむ（実測 57.4mm）。壺の壁には
+    // それより薄い所があるので、切らないと液体が側面や底を突き抜けて描画される
+    // （走ると外側に、ジャンプすると下側にはみ出して見える）。
+    // 粒子は内壁から最大 11.4mm しか出ていないので、これは物理ではなく描画側の問題。
+    [Tooltip("壺の壁と底の中にある密度を 0 にする。切ると液体が壺を突き抜けて見える。")]
+    public bool clipToContainer = true;
+
     [Header("Debug")]
     public bool logCapacity = false;
 
@@ -64,6 +72,7 @@ public class FluidSurface : MonoBehaviour
     GraphicsBuffer brickSlot, activeBricks;
     GraphicsBuffer allocCounter, brickArgs, brickArgsSrc;
     GraphicsBuffer poolAccum, poolA, poolB;
+    GraphicsBuffer potInner, potOuter;
     Vector3Int voxelDims, brickDims;
     int brickTotal;
     uint[] allocRead = new uint[2];
@@ -74,7 +83,7 @@ public class FluidSurface : MonoBehaviour
     uint[] counterReset = new uint[4];
     uint[] counterRead = new uint[4];
 
-    int kResetSlots, kClearSlots, kMark, kBrickArgs, kClearPool, kSplat, kDecode, kBlur, kBuild, kDrawArgs, kNormals;
+    int kResetSlots, kClearSlots, kMark, kBrickArgs, kClearPool, kSplat, kDecode, kBlur, kBuild, kDrawArgs, kNormals, kMaskSolid;
     const int Threads = 256;
     const int Threads3 = 4;
     const int Brick = 8;        // FluidSurface.compute の BRICK と一致させること
@@ -122,6 +131,8 @@ public class FluidSurface : MonoBehaviour
 
     void Release()
     {
+        potInner?.Release(); potInner = null;
+        potOuter?.Release(); potOuter = null;
         poolAccum?.Release(); poolAccum = null;
         poolA?.Release(); poolA = null;
         poolB?.Release(); poolB = null;
@@ -157,6 +168,7 @@ public class FluidSurface : MonoBehaviour
         kSplat = cs.FindKernel("SplatDensity");
         kDecode = cs.FindKernel("DecodeDensity");
         kBlur = cs.FindKernel("BlurDensity");
+        kMaskSolid = cs.FindKernel("MaskSolid");
         kBuild = cs.FindKernel("BuildSurface");
         kDrawArgs = cs.FindKernel("WriteDrawArgs");
         kNormals = cs.FindKernel("ComputeVertexNormals");
@@ -233,6 +245,7 @@ public class FluidSurface : MonoBehaviour
         poolB = new GraphicsBuffer(GraphicsBuffer.Target.Structured, poolVoxels, sizeof(float));
 
         ResetAllSlots();
+        BuildPotClipProfiles();
 
         float mb = (brickTotal * 4f + poolVoxels * 12f) / (1024f * 1024f);
         Debug.Log($"FluidSurface: voxel {voxelSize * 1000f:F1}mm / domain {domainSize} @ {fieldOrigin} " +
@@ -241,6 +254,22 @@ public class FluidSurface : MonoBehaviour
     }
 
     static int CeilToBrick(float v) => Mathf.Max(Brick, Mathf.CeilToInt(v / Brick) * Brick);
+
+    // 壺の内側と外周のプロファイルを GPU へ渡す。これが無いと壁の中を判定できない。
+    void BuildPotClipProfiles()
+    {
+        potInner?.Release(); potOuter?.Release();
+        var prof = (core.Boundary != null && core.Boundary.mode == FluidBoundary.Mode.PotProfile)
+                 ? core.Boundary.Profile : null;
+        if (prof == null) { potInner = null; potOuter = null; return; }
+
+        float[] inner = prof.GetProfileArray();
+        float[] outer = prof.GetOuterProfileArray();
+        potInner = new GraphicsBuffer(GraphicsBuffer.Target.Structured, inner.Length, sizeof(float));
+        potOuter = new GraphicsBuffer(GraphicsBuffer.Target.Structured, outer.Length, sizeof(float));
+        potInner.SetData(inner);
+        potOuter.SetData(outer);
+    }
 
     // ドメインの原点。**Brick 単位に量子化**して容器の XZ を追う。
     //
@@ -366,7 +395,21 @@ public class FluidSurface : MonoBehaviour
             }
         }
 
-        // 8. iso surface
+        // 8. 壺の実体（壁と底）を切り落とす。
+        //    等値面は最外周の粒子から Splat 半径ぶん外へふくらむので、そのままだと
+        //    壁の薄い所を突き抜けて「壺の外側にポーションがはみ出す」ように見える。
+        //    Blur の後に掛けること。前に掛けると Blur が壁の中へ広げ直す。
+        SetPotClipUniforms();
+        if (potInner != null)
+        {
+            cs.SetBuffer(kMaskSolid, "PoolMask", src);
+            cs.SetBuffer(kMaskSolid, "ActiveBricks", activeBricks);
+            cs.SetBuffer(kMaskSolid, "PotInnerBuf", potInner);
+            cs.SetBuffer(kMaskSolid, "PotOuterBuf", potOuter);
+            cs.DispatchIndirect(kMaskSolid, brickArgs);
+        }
+
+        // 9. iso surface
         counters.SetData(counterReset);
         cs.SetBuffer(kBuild, "ActiveBricks", activeBricks);
         cs.SetBuffer(kBuild, "BrickSlotIn", brickSlot);
@@ -375,13 +418,13 @@ public class FluidSurface : MonoBehaviour
         cs.SetBuffer(kBuild, "SurfaceCounters", counters);
         cs.DispatchIndirect(kBuild, brickArgs);
 
-        // 9. 描画引数と法線カーネルのディスパッチ引数を三角形カウンタから作る
+        // 10. 描画引数と法線カーネルのディスパッチ引数を三角形カウンタから作る
         cs.SetBuffer(kDrawArgs, "SurfaceCounters", counters);
         cs.SetBuffer(kDrawArgs, "DrawArgs", argsSrc);
         cs.Dispatch(kDrawArgs, 1, 1, 1);
         Graphics.CopyBuffer(argsSrc, argsBuffer);
 
-        // 10. 法線。BuildSurface の中で計算すると EmitTriangle の展開先 100 箇所すべてに
+        // 11. 法線。BuildSurface の中で計算すると EmitTriangle の展開先 100 箇所すべてに
         //     ReadField 48 回ぶんが埋め込まれ、FXC が落ちる。出来上がった頂点に対して
         //     1 回だけ計算する。
         cs.SetBuffer(kNormals, "ActiveBricks", activeBricks);
@@ -408,6 +451,36 @@ public class FluidSurface : MonoBehaviour
                 Debug.LogWarning($"FluidSurface: Brick プール容量超過 {LastBrickOverflow} 個 (容量 {poolBrickCapacity})。" +
                                  "poolBrickCapacity を上げてください。液体が虫食いになります。");
         }
+    }
+
+    // 壺の姿勢とプロファイルの範囲。流体が見ている姿勢 (SimPosition/SimRotation) を使う。
+    // 見た目の Transform とは実測でずれが 0 だが、ずれた場合に切り落としだけが
+    // 別の場所に掛かるとかえって破綻するので、流体と同じ姿勢に揃えておく。
+    void SetPotClipUniforms()
+    {
+        var b = core.Boundary;
+        bool on = clipToContainer && potInner != null && b != null
+               && b.mode == FluidBoundary.Mode.PotProfile && b.Profile != null;
+        cs.SetInt("PotClipEnabled", on ? 1 : 0);
+        if (!on) return;
+
+        var prof = b.Profile;
+        Matrix4x4 potToWorld = Matrix4x4.TRS(b.SimPosition, b.SimRotation, b.Container.lossyScale);
+        cs.SetMatrix("WorldToPot", potToWorld.inverse);
+        cs.SetInt("PotProfileCount", PotInteriorProfile.Samples);
+        cs.SetFloat("PotFloorY", prof.FloorY);
+        cs.SetFloat("PotRimY", prof.RimY);
+        cs.SetFloat("PotMeshMinY", prof.MeshMinY);
+        cs.SetFloat("PotMeshMaxY", prof.MeshMaxY);
+
+        // 壺を包む球。ここから外れた voxel は距離判定 1 回で抜ける。
+        float midY = (prof.MeshMinY + prof.MeshMaxY) * 0.5f;
+        float halfH = (prof.MeshMaxY - prof.MeshMinY) * 0.5f;
+        float outerMax = 0f;
+        var outer = prof.OuterRadii;
+        if (outer != null) for (int i = 0; i < outer.Length; i++) outerMax = Mathf.Max(outerMax, outer[i]);
+        cs.SetVector("PotCentreWS", potToWorld.MultiplyPoint3x4(new Vector3(0f, midY, 0f)));
+        cs.SetFloat("PotClipRadiusWS", Mathf.Sqrt(outerMax * outerMax + halfH * halfH) * b.ContainerScale * 1.05f);
     }
 
     GraphicsBuffer surfaceSrc;

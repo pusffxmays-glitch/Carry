@@ -140,9 +140,15 @@ float  BoundsFriction;
 // 極端な一時貫通」だけを拾う最終安全装置であり、常態化したら破綻とみなす指標を出す。
 // 補正は ComputeVelocity より後（Finalize）で行うため、構造的に速度へ変換されない。
 StructuredBuffer<float> PotProfileBuf;
+// 壺の **外形**（高さビンごとの最大半径）。PotMeshMinY..PotMeshMaxY を等分。
+// 「壺の実体がどこまであるか」を知るために要る。これが無いと、こぼれた液体が
+// 壺の胴や底を素通りして落ちていき、ジャンプ時に壺の下から液体が湧いて見える。
+StructuredBuffer<float> PotOuterBuf;
 uint   PotProfileCount;
 float  PotFloorY;
 float  PotRimY;
+float  PotMeshMinY;
+float  PotMeshMaxY;
 float  SafetyTopY;   // ここより上では SafetyCorrection を一切かけない（リムは出口であって壁ではない）
 float  PotMaxRadius;
 float  PotRimR;            // リム半径。Rim Opening 領域の判定に使う
@@ -645,6 +651,17 @@ float PotRadiusAt(float localY)
     return lerp(PotProfileBuf[i0], PotProfileBuf[i1], saturate(f - (float)i0));
 }
 
+// 壺の実体の外周半径。範囲外は端の値で伸ばす（壺より上には実体が無いので、
+// リムの外周をそのまま使えば「壺の真上」を正しく外側と判定できる）。
+float PotOuterAt(float localY)
+{
+    float u = saturate((localY - PotMeshMinY) / max(1e-5, PotMeshMaxY - PotMeshMinY));
+    float f = u * (float)(PotProfileCount - 1);
+    uint i0 = (uint)f;
+    uint i1 = min(i0 + 1, PotProfileCount - 1);
+    return lerp(PotOuterBuf[i0], PotOuterBuf[i1], saturate(f - (float)i0));
+}
+
 // 世界境界（グリッド外周 = 数値的な最終防壁）と、地面、壺内部からの一時貫通の回収。
 // 壺の壁そのものは Boundary Particle が担当する (§10)。ここは例外処理と地面。
 [numthreads(THREADS, 1, 1)]
@@ -699,6 +716,24 @@ void Finalize(uint3 id : SV_DispatchThreadID)
             Velocities[i] = float3(0, 0, 0);
             RetiredFlags[i] = 2u;
             return;
+        }
+        // 壺が動いて実体が Escaped 粒子を飲み込むことがある（ジャンプで壺が上がり、
+        // 落ちてくる液体に胴がぶつかる）。そのままだと壺の中を素通りするので、
+        // 外周のすぐ外へ押し出す。こぼれた液体が壺の外側を伝って落ちる形になる。
+        if (SafetyEnabled != 0)
+        {
+            float3 lpX = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
+            if (lpX.y >= PotMeshMinY && lpX.y <= PotRimY)
+            {
+                float rX = length(lpX.xz);
+                float outR = PotOuterAt(lpX.y);
+                bool inCavity = (lpX.y >= PotFloorY) && (rX <= PotRadiusAt(clamp(lpX.y, PotFloorY, PotRimY)));
+                if (!inCavity && rX <= outR && rX > 1e-4)
+                {
+                    lpX.xz *= (outR + WallTolerance) / rX;
+                    p = mul(PotToWorldSafety, float4(lpX, 1.0)).xyz;
+                }
+            }
         }
         if (p.y < BoundsMin.y) p.y = BoundsMin.y;
         Positions[i] = p;
@@ -768,8 +803,14 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         //    これを脱出扱いにすると、ジャンプの着地で底へ押し付けられた液体が
         //    一斉に失われる（実測: ジャンプでほぼ全量が消えた）。
         //    壁の貫通は SafetyCorrection の担当。
+        // **壺の外形より外に出たときだけ**脱出とする。
+        // 内側半径だけで判定していたとき、壁の厚みの中（内周と外周の間）にいる粒子まで
+        // 脱出扱いになっていた。脱出した粒子は壁とも床とも相互作用しないので、
+        // そのまま壺の胴と底を素通りして落ち、ジャンプ時に「壺の下から液体が出る」
+        // 見え方になっていた（実測: 着地時に 259 粒子が壺の実体の中を通過）。
+        // 外形より外にいる粒子は、そもそも壺の実体と重ならないのでこの問題が起きない。
         bool nearOrAboveLip = lpE.y > PotRimY - EscapeMargin;
-        bool outsideRadius  = rE > rIn + WallTolerance + EscapeMargin;
+        bool outsideRadius  = rE > max(rIn + WallTolerance, PotOuterAt(lpE.y)) + EscapeMargin;
         bool outsidePot = nearOrAboveLip && outsideRadius;
         if (outsidePot)
         {
@@ -789,23 +830,41 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         float3 lp = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
         bool fixedUp = false;
 
-        if (lp.y < PotFloorY - SafetyMargin && lp.y > PotFloorY - PotMaxRadius)
-        {
-            float r = length(lp.xz);
-            if (r < PotMaxRadius) { lp.y = PotFloorY + SafetyMargin; fixedUp = true; }
-        }
-        // リム付近では絶対に補正しない。ここで補正すると、リムを越えようとしている
+        // リムより上では絶対に補正しない。ここで補正すると、リムを越えようとしている
         // 粒子を内側へ引き戻すことになり、SafetyCorrection が「液体を容器に留める堰」
         // として常態化する（追加修正2 が禁止している状態）。
-        else if (lp.y >= PotFloorY && lp.y <= SafetyTopY)
+        //
+        // リムより下は「床」と「壁」を **別々の else if にしない**。
+        // 以前は
+        //     if (床より下 && 半径 < PotMaxRadius) 押し上げる
+        //     else if (床より上) 半径を内側へ寄せる
+        // という形だったため、**床より下かつ PotMaxRadius より外**——つまり
+        // 床と壁が出会う角——がどちらの枝にも入らず、一切補正されなかった。
+        // ジャンプの上向き加速で液体が床へ押し付けられると、まさにこの角から
+        // 外へ搾り出され、壺の底のあたりから放射状に噴き出して見えていた。
+        if (lp.y <= SafetyTopY && lp.y > PotFloorY - PotMaxRadius)
         {
             float r = length(lp.xz);
-            float rIn = PotRadiusAt(lp.y);
-            if (r > rIn + SafetyMargin)
+            // 壺の実体の中（＝物理的に液体が存在し得ない場所）だけを戻す。
+            // 外形より外に出たものは「こぼれた液体」なので触らない。
+            float outR = max(PotOuterAt(lp.y), PotMaxRadius) + WallTolerance;
+            if (r <= outR)
             {
-                float2 n = r > 1e-6 ? lp.xz / r : float2(1, 0);
-                lp.xz = n * (rIn - SafetyMargin);
-                fixedUp = true;
+                // 1. 床より下なら床の上へ
+                if (lp.y < PotFloorY + SafetyMargin)
+                {
+                    lp.y = PotFloorY + SafetyMargin;
+                    fixedUp = true;
+                }
+                // 2. そのうえで内側半径に収める
+                r = length(lp.xz);
+                float rIn = PotRadiusAt(clamp(lp.y, PotFloorY, PotRimY));
+                if (r > rIn + SafetyMargin)
+                {
+                    float2 n = r > 1e-6 ? lp.xz / r : float2(1, 0);
+                    lp.xz = n * (rIn - SafetyMargin);
+                    fixedUp = true;
+                }
             }
         }
 

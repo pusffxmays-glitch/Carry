@@ -67,15 +67,30 @@ public class FluidBoundary : MonoBehaviour
     // その速度をそのまま壁に与えると、CFL が満たせず流体が発散する。
     // 上限は通常の操作を一切削らない値に取ってあるので、普通に動かす分には影響しない。
     [Header("Motion smoothing / teleport (§21)")]
-    // 実際の操作は 歩行 1.0 / 走行 3.0 m/s、旋回 110 deg/s、よろけ移動 1.0 m/s。
-    // 上限はそれを少しだけ上回る値にする。以前は 5 m/s / 240 deg/s と実操作の
-    // 2〜3 倍あり、その分だけ壁が液体を強く弾いて「揺れが大きすぎる」状態になっていた。
-    [Tooltip("流体が見る容器の最大並進速度 (m/s)。走行 3.0 を少し上回る値。")]
-    public float simMaxSpeed = 3.5f;
-    [Tooltip("流体が見る容器の最大角速度 (deg/s)。旋回 110 を少し上回る値。")]
-    public float simMaxAngularSpeed = 150f;
-    [Tooltip("流体が見る容器の最大並進加速度 (m/s^2)。ジャンプの着地のような瞬間停止を和らげる。実際に壺を持つ腕にも同じだけの余裕がある。0 で無効。")]
-    public float simMaxAccel = 70f;
+    // ---- ここは「見えている壺の位置に液体を置く」ための設定である ----
+    //
+    // 上限を実操作に近い値に絞ると、**流体が見る壁が見えている壺より後ろに置かれる**。
+    // 速度・加速度を制限した追従は、等速で動いている間も定常的な位置ずれが残るためで、
+    // 画面上は「ポーションが壺に遅れてついてくる」ように見える（ユーザー報告）。
+    //
+    // 実測（SampleMotion を dt=1/60 で手回し、simMaxSpeed=5 / simMaxAccel=70 のとき）:
+    //   走り 3.0 m/s ......... 41.7mm 遅れる
+    //   ジャンプ v0=6 m/s .... 222mm 遅れる（壺の実速度は 6.56 m/s に達する）
+    // 壺の内径が約 460mm なので、222mm は誰の目にも分かるずれ。
+    //
+    // したがって上限は「運搬でありえる動き」を **一切削らない** 値に取る。
+    // ここで削ってよいのは、リグの計算が飛んだときの一瞬の跳ね（実測 15.5 m/s）だけ。
+    [Tooltip("流体が見る容器の最大並進速度 (m/s)。ジャンプ時の実測 6.6 を十分上回る値にすること。下げると液体が壺に遅れてついてくる。")]
+    public float simMaxSpeed = 12f;
+    [Tooltip("流体が見る容器の最大角速度 (deg/s)。旋回 110 を十分上回る値。")]
+    public float simMaxAngularSpeed = 720f;
+    // **加速度制限は既定で無効**。
+    // もともとはジャンプ着地の瞬間停止で液体が噴き上がるのを抑えるために入れたが、
+    // その噴き上がりの真因は locomotion の重力 (-20) と Physics.gravity (-9.81) の
+    // 食い違いで、DynamicsManager 側を -20 に揃えて解決済み（着地の損失 14.5% → 0.5%）。
+    // 一方でこの制限は等速移動中にも位置ずれを残すので、見た目の害の方が大きい。
+    [Tooltip("流体が見る容器の最大並進加速度 (m/s^2)。0 で無効（既定）。有効にすると等速移動中も位置ずれが残り、液体が壺に遅れてついてくる。")]
+    public float simMaxAccel = 0f;
     [Tooltip("実際の姿勢との位置ずれがこれを超えたらテレポートとみなして追いつく (m)。")]
     public float teleportDistance = 0.6f;
     [Tooltip("実際の姿勢との角度ずれがこれを超えたらテレポートとみなして追いつく (deg)。")]
@@ -439,19 +454,24 @@ public class FluidBoundary : MonoBehaviour
         else
         {
             // 速度制限つきで追従する。ここで削られるのは、運搬ではありえない
-            // 一瞬の跳ねだけ。通常の歩行・走行・旋回は上限に届かない。
+            // 一瞬の跳ねだけ。通常の歩行・走行・旋回・ジャンプは上限に届かないので、
+            // MoveTowards は毎フレーム実 Transform に **ぴったり追いつく**（ずれ 0）。
             //
-            // さらに **加速度も制限する**。ジャンプの着地で容器が瞬間停止すると、
-            // 落下中の液体だけが速度を持ったまま底に叩きつけられ、噴水のように
-            // 噴き上がる（実測: 着地で 97% が空中へ出た）。
-            // 実際には壺を持つ腕が衝撃を吸収するので、瞬間停止はしない。
-            Vector3 target = Vector3.MoveTowards(simPosition, t.position, simMaxSpeed * dt);
-            Vector3 desiredVel = (target - simPosition) / dt;
+            // 加速度制限を入れると、上限に届いていなくても simVelocity が目標速度に
+            // 遅れて追従するため、等速移動中ですら位置ずれが残り続ける。
+            // それが「ポーションが壺に遅れてついてくる」の原因だったので既定で無効。
+            simPosition = Vector3.MoveTowards(simPosition, t.position, simMaxSpeed * dt);
             if (simMaxAccel > 0f)
+            {
+                // 明示的に有効化されたときだけ、加速度でも頭を押さえる。
+                Vector3 desiredVel = (simPosition - lerpFromPosition) / dt;
                 simVelocity = Vector3.MoveTowards(simVelocity, desiredVel, simMaxAccel * dt);
+                simPosition = lerpFromPosition + simVelocity * dt;
+            }
             else
-                simVelocity = desiredVel;
-            simPosition += simVelocity * dt;
+            {
+                simVelocity = (simPosition - lerpFromPosition) / dt;
+            }
             simRotation = Quaternion.RotateTowards(simRotation, t.rotation, simMaxAngularSpeed * dt);
 
             LinearVelocity = (simPosition - lerpFromPosition) / dt;

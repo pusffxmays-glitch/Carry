@@ -36,6 +36,12 @@ public static class CarrySetupFluidGame
         bnd.meshSource = pot;
         bnd.container = pot;
         bnd.rimFadePerKernel = 1.0f;
+        // §21 の平滑化は「リグの計算が飛んだときの一瞬の跳ね」だけを削る値にする。
+        // 実操作に近い値まで絞ると、流体が見る壁が見えている壺より後ろに置かれ、
+        // 「ポーションが壺に遅れてついてくる」ように見える（走り 41.7mm / ジャンプ 222mm）。
+        bnd.simMaxSpeed = 12f;          // ジャンプ時の壺の実速度 6.6m/s を十分上回る
+        bnd.simMaxAngularSpeed = 720f;  // 旋回 110deg/s を十分上回る
+        bnd.simMaxAccel = 0f;           // 加速度制限は等速移動中も位置ずれを残すので無効
 
         var core = pot.GetComponent<FluidCore>();
         if (core == null) core = pot.gameObject.AddComponent<FluidCore>();
@@ -55,6 +61,8 @@ public static class CarrySetupFluidGame
         core.groundLifetime = 10f;
         core.escapeAboveRim = true;        // ふちを越えた液体は戻さず地面へ
         core.escapeMarginSpacings = 2f;     // こぼれた液体を地面に残す
+        // 種の格子が緩む分の初期こぼれを防ぐ。開始前に容器を静止させたまま釣り合わせる。
+        core.initialSettleSeconds = 0.7f;
 
         var srf = pot.GetComponent<FluidSurface>();
         if (srf == null) srf = pot.gameObject.AddComponent<FluidSurface>();
@@ -66,6 +74,7 @@ public static class CarrySetupFluidGame
         srf.domainSize = new Vector3(24f, 4.5f, 24f);
         srf.poolBrickCapacity = 16384;
         srf.maxTriangles = 2400000;   // 地面の液滴は 1 粒ずつ閉曲面になるので枚数が要る
+        srf.clipToContainer = true;   // 壺の壁の中に描かれる液体を切り落とす
 
         // §17: ゲージは Fluid の状態を読むだけ。逆向きに書く経路は無い。
         var gauge = Object.FindObjectOfType<PotionGaugeUI>();

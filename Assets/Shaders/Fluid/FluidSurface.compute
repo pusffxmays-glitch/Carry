@@ -39,6 +39,7 @@
 #pragma kernel SplatDensity
 #pragma kernel DecodeDensity
 #pragma kernel BlurDensity
+#pragma kernel MaskSolid
 #pragma kernel BuildSurface
 #pragma kernel WriteDrawArgs
 #pragma kernel ComputeVertexNormals
@@ -75,6 +76,26 @@ uint  ParticleCount;
 uint3  VoxelDims;
 float3 FieldOrigin;
 float  VoxelSize;
+
+// ---- 壺の実体で密度場を切り落とす ----
+//
+// 等値面は最外周の粒子から Splat 半径ぶん外側にふくらむ（実測 57.4mm）。
+// 壺の壁の厚みはそれより薄い場所があるので、そのままだと液体が壺の側面を
+// 突き抜けて描画され、走ると「ツボの外側にポーションがはみ出す」、
+// ジャンプすると「壺の下のほうにはみ出す」という見え方になる。
+// 壁の中に液体は存在し得ないので、密度場をここで 0 にする。
+//
+// 粒子側は問題ない（実測で内壁から最大 11.4mm しか出ていない）。直すのは描画側。
+int      PotClipEnabled;
+float4x4 WorldToPot;
+StructuredBuffer<float> PotInnerBuf;   // FloorY..RimY を等分した内側半径
+StructuredBuffer<float> PotOuterBuf;   // MeshMinY..MeshMaxY を等分した外周半径
+uint  PotProfileCount;
+float PotFloorY, PotRimY, PotMeshMinY, PotMeshMaxY;
+float3 PotCentreWS;        // 早期棄却用（壺を包む球）
+float PotClipRadiusWS;
+
+RWStructuredBuffer<float> PoolMask;    // MaskSolid が書き換える先（PoolSrc と同じ実体）
 
 float SplatRadius;          // 密度カーネル半径 (m)
 float DensityScale;         // 固定小数のスケール
@@ -303,6 +324,57 @@ void BlurDensity(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
     sum += ReadField(v - a * 2) * w2;
 
     PoolOut[slot * BRICK_VOXELS + LocalIndex(gtid)] = sum;
+}
+
+// StructuredBuffer を関数の引数に取るのは環境依存なので、2 本に分けて書く。
+float PotInnerAt(float t)
+{
+    float f = saturate(t) * (float)(PotProfileCount - 1);
+    uint i0 = (uint)f;
+    uint i1 = min(i0 + 1, PotProfileCount - 1);
+    return lerp(PotInnerBuf[i0], PotInnerBuf[i1], saturate(f - (float)i0));
+}
+
+float PotOuterAt(float t)
+{
+    float f = saturate(t) * (float)(PotProfileCount - 1);
+    uint i0 = (uint)f;
+    uint i1 = min(i0 + 1, PotProfileCount - 1);
+    return lerp(PotOuterBuf[i0], PotOuterBuf[i1], saturate(f - (float)i0));
+}
+
+// 壺の実体（壁と底）にあたる voxel の密度を 0 にする。
+// Blur の **後** に走らせること。前に置くと Blur が壁の中へ density を広げ直す。
+[numthreads(BRICK, BRICK, BRICK)]
+void MaskSolid(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
+{
+    if (PotClipEnabled == 0) return;
+
+    uint slot = gid.x;
+    uint addr = slot * BRICK_VOXELS + LocalIndex(gtid);
+    if (PoolMask[addr] <= 0.0) return;                    // もともと空
+
+    int3 v = (int3)(BrickCoord(ActiveBricks[slot]) * BRICK + gtid);
+    float3 wp = FieldOrigin + ((float3)v + 0.5) * VoxelSize;
+
+    // 壺から遠い voxel（地面の水たまりなど）はここで抜ける。
+    // 大半の voxel はこの 1 回の距離判定だけで済む。
+    if (distance(wp, PotCentreWS) > PotClipRadiusWS) return;
+
+    float3 lp = mul(WorldToPot, float4(wp, 1.0)).xyz;
+    if (lp.y < PotMeshMinY || lp.y > PotRimY) return;     // 壺の上下の外側
+
+    float r = length(lp.xz);
+    float outerR = PotOuterAt((lp.y - PotMeshMinY) / max(1e-5, PotMeshMaxY - PotMeshMinY));
+    if (r > outerR) return;                               // 壺の外。液だれ等はここで生き残る
+
+    if (lp.y >= PotFloorY)
+    {
+        float innerR = PotInnerAt((lp.y - PotFloorY) / max(1e-5, PotRimY - PotFloorY));
+        if (r <= innerR) return;                          // 壺の中身。液体があってよい
+    }
+
+    PoolMask[addr] = 0.0;                                 // 壁 or 底の内部
 }
 
 // --------------------------------------------------------------------------------------------

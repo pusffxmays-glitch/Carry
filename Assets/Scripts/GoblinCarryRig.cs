@@ -51,11 +51,22 @@ public class GoblinCarryRig : MonoBehaviour
     // and blended on top of ApplyBasePose()'s Hips/leg bones, the same way SolveArm() blends the
     // arms on top -- Spine/neck/Head/arms are left alone since the source animation holds them at
     // the neutral pose throughout.
-    [Header("Stagger (triggered when the pot tilts past a threshold)")]
-    [Tooltip("|armBalance| beyond this starts staggering.")]
-    public float staggerThreshold = 0.6f;
-    [Tooltip("How much further past the threshold until the stagger reaches full intensity.")]
-    public float staggerRampRange = 0.3f;
+    // よろけの判定は **世界基準で壺がどれだけ傾いているか（度）** で行う。
+    //
+    // 以前は |armBalance|、つまり「ゴブリンに対して壺がどれだけ傾いているか」で判定して
+    // いた。これは平地でしか正しくない。斜面では体ごと傾くので、
+    //   * armBalance = 0（腕は左右対称）でも、壺は世界基準で斜面ぶん傾いている
+    //     → こぼれる姿勢なのに、よろけない
+    //   * 斜面で Q/E を使って壺を水平に保つと armBalance は大きくなる
+    //     → 正しくバランスを取っているのに、よろける
+    // という逆の挙動になっていた。
+    //
+    // 平地での効き方は据え置き（armBalance 0.6 のとき実測 5.5 度、0.9 で 16 度）。
+    [Header("Stagger (壺が世界基準でどれだけ傾いたかで判定)")]
+    [Tooltip("世界基準での壺の傾きがこの角度(度)を超えるとよろけ始める。")]
+    public float staggerThresholdDeg = 5.5f;
+    [Tooltip("しきい値からこの角度(度)ぶん超えると、よろけが最大になる。")]
+    public float staggerRampDeg = 10.5f;
     [Tooltip("Seconds per full stagger cycle (source Blender animation is 60 frames @ 24fps = 2.5s).")]
     public float staggerCycleDuration = 2.5f;
     [Tooltip("How fast the stagger blends in/out as armBalance crosses the threshold.")]
@@ -174,6 +185,12 @@ public class GoblinCarryRig : MonoBehaviour
         new BonePose("LeftFoot",      new Vector3(-0.262031f, -0.114191f, -0.042542f), new Vector3(-0.108725f, -0.541682f, 0.833523f), new Vector3(0.993553f, -0.032123f, 0.108723f)),
         new BonePose("LeftToeBase",   new Vector3(-0.286047f, -0.233840f, 0.141571f), new Vector3(-0.129344f, 0.000000f, 0.991600f), new Vector3(0.991600f, 0.000000f, 0.129343f)),
     };
+
+    // 壺の姿勢を作るときの「体の向き」。GoblinTerrainTilt が地形傾斜用の子を作ったら
+    // それが入る。未設定なら root（＝yaw だけの姿勢）に戻るので、傾き機能を使わない
+    // 構成でも従来どおり動く。
+    [HideInInspector] public Transform postureRoot;
+    Transform Posture { get { return postureRoot != null ? postureRoot : root; } }
 
     Transform root;
     Transform[] baseBones; // parallel to BasePose; null entries mean "not found, skip"
@@ -326,13 +343,24 @@ public class GoblinCarryRig : MonoBehaviour
             // comment) -- this points from visual-left to visual-right, i.e. toward +X when the
             // hands are level, so it tilts naturally as either hand rises or falls.
             Vector3 sideAxis = (leftHand.position - rightHand.position);
-            if (sideAxis.sqrMagnitude < 1e-8f) sideAxis = root.right;
+            if (sideAxis.sqrMagnitude < 1e-8f) sideAxis = Posture.right;
             sideAxis.Normalize();
-            Vector3 upAxis = Vector3.Cross(root.forward, sideAxis).normalized;
-            if (upAxis.sqrMagnitude < 1e-8f) upAxis = root.up;
+
+            // 壺の姿勢は **体の姿勢 (Posture) を土台にして、腕の高さ差ぶんだけ回す**。
+            //
+            // 以前は手の位置だけから上方向を作っていた (Cross(root.forward, sideAxis))。
+            // これだと腕の左右差は反映されるが、**体そのものの傾きが入らない**。
+            // 地形で体が横に傾いても壺は水平のままで、斜面に立った意味が無かった。
+            // 手の傾きは「体に対する相対角」として取り出し、それを Posture に足す。
+            Vector3 fwd = Posture.forward;
+            Vector3 sideOnPlane = Vector3.ProjectOnPlane(sideAxis, fwd);
+            Vector3 refRight = Vector3.ProjectOnPlane(Posture.right, fwd);
+            float armRoll = 0f;
+            if (sideOnPlane.sqrMagnitude > 1e-8f && refRight.sqrMagnitude > 1e-8f)
+                armRoll = Vector3.SignedAngle(refRight.normalized, sideOnPlane.normalized, fwd);
 
             pot.position = handMid;
-            pot.rotation = Quaternion.LookRotation(root.forward, upAxis);
+            pot.rotation = Quaternion.AngleAxis(armRoll, fwd) * Posture.rotation;
             pot.localScale = potScale;
         }
     }
@@ -391,14 +419,14 @@ public class GoblinCarryRig : MonoBehaviour
             var bone = baseBones[i];
             if (bone == null) continue;
             BonePose bp = BasePose[i];
-            bone.position = root.position + root.rotation * (bp.pos + GroundOffset);
+            bone.position = Posture.position + Posture.rotation * (bp.pos + GroundOffset);
 
-            Vector3 aimWorld = root.TransformDirection(bp.yDir).normalized;
+            Vector3 aimWorld = Posture.TransformDirection(bp.yDir).normalized;
             AimLocalY(bone, aimWorld);
 
             if (bp.xDir != Vector3.zero)
             {
-                Vector3 rollWorld = root.TransformDirection(bp.xDir).normalized;
+                Vector3 rollWorld = Posture.TransformDirection(bp.xDir).normalized;
                 RollAroundY(bone, rollWorld);
             }
         }
@@ -444,7 +472,7 @@ public class GoblinCarryRig : MonoBehaviour
 
     // ADDED 2026-08-10: blends the Hips + 4 leg bones (already placed by ApplyBasePose()/
     // ApplyWalkCycle() above) toward the corresponding frame of the baked Blender stagger cycle,
-    // by an intensity that ramps in once |armBalance| passes staggerThreshold. Runs AFTER
+    // by an intensity that ramps in once the pot's WORLD tilt passes staggerThresholdDeg. Runs AFTER
     // ApplyWalkCycle() so a stagger still wins if the character is staggering while walking.
     //
     // Direction: the very first playtest reported the lean backwards, so `leanRight` below is the
@@ -452,7 +480,19 @@ public class GoblinCarryRig : MonoBehaviour
     // reasoning) -- treat this sign as empirically-fixed now, not re-derived from first principles.
     void ApplyStagger()
     {
-        float tiltAbs = Mathf.Abs(armBalance);
+        // **世界基準**での壺の傾き。ゴブリンに対する相対角ではない。
+        // pot.rotation はこの LateUpdate の末尾で更新されるので、ここで読むのは
+        // 1 フレーム前の姿勢。よろけの判定にとっては問題にならない遅れ。
+        float tiltDeg = 0f;
+        float leanSide = 0f;          // 正 = 壺の上方向がゴブリンの右へ倒れている
+        if (pot != null)
+        {
+            tiltDeg = Vector3.Angle(Vector3.up, pot.up);
+            // 傾いている「向き」は、壺の上方向の水平成分で決まる。
+            // root は yaw だけなので root.right は常に水平で、左右の基準に使える。
+            Vector3 lean = Vector3.ProjectOnPlane(pot.up, Vector3.up);
+            leanSide = Vector3.Dot(lean, root.right);
+        }
 
         // FIXED 2026-08-12 (bug report: holding Q then E, or vice versa, produces a momentary
         // "freeze/snap" -- 一瞬硬直する -- right at the reversal). Root cause: `leanRight` used to
@@ -465,12 +505,15 @@ public class GoblinCarryRig : MonoBehaviour
         // Fix: latch the lean side, only adopting a new side once the previous stagger pose has
         // actually blended out to ~0, and force the target intensity to 0 while a reversal is
         // pending so it's guaranteed to reach that latch point instead of racing the crossing.
-        bool requestedSideRight = armBalance < 0f;
+        // 平地で armBalance < 0 のとき leanSide < 0 になることを実測で確認済み。
+        // 旧判定 (armBalance < 0 → 右) と同じ向きになるよう符号を合わせてあるので、
+        // 平地での見え方は今までと変わらない。
+        bool requestedSideRight = leanSide < 0f;
         if (staggerIntensity <= 0.001f)
             staggerLeanRight = requestedSideRight;
         bool reversalPending = requestedSideRight != staggerLeanRight;
 
-        float rawTargetIntensity = Mathf.Clamp01((tiltAbs - staggerThreshold) / Mathf.Max(0.001f, staggerRampRange));
+        float rawTargetIntensity = Mathf.Clamp01((tiltDeg - staggerThresholdDeg) / Mathf.Max(0.001f, staggerRampDeg));
         float targetIntensity = reversalPending ? 0f : rawTargetIntensity;
         staggerIntensity = Mathf.MoveTowards(staggerIntensity, targetIntensity, staggerBlendSpeed * Time.deltaTime);
 
@@ -504,8 +547,8 @@ public class GoblinCarryRig : MonoBehaviour
         if (controller != null)
         {
             float sideSign = (leanRight ? 1f : -1f) * (invertStaggerMoveSide ? -1f : 1f);
-            Vector3 sideDir = root.right * sideSign;
-            Vector3 moveDir = (root.forward + sideDir).normalized;
+            Vector3 sideDir = Posture.right * sideSign;
+            Vector3 moveDir = (Posture.forward + sideDir).normalized;
             controller.Move(moveDir * staggerMoveSpeed * staggerIntensity * Time.deltaTime);
         }
     }
@@ -547,8 +590,8 @@ public class GoblinCarryRig : MonoBehaviour
         if (bone == null) return;
         Vector3 baseY = (bone.rotation * Vector3.up).normalized;
         Vector3 baseX = (bone.rotation * Vector3.right).normalized;
-        Vector3 targetY = root.TransformDirection(targetYLocal).normalized;
-        Vector3 targetX = root.TransformDirection(targetXLocal).normalized;
+        Vector3 targetY = Posture.TransformDirection(targetYLocal).normalized;
+        Vector3 targetX = Posture.TransformDirection(targetXLocal).normalized;
 
         Vector3 blendedY = Vector3.Slerp(baseY, targetY, t).normalized;
         Vector3 blendedX = Vector3.Slerp(baseX, targetX, t).normalized;
@@ -596,12 +639,12 @@ public class GoblinCarryRig : MonoBehaviour
         // + GroundOffset.y: PosOf() returns the raw (un-offset) captured value; ApplyBasePose adds
         // GroundOffset before placing any bone, so the baseline compared against here must too.
         float baseFootY = Mathf.Min(PosOf("LeftFoot").y, PosOf("RightFoot").y) + GroundOffset.y;
-        float curLeftY = root.InverseTransformPoint(leftFootBone.position).y;
-        float curRightY = root.InverseTransformPoint(rightFootBone.position).y;
+        float curLeftY = Posture.InverseTransformPoint(leftFootBone.position).y;
+        float curRightY = Posture.InverseTransformPoint(rightFootBone.position).y;
         float deficit = baseFootY - Mathf.Min(curLeftY, curRightY);
         if (deficit <= 0f) return;
 
-        Vector3 lift = root.up * deficit;
+        Vector3 lift = Posture.up * deficit;
         var originalPositions = new Vector3[baseBones.Length];
         for (int i = 0; i < baseBones.Length; i++)
             if (baseBones[i] != null) originalPositions[i] = baseBones[i].position;
@@ -626,9 +669,9 @@ public class GoblinCarryRig : MonoBehaviour
 
         return new ArmNeutral
         {
-            wristOffsetLocal = root.InverseTransformDirection(wristOffsetWorld),
-            poleDirLocal = root.InverseTransformDirection(poleWorld),
-            fingertipDirLocal = root.InverseTransformDirection(fingertipWorld),
+            wristOffsetLocal = Posture.InverseTransformDirection(wristOffsetWorld),
+            poleDirLocal = Posture.InverseTransformDirection(poleWorld),
+            fingertipDirLocal = Posture.InverseTransformDirection(fingertipWorld),
         };
     }
 
@@ -646,7 +689,7 @@ public class GoblinCarryRig : MonoBehaviour
         // 2-bone IK solve naturally produces to reach that point, not separately parameterized --
         // that is what keeps the motion anatomically consistent instead of an arbitrary blend.
         Vector3 targetOffsetLocal = neutral.wristOffsetLocal + Vector3.up * (heightRange * t + extraHeightLocal);
-        Vector3 wristTarget = shoulderPos + root.TransformDirection(targetOffsetLocal);
+        Vector3 wristTarget = shoulderPos + Posture.TransformDirection(targetOffsetLocal);
 
         Vector3 toTarget = wristTarget - shoulderPos;
         float maxReach = upperLen + foreLen - 0.001f;
@@ -655,7 +698,7 @@ public class GoblinCarryRig : MonoBehaviour
         Vector3 axisWorld = toTarget.normalized;
         wristTarget = shoulderPos + axisWorld * d; // re-clamp so the rest of the solve stays consistent
 
-        Vector3 poleWorld = root.TransformDirection(neutral.poleDirLocal).normalized;
+        Vector3 poleWorld = Posture.TransformDirection(neutral.poleDirLocal).normalized;
         Vector3 bendWorld = (poleWorld - Vector3.Dot(poleWorld, axisWorld) * axisWorld);
         if (bendWorld.sqrMagnitude < 1e-6f) bendWorld = Vector3.Cross(axisWorld, Vector3.up);
         bendWorld.Normalize();
@@ -673,7 +716,7 @@ public class GoblinCarryRig : MonoBehaviour
         upperArm.rotation = Quaternion.LookRotation(bendWorld, elbowDir);
         foreArm.rotation = Quaternion.LookRotation(bendWorld, foreDir);
 
-        Vector3 fingertipWorld = root.TransformDirection(neutral.fingertipDirLocal).normalized;
+        Vector3 fingertipWorld = Posture.TransformDirection(neutral.fingertipDirLocal).normalized;
         AimLocalY(hand, fingertipWorld);
         RollPalmUp(hand, palmSign);
     }
