@@ -67,10 +67,44 @@ public class PotionGaugeUI : MonoBehaviour
     public Color gaugeGainColor = new Color(0.25f, 0.95f, 0.40f, 0.95f);   // 増加フラッシュ
     public Color gaugeWarnColor = new Color(0.95f, 0.80f, 0.10f, 0.95f);   // 低残量警告
 
+    // 2026-08-15 (要望「ゲージの上に、壺が今どっちに傾いているのかわかる表示が欲しい。
+    // 上下左右キーでどれくらい動かしたのかわからなくなる」): バーの上に正方形の
+    // バランスパッドを置き、armBalance / pitchBalance をドット位置で示す。
+    // ドット = 壺が傾いている方向 (右キー -> 右、上キー = 前傾 -> 上)。中心 = ニュートラル。
+    // 傾きが深いほどドットが白 -> 黄 -> 赤になり、よろけ危険域が読める。
+    [Header("Balance pad (壺の傾きインジケーター)")]
+    [Tooltip("バランスパッドの一辺 (1920x1080 基準の仮想ピクセル)。")]
+    public float balancePadSize = 96f;
+    public Color balanceDotSafeColor = Color.white;
+    public Color balanceDotDangerColor = new Color(1f, 0.25f, 0.2f, 1f);
+
+    // 2026-08-15 (要望「操作量に加えて、絶対世界での液体の傾き (水平器のイメージ) も
+    // 表したい」): 同じパッドに 2 層で重ねる。
+    //   * ドット (白→赤)      = 操作量 (armBalance / pitchBalance)
+    //   * 輪 (気泡リング)     = 壺のワールド傾き。水平器の気泡。よろけ判定 (ApplyStagger)
+    //                          と同じ「世界基準でどれだけ傾いているか」を同じ軸で描く。
+    //   * 薄い赤の円          = よろけ開始角 (staggerThresholdDeg)。輪がこの円を出たら危険。
+    // 平地では輪はドットに重なり、坂では輪だけがズレる。「坂ではドットを逆に倒して
+    // 輪を中心に戻す」という斜面バランスの本質が UI からそのまま読める。
+    [Header("Spirit level (水平器: 壺のワールド傾き)")]
+    [Tooltip("この角度 (度) でパッドの端に達する。矢印キーで届く最大傾き (約 18 度) に合わせてある。")]
+    public float worldTiltFullDeg = 18f;
+    [Tooltip("よろけ始める角 (度)。パッドに危険円として描く。GoblinCarryRig.staggerThresholdDeg と合わせること。")]
+    public float worldTiltWarnDeg = 5.5f;
+    [Tooltip("気泡リングの色 (安全域)。危険円を超えると赤へ寄る。")]
+    public Color bubbleColor = new Color(0.35f, 0.9f, 1f, 0.95f);
+
     Image fillImage, trailImage;
     RectTransform fillRect, trailRect, frameRect;
     Canvas gaugeCanvas;
     Text percentText;
+    RectTransform balanceDotRect;
+    Image balanceDotImage;
+    RectTransform bubbleRect;
+    Image bubbleImage;
+    Transform potTransform, rigRoot;
+    GoblinCarryRig carryRig;
+    float balanceDotRange;
     float trailValue = 1f;
     float prevValue = 1f;
     float gainFlashTimer;
@@ -90,6 +124,12 @@ public class PotionGaugeUI : MonoBehaviour
         {
             var loco = FindFirstObjectByType<GoblinLocomotion>();
             if (loco != null) followTarget = loco.transform;
+        }
+        carryRig = FindFirstObjectByType<GoblinCarryRig>();
+        if (carryRig != null)
+        {
+            rigRoot = carryRig.transform;
+            potTransform = rigRoot.Find("Carry_Pot");
         }
         BuildUI();
         float v = source != null ? source.FillFraction01 : 1f;
@@ -159,6 +199,45 @@ public class PotionGaugeUI : MonoBehaviour
             img.color = new Color(1f, 1f, 1f, 0.35f);
         }
 
+        // バランスパッド (バーの上)。ドット位置 = (armBalance, -pitchBalance)。
+        if (carryRig != null)
+        {
+            var pad = MakeRect("BalancePad", frame.transform, new Vector2(balancePadSize, balancePadSize));
+            var padRect = (RectTransform)pad.transform;
+            padRect.anchorMin = padRect.anchorMax = new Vector2(0.5f, 1f);
+            padRect.pivot = new Vector2(0.5f, 0f);
+            padRect.anchoredPosition = new Vector2(0f, 10f);
+            pad.AddComponent<Image>().color = gaugeFrameColor;
+
+            // 十字線 (中心 = ニュートラルの目印)
+            var hLine = MakeRect("PadAxisH", pad.transform, new Vector2(balancePadSize - 10f, 2f));
+            hLine.AddComponent<Image>().color = new Color(1f, 1f, 1f, 0.25f);
+            var vLine = MakeRect("PadAxisV", pad.transform, new Vector2(2f, balancePadSize - 10f));
+            vLine.AddComponent<Image>().color = new Color(1f, 1f, 1f, 0.25f);
+
+            float dotSize = 14f;
+            balanceDotRange = (balancePadSize - dotSize) * 0.5f - 4f;
+
+            // よろけ開始角の危険円 (静的)。輪 (気泡) がここを出たら危険、の目標線。
+            float warnR = balanceDotRange * Mathf.Clamp01(worldTiltWarnDeg / Mathf.Max(1f, worldTiltFullDeg));
+            var warn = MakeRect("PadWarnCircle", pad.transform, Vector2.one * (warnR * 2f + 10f));
+            var warnImg = warn.AddComponent<Image>();
+            warnImg.sprite = MakeRingSprite(64, 2.5f);
+            warnImg.color = new Color(1f, 0.4f, 0.35f, 0.45f);
+
+            // 水平器の気泡リング (壺のワールド傾き)
+            var bub = MakeRect("PadBubble", pad.transform, new Vector2(24f, 24f));
+            bubbleRect = (RectTransform)bub.transform;
+            bubbleImage = bub.AddComponent<Image>();
+            bubbleImage.sprite = MakeRingSprite(32, 4f);
+            bubbleImage.color = bubbleColor;
+
+            var dot = MakeRect("PadDot", pad.transform, new Vector2(dotSize, dotSize));
+            balanceDotRect = (RectTransform)dot.transform;
+            balanceDotImage = dot.AddComponent<Image>();
+            balanceDotImage.color = balanceDotSafeColor;
+        }
+
         // パーセント数字 (バーの下)
         var txt = MakeRect("GaugePercent", frame.transform, new Vector2(120f, 34f));
         var txtRect = (RectTransform)txt.transform;
@@ -224,6 +303,53 @@ public class PotionGaugeUI : MonoBehaviour
         if (gainFlashTimer > 0f) gainFlashTimer -= Time.deltaTime;
 
         Apply(v);
+        UpdateBalancePad();
+    }
+
+    // ドット = 壺が傾いている方向。右キー (armBalance>0 = 右へ傾く) -> 右、
+    // 上キー (pitchBalance<0 = 前傾) -> 上。振れ幅はバランス値そのもの (-1..1)。
+    void UpdateBalancePad()
+    {
+        if (balanceDotRect == null || carryRig == null) return;
+        float x = Mathf.Clamp(carryRig.armBalance, -1f, 1f);
+        float y = Mathf.Clamp(-carryRig.pitchBalance, -1f, 1f);
+        balanceDotRect.anchoredPosition = new Vector2(x, y) * balanceDotRange;
+        float mag = Mathf.Max(Mathf.Abs(x), Mathf.Abs(y));
+        balanceDotImage.color = Color.Lerp(balanceDotSafeColor, balanceDotDangerColor, mag);
+
+        // 水平器: 壺のワールド傾きを、よろけ判定 (ApplyStagger) と同じ分解で描く。
+        // 右に傾く -> 輪が右、前傾 -> 輪が上 (ドットと同じ向きの約束)。
+        if (bubbleRect != null && potTransform != null && rigRoot != null)
+        {
+            Vector3 up = potTransform.up;
+            float latDeg = Mathf.Asin(Mathf.Clamp(Vector3.Dot(up, rigRoot.right), -1f, 1f)) * Mathf.Rad2Deg;
+            float foreDeg = Mathf.Asin(Mathf.Clamp(Vector3.Dot(up, rigRoot.forward), -1f, 1f)) * Mathf.Rad2Deg;
+            Vector2 t = new Vector2(latDeg, foreDeg) / Mathf.Max(1f, worldTiltFullDeg);
+            if (t.sqrMagnitude > 1f) t.Normalize();   // 坂などで振り切れたら端に張り付く
+            bubbleRect.anchoredPosition = t * balanceDotRange;
+            float tiltDeg = new Vector2(latDeg, foreDeg).magnitude;
+            bubbleImage.color = Color.Lerp(bubbleColor, balanceDotDangerColor,
+                Mathf.InverseLerp(worldTiltWarnDeg, worldTiltFullDeg, tiltDeg));
+        }
+    }
+
+    // 中抜きの円スプライトをコードで生成する (Resources にスプライト無しで済ませるため)。
+    // 1px のアンチエイリアスつき。
+    static Sprite MakeRingSprite(int size, float thickness)
+    {
+        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        float rOuter = size * 0.5f - 1f;
+        float rInner = rOuter - thickness;
+        for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                float dx = x - (size - 1) * 0.5f, dy = y - (size - 1) * 0.5f;
+                float d = Mathf.Sqrt(dx * dx + dy * dy);
+                float a = Mathf.Clamp01(Mathf.Min(rOuter - d + 1f, d - rInner + 1f));
+                tex.SetPixel(x, y, new Color(1f, 1f, 1f, a));
+            }
+        tex.Apply();
+        return Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
     }
 
     // カメラ (CarryCameraRig) が LateUpdate で動いた後に置く。

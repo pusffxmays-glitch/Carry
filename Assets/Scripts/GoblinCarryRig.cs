@@ -35,22 +35,33 @@ public class GoblinCarryRig : MonoBehaviour
     [Header("Pot balance input: 矢印キー（左右=左右バランス / 上下=前後バランス）")]
     // Raised 2026-08-12 per request ("Q/Eキー入力時の変化量をもう少し大きく"), twice: 1.2->2.2
     // was still judged too slow, raised further to 4.0 (full -1..1 range in ~0.5s).
-    public float armInputSpeed = 4.0f;
+    //
+    // 2026-08-15: 最大傾きを増やした際 (heightRange/pitchRangeDeg の注記)、キー保持中の
+    // 傾き速度 [deg/s] = 入力速度 x 最大傾き なので、範囲を広げると速度まで増えてしまう。
+    // ユーザー指定は「最大傾きだけ変えて、一回のキーでの変化量は据え置き」なので、
+    // 入力速度を範囲の増加分だけ下げて相殺した。旧実測 43.6 deg/s (4.0 x 10.9 度) に対し
+    // 2.4 x 17.8 度 = 42.7 deg/s。前後は範囲が別なので pitchInputSpeed に分離した。
+    public float armInputSpeed = 2.4f;
+    [Tooltip("上下キー (前後バランス) の入力速度。旧実測 64.4 deg/s (4.0 x 16.1 度) に合わせて 3.6 x 18 度 = 64.8 deg/s。")]
+    public float pitchInputSpeed = 3.6f;
     [Tooltip("左右のバランス。右キーで右へ、左キーで左へ傾く。")]
     [Range(-1f, 1f)] public float armBalance = 0f;
     [Tooltip("前後のバランス。上キーで前傾、下キーで後傾。")]
     [Range(-1f, 1f)] public float pitchBalance = 0f;
-    [Tooltip("pitchBalance = 1 のときの前後の傾き角 (度)。左右バランスの効き (実測 16 度) と同程度にしてある。")]
-    public float pitchRangeDeg = 16f;
+    // 2026-08-15 ユーザー要望「上下左右キーの許容移動量をもう少し増やしたら」で増量。
+    // 実測 (平地・キー最大): 旧 前後16.1度/左右10.9度 → 新 両軸とも約18度で対称に揃えた。
+    [Tooltip("pitchBalance = 1 のときの前後の傾き角 (度)。左右バランスの効き (heightRange 0.20 で実測 17.8 度) と同程度にしてある。")]
+    public float pitchRangeDeg = 18f;
     [Tooltip("前後バランスに合わせて両手を前後へ動かす量 (m)。壺だけが傾いて手が置き去りに見えるのを防ぐ。")]
-    public float pitchHandReach = 0.06f;
+    public float pitchHandReach = 0.07f;
     // REDESIGNED 2026-08-10 per explicit request: the palm's front-back/left-right position must
     // stay fixed while only its HEIGHT changes, achieved through natural shoulder
     // abduction/adduction ("armpit opening/closing") plus elbow extension/flexion -- i.e. real
     // 2-bone IK toward a target that only moves vertically, not the previous "tilt the whole reach
     // direction" hack (which dragged the wrist forward/back and side to side too).
     [Tooltip("How far up/down (meters) the palm target moves at armValue=1/0, holding its X/Z (left-right/front-back) fixed.")]
-    public float heightRange = 0.15f;
+    // 0.15 (壺の傾き実測 10.9 度) -> 0.20 (17.8 度)。2026-08-15 の増量 (pitchRangeDeg の注記を参照)。
+    public float heightRange = 0.20f;
 
     [Header("Palm-normal (NEEDS VISUAL CHECK IN PLAY MODE -- see WORKLOG.md)")]
     public float leftPalmSign = -1f;
@@ -333,8 +344,8 @@ public class GoblinCarryRig : MonoBehaviour
 
         // 上下キー = 前後バランス。上で前傾（壺の口を前へ倒す）、下で後傾。
         // 2026-08-14 に上下を入れ替え（ユーザー指定）。
-        if (kb.upArrowKey.isPressed) pitchBalance -= armInputSpeed * dt;
-        if (kb.downArrowKey.isPressed) pitchBalance += armInputSpeed * dt;
+        if (kb.upArrowKey.isPressed) pitchBalance -= pitchInputSpeed * dt;
+        if (kb.downArrowKey.isPressed) pitchBalance += pitchInputSpeed * dt;
         pitchBalance = Mathf.Clamp(pitchBalance, -1f, 1f);
     }
 
@@ -594,7 +605,19 @@ public class GoblinCarryRig : MonoBehaviour
             float sideSign = (leanRight ? 1f : -1f) * (invertStaggerMoveSide ? -1f : 1f);
             Vector3 sideDir = Posture.right * sideSign;
             Vector3 moveDir = (Posture.forward + sideDir).normalized;
-            controller.Move(moveDir * staggerMoveSpeed * staggerIntensity * Time.deltaTime);
+            // FIXED 2026-08-15 (バグ報告「壺に傾きがあるときジャンプできない」):
+            // CharacterController.isGrounded は **最後に呼ばれた Move** の結果で決まる。
+            // この横移動だけの Move が毎フレーム最後 (LateUpdate) に走ると接地が外れ、
+            // 傾き > staggerThresholdDeg の間ずっと GoblinLocomotion の canJump が
+            // false になっていた (実測: tilt=0.6 で 60 フレーム後 grounded=False)。
+            // 接地中は下向き成分を混ぜて接地を保つ (GoblinLocomotion の
+            // verticalVelocity=-1 と同じ手法)。空中 (ジャンプ中) では混ぜない --
+            // 混ぜるとよろけ中のジャンプだけ弾道が重くなる。
+            // ここで読む isGrounded は今フレームの GoblinLocomotion.Update の Move の
+            // 結果なので、着地状態を正しく表している。
+            Vector3 staggerMove = moveDir * (staggerMoveSpeed * staggerIntensity);
+            if (controller.isGrounded) staggerMove += Vector3.down * 1f;
+            controller.Move(staggerMove * Time.deltaTime);
         }
     }
 

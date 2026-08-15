@@ -29,6 +29,15 @@ public class GoblinLocomotion : MonoBehaviour
 
     [Header("Jump")]
     public float jumpSpeed = 6f;
+    // ADDED 2026-08-15 (要望「W＋ジャンプはもっと飛距離出るように」): 歩きジャンプは
+    // walkSpeed 1.5 をそのまま引き継ぐと滞空 0.6 秒で約 0.9m しか飛ばない。
+    // 離陸時だけ水平速度を増幅して 2.4 m/s ≒ 1.44m にする。
+    // **1.6 倍より大きくしすぎないこと**: Jump_Platforms (ギミック 5) は
+    // 「走りジャンプなら届き、歩きジャンプでは届かない隙間 1.6m」の設計なので、
+    // 歩きジャンプの飛距離 (walkSpeed x これ x 0.6s) は 1.6m 未満に収める。
+    // 走りジャンプ (runSpeed 5 ≒ 3m) には掛けない。
+    [Tooltip("歩き中ジャンプの水平速度倍率。飛距離 ≒ walkSpeed x これ x 0.6s。1.78 以上でジャンプ台の隙間 1.6m を歩きで越えられてしまう。")]
+    public float walkJumpBoost = 1.6f;
 
     CharacterController controller;
     Animator animator;
@@ -109,7 +118,7 @@ public class GoblinLocomotion : MonoBehaviour
         if (jumpTriggered)
         {
             animator.SetTrigger("Jump");
-            jumpHorizontalSpeed = IsRunning ? runSpeed : (IsMoving ? walkSpeed : 0f);
+            jumpHorizontalSpeed = IsRunning ? runSpeed : (IsMoving ? walkSpeed * walkJumpBoost : 0f);
             inJumpState = true; // about to transition this frame; treat as locked immediately
         }
 

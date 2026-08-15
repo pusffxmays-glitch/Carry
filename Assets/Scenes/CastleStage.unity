@@ -2854,12 +2854,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8ea22e981cc24b54a0728dca4d747a23, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::GoblinCarryRig
-  armInputSpeed: 4
+  armInputSpeed: 2.4
+  pitchInputSpeed: 3.6
   armBalance: 0
   pitchBalance: 0
-  pitchRangeDeg: 16
-  pitchHandReach: 0.06
-  heightRange: 0.15
+  pitchRangeDeg: 18
+  pitchHandReach: 0.07
+  heightRange: 0.2
   leftPalmSign: -1
   rightPalmSign: 1
   staggerThresholdDeg: 5.5
