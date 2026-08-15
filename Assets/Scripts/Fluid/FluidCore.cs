@@ -92,6 +92,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // PotionVolume が 1.000 へ復帰していた（＝こぼれない）。
     [Tooltip("容器の上に確保する余白 (m)。跳ね上がった液体が天井に当たって落ち戻らない高さが必要。")]
     public float topMargin = 1.2f;
+    // ADDED 2026-08-15 (バグ報告「上り勾配(ギミック2)の頂上付近で液体が急減し、画面全体が
+    // かくかくに重くなる」): 領域の縦の広さは Initialise 時の容器高さから決まるため、
+    // 容器が坂で 2m 登ると天井 (BoundsMax.y ≒ 3.37) が追いつかず、上昇する壺の床と
+    // 動かない天井の間で液体が薄く圧縮されていた。こうなると (1) 全粒子が互いに近傍に
+    // なって近傍探索が実質 O(n^2) 化しフレームが激重になり、(2) 圧壊した液体がリムから
+    // 弾き出されて残量が急減する (実測: SafetyCorrection 発動が読み取りあたり
+    // 66,013 → 297,641 → 548,740 へ爆発)。天井を容器の必要高さに追従させて防ぐ。
+    [Tooltip("容器が登って天井に近づいたとき、領域の天井を引き上げる刻み (m)。0 で無効(旧挙動)。底は地面に固定のまま、天井だけが広がる。")]
+    public float regionGrowStep = 0.5f;
     [Tooltip("Rim Opening 領域の高さ (m)。粒子間隔の 2〜3 倍程度。ここを通過した粒子だけが正常な Overflow として数えられる (§11)。")]
     public float rimOpeningHeight = 0.08f;
     [Tooltip("地面に留まった液体が Retired（回収不可能）になるまでの時間 (s)。0 で無効（永久に残る）。Mass は消えず RetiredMass へ移る (§16/§20)。")]
@@ -647,6 +656,26 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             Bind(kTeleport, ("Positions", positions), ("Velocities", velocities),
                             ("RegionFlagsIn", regionFlags));
             fluidCompute.Dispatch(kTeleport, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
+        }
+
+        // 登坂への追従 (regionGrowStep のコメントを参照)。底は地面に固定したまま
+        // (こぼれた液体が地面に届く要件 §9/§20 は不変)、天井だけを容器の必要高さ
+        // (= 初期化時と同じ式: 容器 Y + 旋回半径 + topMargin) に合わせて刻み単位で
+        // 引き上げ、グリッドを作り直す。刻みがヒステリシスになるので登坂中でも
+        // 作り直しは数回で済む。下りでは縮めない (毎フレーム作り直さないため。
+        // 天井が高い余剰は正しさに影響せず、セルが粗くなった場合のみ near 探索が
+        // 少し高くつくが、圧壊の O(n^2) 化に比べれば誤差)。
+        if (regionYAnchored && regionGrowStep > 0f)
+        {
+            float neededTop = boundary.SimPosition.y + containerSwingRadius + topMargin;
+            float currentTop = regionAnchorY + regionSize.y * 0.5f;
+            if (neededTop > currentTop)
+            {
+                float newTop = Mathf.Ceil(neededTop / regionGrowStep) * regionGrowStep;
+                regionSize.y = newTop - (groundY - groundMargin);
+                regionAnchorY = groundY - groundMargin + regionSize.y * 0.5f;
+                BuildGrid();
+            }
         }
 
         UpdateGridOrigin();

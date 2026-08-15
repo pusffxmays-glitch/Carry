@@ -368,6 +368,41 @@ void ScatterParticles(uint3 id : SV_DispatchThreadID)
     SortedIndices[slot] = i;
 }
 
+// ---- 速度クランプの基準速度 (2026-08-15 改定) ----
+// MaxSpeed の目的は「壺に対する」跳ね上がり高さの制限 (v^2/2g、宣言部の注記) であって、
+// 壺ごと自由落下する液体を世界基準で制限することではない。世界基準のままだと、
+// 上り勾配の頂上から落ちるとき (容器 9.1 m/s > MaxSpeed 5) に中身が追従できず、
+// 相対的に浮き上がって 4000 粒超の孤立液滴の雲になる (実測 4151 粒)。孤立液滴は
+// 1 粒あたり約 167 三角形を生む (FluidSurface.cs の実測コメント) ので、これが
+// 「落下すると描画が一気にかくかくになる」の正体だった。
+//
+// 壺の中とその近傍にいる粒子だけ容器の並進速度を基準にし、壺の外 (地面の水たまり、
+// こぼれて落下中の液滴) は従来どおり世界基準にする。外まで容器基準にすると、容器が
+// 速く動くたびに静止した水たまりが引きずられてしまう。ゲートはプロファイルバッファに
+// 依存しない円筒近似 (半径 1.5 倍・上下に余裕) — Integrate には PotProfileBuf が
+// 束縛されていないので、ここでプロファイルを読んではいけない。
+float3 SpeedClampRef(float3 worldPos)
+{
+    if (SafetyEnabled != 0)
+    {
+        float3 pl = mul(WorldToPotSafety, float4(worldPos, 1.0)).xyz;
+        float span = max(PotRimY - PotFloorY, 1e-3);
+        if (pl.y > PotMeshMinY - 0.5 * span && pl.y < PotRimY + span &&
+            dot(pl.xz, pl.xz) < PotMaxRadius * PotMaxRadius * 2.25)
+            return ContainerLinearVelocity;
+    }
+    return float3(0, 0, 0);
+}
+
+float3 ClampSpeed(float3 v, float3 worldPos)
+{
+    float3 vref = SpeedClampRef(worldPos);
+    float3 rel = v - vref;
+    float sp = length(rel);
+    if (sp > MaxSpeed) rel *= MaxSpeed / sp;
+    return vref + rel;
+}
+
 // ============================================================================ PBF
 // §2: 外力は World Gravity のみ。
 [numthreads(THREADS, 1, 1)]
@@ -377,8 +412,7 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     if (i >= FluidCount) return;
 
     float3 v = Velocities[i] + Gravity * DeltaTime;
-    float sp = length(v);
-    if (sp > MaxSpeed) v *= MaxSpeed / sp;
+    v = ClampSpeed(v, Positions[i]);
 
     Velocities[i] = v;
     PredictedPositions[i] = Positions[i] + v * DeltaTime;
@@ -637,8 +671,7 @@ void ApplyViscosityTension(uint3 id : SV_DispatchThreadID)
     float3 v = vi + kVisc * xsph + kBnd * boundaryDrag + tensionAccel * DeltaTime;
 
     if (any(isnan(v)) || any(isinf(v))) v = float3(0, 0, 0);
-    float sp = length(v);
-    if (sp > MaxSpeed) v *= MaxSpeed / sp;
+    v = ClampSpeed(v, pi);   // 容器基準の相対クランプ (SpeedClampRef の注記を参照)
     Velocities[i] = v;
 }
 
@@ -921,8 +954,13 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
 
     // §3 CFL 用の実測最大速さ。次フレームのサブステップ数を決めるのに使う。
     // ここは既に全粒子を 1 回なめているので、追加のディスパッチは要らない。
+    // CFL は相対運動 (壁と流体の相互貫通) を守るための制約なので、実測も
+    // SpeedClampRef と同じゲートで容器基準の相対速度にする (2026-08-15)。
+    // 世界基準のままだと、壺ごと自由落下しているだけ (相対運動ほぼ 0) でも
+    // 9 m/s と報告され、サブステップ数だけが無駄に跳ね上がる。容器の動き自体が
+    // 要求するサブステップ数は FluidCore.cs 側の containerSpeed 項が別途見ている。
     {
-        uint sp = (uint)(length(VelocitiesIn[i]) * 1000.0);
+        uint sp = (uint)(length(VelocitiesIn[i] - SpeedClampRef(PositionsIn[i])) * 1000.0);
         uint old;
         InterlockedMax(RegionCounters[7], sp, old);
     }

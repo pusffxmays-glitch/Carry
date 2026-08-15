@@ -264,10 +264,15 @@ public static class CarrySetupTestSlopes
         EditorUtility.SetDirty(loco.gameObject);
 
         // 部屋を広げたぶん、地面の水たまりが描画される範囲も広げる。
+        // 高さ 6.5m: 上り勾配 (15 度 x 8m = +2.07m) の頂上で壺のリムが y≒5.1m に達する。
+        // 4.5m のままだと頂上付近で壺の中の液体が描画ドメインの上端からはみ出して
+        // 見た目からも消える (2026-08-15 バグ報告の一部)。Sparse Brick Pool なので
+        // ドメインを縦に広げても増えるのは Brick 索引だけで、毎フレームのコストは
+        // 液体の量にしか比例しない。
         var srf = Object.FindObjectOfType<FluidSurface>();
         if (srf != null)
         {
-            srf.domainSize = new Vector3(30f, 4.5f, 30f);
+            srf.domainSize = new Vector3(30f, 6.5f, 30f);
             EditorUtility.SetDirty(srf);
         }
     }

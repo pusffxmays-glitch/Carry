@@ -1306,7 +1306,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
       propertyPath: m_LocalPosition.z
-      value: 0.124524
+      value: 0.12452412
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: d0e63b4cdb52f124188284836aa4dc74, type: 3}
       propertyPath: m_LocalRotation.w
@@ -3892,7 +3892,7 @@ MonoBehaviour:
   maxSubSteps: 20
   cflSpeedMargin: 1.6
   kernelRadiusScale: 2
-  viscosity: 2.8
+  viscosity: 4.5
   boundaryViscosity: 0.55
   viscosityRefStep: 0.016666668
   cohesionStrength: 0.3
@@ -3913,10 +3913,11 @@ MonoBehaviour:
   lateralSpread: 0.8
   groundMargin: 0.12
   topMargin: 1.2
+  regionGrowStep: 0.5
   rimOpeningHeight: 0.08
   groundLifetime: 10
   escapeAboveRim: 1
-  escapeMarginSpacings: 2
+  escapeMarginSpacings: 3
   boundsRestitution: 0.02
   boundsFriction: 0.15
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
@@ -3940,7 +3941,7 @@ MonoBehaviour:
   smoothingPasses: 2
   normalEpsVoxels: 1.2
   densityFixedPointScale: 16384
-  domainSize: {x: 30, y: 4.5, z: 30}
+  domainSize: {x: 30, y: 6.5, z: 30}
   poolBrickCapacity: 16384
   maxTriangles: 2400000
   liquidMaterial: {fileID: 0}
