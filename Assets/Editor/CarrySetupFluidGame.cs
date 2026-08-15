@@ -79,7 +79,7 @@ public static class CarrySetupFluidGame
         // §17: ゲージは Fluid の状態を読むだけ。逆向きに書く経路は無い。
         var gauge = Object.FindObjectOfType<PotionGaugeUI>();
         if (gauge != null) gauge.potionSourceBehaviour = core;
-        if (gauge != null) gauge.fillColor = new Color(0.20f, 0.52f, 1.00f, 0.95f);
+        if (gauge != null) gauge.gaugeFillColor = new Color(0.20f, 0.52f, 1.00f, 0.95f);
         else Debug.LogWarning("CarrySetupFluidGame: PotionGaugeUI がシーンに見つかりません。");
 
         EditorUtility.SetDirty(pot.gameObject);

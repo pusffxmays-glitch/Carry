@@ -96,7 +96,7 @@ public static class CarrySetupFluidPot
         var gaugeGo = new GameObject("PotionGauge");
         var gauge = gaugeGo.AddComponent<PotionGaugeUI>();
         gauge.potionSourceBehaviour = core;
-        if (gauge != null) gauge.fillColor = new Color(0.20f, 0.52f, 1.00f, 0.95f);
+        if (gauge != null) gauge.gaugeFillColor = new Color(0.20f, 0.52f, 1.00f, 0.95f);
 
         EditorSceneManager.MarkSceneDirty(scene);
         System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(ScenePath));

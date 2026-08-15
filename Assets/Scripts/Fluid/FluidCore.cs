@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -112,6 +113,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Range(0f, 0.5f)] public float boundsRestitution = 0.02f;
     [Range(0f, 1f)] public float boundsFriction = 0.15f;
 
+    // ADDED 2026-08-15 (バグ報告「ギミックのブロックにこぼれたポーションがつかない。
+    // 貫通して地面まで落ちている」): 流体の衝突相手は壺の境界粒子・地面平面 (groundY)・
+    // 領域外周だけで、ステージの箱はシミュレーションに存在しなかった。GroundSurface 付きの
+    // BoxCollider を集めてシェーダに渡し、こぼれた液体が上面に着いたらその場で水たまりに
+    // する (Ground 集計に入り、groundLifetime で消える。地面と同じ扱い)。
+    [Header("Solid obstacles")]
+    [Tooltip("GroundSurface 付きの BoxCollider を流体の衝突対象にする。こぼれた液体がギミックの上に水たまりとして残る。")]
+    public bool collideWithGroundSurfaces = true;
+
     [Header("Refs")]
     public ComputeShader fluidCompute;
 
@@ -220,6 +230,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     GraphicsBuffer boundaryLocal, boundaryPositions, boundaryVelocities, boundaryVolumes;
     GraphicsBuffer sortPositions, cellCounts, cellStart, cellCursor, blockSums, sortedIndices;
     GraphicsBuffer potProfile, potOuterProfile, safetyCounters;
+    GraphicsBuffer solidBoxW2L, solidBoxL2W, solidBoxHalf;
+    BoxCollider[] solidBoxCols;
+    bool[] solidBoxSettle;
+    Matrix4x4[] solidW2LArr, solidL2WArr;
+    Vector4[] solidHalfArr;
+    int solidBoxCount;
     // §16「非同期リードバック」。同期 GetData は CPU が GPU の完了を待つので、
     // 毎フレーム丸ごとパイプラインが止まる。ここで欲しいのは統計値だけで、
     // 1 フレーム遅れても困らない。リング状に持って、書き込み中のバッファを
@@ -252,7 +268,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     int kUpdateBoundary, kClearCounts, kBuildSortPos, kCount, kScanLocal, kScanBlocks, kScanAdd, kScatter;
     int kIntegrate, kDensityLambda, kDeltaP, kApplyDeltaP, kVelocity, kNormals, kViscTension, kFinalize, kClassify;
-    int kTeleport;
+    int kTeleport, kSolidBoxCollide;
 
     const int Threads = 256;
     const int ScanBlock = 256;
@@ -299,11 +315,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         kFinalize = fluidCompute.FindKernel("Finalize");
         kClassify = fluidCompute.FindKernel("ClassifyRegions");
         kTeleport = fluidCompute.FindKernel("TeleportFluid");
+        kSolidBoxCollide = fluidCompute.FindKernel("SolidBoxCollide");
 
         fluidCount = Mathf.Max(Threads, particleCount);
         ComputeScales();
         BuildBoundaryBuffers();
         AllocateBuffers();
+        GatherSolidBoxes();
         SeedFluid();
         BuildGrid();
         // 実際の配置は最初の Step まで待つ。
@@ -528,6 +546,71 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         }
     }
 
+    // ギミックの箱コライダを集める (collideWithGroundSurfaces のコメントを参照)。
+    // GroundSurface はギミックの床・坂・台に付いているマーカーなので、それを目印にする。
+    // Room_Floor は MeshCollider なので自然に対象外になる (地面平面 groundY が担当)。
+    void GatherSolidBoxes()
+    {
+        var cols = new List<BoxCollider>();
+        var settle = new List<bool>();
+        if (collideWithGroundSurfaces)
+        {
+            foreach (var gs in FindObjectsByType<GroundSurface>(FindObjectsSortMode.None))
+            {
+                var bc = gs.GetComponent<BoxCollider>();
+                if (bc == null) continue;
+                cols.Add(bc);
+                // 動く床 (揺れる橋) の上で定着させると、凍結した水たまりが床の動きに
+                // 置いて行かれて空中に残る。衝突はするが定着はしない。
+                settle.Add(gs.GetComponentInParent<SwayingBridge>() == null);
+            }
+        }
+        solidBoxCols = cols.ToArray();
+        solidBoxSettle = settle.ToArray();
+        solidBoxCount = solidBoxCols.Length;
+
+        int n = Mathf.Max(1, solidBoxCount);
+        solidW2LArr = new Matrix4x4[n];
+        solidL2WArr = new Matrix4x4[n];
+        solidHalfArr = new Vector4[n];
+        solidBoxW2L?.Release(); solidBoxL2W?.Release(); solidBoxHalf?.Release();
+        solidBoxW2L = new GraphicsBuffer(GraphicsBuffer.Target.Structured, n, sizeof(float) * 16);
+        solidBoxL2W = new GraphicsBuffer(GraphicsBuffer.Target.Structured, n, sizeof(float) * 16);
+        solidBoxHalf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, n, sizeof(float) * 4);
+        UpdateSolidBoxes();
+    }
+
+    // 行列を毎フレーム更新する (揺れる橋が動くため)。~10 箱の SetData なので実測不能なコスト。
+    void UpdateSolidBoxes()
+    {
+        if (solidBoxW2L == null) return;
+        for (int i = 0; i < solidBoxCount; i++)
+        {
+            var bc = solidBoxCols[i];
+            if (bc == null)
+            {
+                solidHalfArr[i] = Vector4.zero;   // half=0 -> シェーダ側で必ず「接触なし」
+                continue;
+            }
+            var t = bc.transform;
+            // スケールは half extents に畳み、行列は回転+平行移動だけにする。
+            // スケール入りの行列で最小貫通軸を選ぶと、軸ごとに距離の尺度が違って
+            // 押し出し方向を誤る。
+            Vector3 centre = t.TransformPoint(bc.center);
+            Matrix4x4 l2w = Matrix4x4.TRS(centre, t.rotation, Vector3.one);
+            Vector3 ls = t.lossyScale;
+            Vector3 half = Vector3.Scale(bc.size * 0.5f,
+                               new Vector3(Mathf.Abs(ls.x), Mathf.Abs(ls.y), Mathf.Abs(ls.z)))
+                         + Vector3.one * (spacing * 0.5f);   // 粒子半径ぶんのマージン
+            solidL2WArr[i] = l2w;
+            solidW2LArr[i] = l2w.inverse;
+            solidHalfArr[i] = new Vector4(half.x, half.y, half.z, solidBoxSettle[i] ? 1f : 0f);
+        }
+        solidBoxW2L.SetData(solidW2LArr);
+        solidBoxL2W.SetData(solidL2WArr);
+        solidBoxHalf.SetData(solidHalfArr);
+    }
+
     void BuildGrid()
     {
         Vector3 span = regionSize + Vector3.one * (cellSize * 6f);
@@ -618,6 +701,9 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         potProfile?.Release(); potProfile = null;
         potOuterProfile?.Release(); potOuterProfile = null;
         safetyCounters?.Release(); safetyCounters = null;
+        solidBoxW2L?.Release(); solidBoxW2L = null;
+        solidBoxL2W?.Release(); solidBoxL2W = null;
+        solidBoxHalf?.Release(); solidBoxHalf = null;
         regionFlags?.Release(); regionFlags = null;
         // 領域カウンタのリングバッファはここで解放しない。
         // 非同期リードバックの宛先なので、保留中の要求が完了する前に解放すると
@@ -636,6 +722,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         dt = Mathf.Min(dt, 1f / 20f);
 
         boundary.SampleMotion(dt);
+        UpdateSolidBoxes();   // 揺れる橋が動くので毎フレーム更新
 
         // 容器の姿勢が確定してから配置する（上の pendingSeed の注記を参照）。
         if (pendingSeed)
@@ -873,6 +960,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.Dispatch(kNormals, fluidGroups, 1, 1);
         fluidCompute.Dispatch(kViscTension, fluidGroups, 1, 1);
         fluidCompute.Dispatch(kFinalize, fluidGroups, 1, 1);
+        if (solidBoxCount > 0)
+            fluidCompute.Dispatch(kSolidBoxCollide, fluidGroups, 1, 1);
     }
 
     void Bind(int kernel, params (string name, GraphicsBuffer buf)[] entries)
@@ -937,11 +1026,18 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
                         ("SafetyCounters", safetyCounters),
                         ("Ages", ages), ("RetiredFlags", retiredFlags));
 
+        // ギミックの箱衝突は独立カーネル (Finalize に入れると FXC が落ちる)。
+        Bind(kSolidBoxCollide, ("Positions", positions), ("Velocities", velocities),
+                               ("RetiredFlags", retiredFlags),
+                               ("SolidBoxWorldToLocal", solidBoxW2L), ("SolidBoxLocalToWorld", solidBoxL2W),
+                               ("SolidBoxHalf", solidBoxHalf));
+
         fluidCompute.SetInt("FluidCount", fluidCount);
         fluidCompute.SetInt("TotalCount", totalCount);
         fluidCompute.SetInt("BoundaryCount", boundaryCount);
         fluidCompute.SetInt("CellTotal", cellTotal);
         fluidCompute.SetInt("BlockCount", blockCount);
+        fluidCompute.SetInt("SolidBoxCount", solidBoxCount);
 
         fluidCompute.SetFloat("DeltaTime", dt);
         fluidCompute.SetVector("Gravity", Physics.gravity);   // §2: これが唯一の外力

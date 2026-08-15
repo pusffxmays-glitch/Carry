@@ -31,6 +31,7 @@
 #pragma kernel ComputeNormals
 #pragma kernel ApplyViscosityTension
 #pragma kernel Finalize
+#pragma kernel SolidBoxCollide
 #pragma kernel ClassifyRegions
 #pragma kernel TeleportFluid
 
@@ -157,6 +158,17 @@ int    SafetyEnabled;
 float4x4 WorldToPotSafety;
 float4x4 PotToWorldSafety;
 RWStructuredBuffer<uint> SafetyCounters;   // [0] = 発動粒子数
+
+// ---- ギミックの箱コライダ (2026-08-15) ----
+// バグ報告「ギミックのブロックにこぼれたポーションがつかず、貫通して地面まで落ちる」。
+// 流体の衝突相手は境界粒子(壺)・地面平面(GroundY)・領域外周だけで、ステージの箱は
+// シミュレーションに存在しなかった。GroundSurface 付きの BoxCollider を FluidCore.cs が
+// 集めて渡し、Finalize で押し出す。上面に着いた Escaped 粒子はその場で水たまりとして
+// 定着する（地面と同じ扱い = Ground 集計・寿命 GroundLifetime で消える）。
+uint SolidBoxCount;
+StructuredBuffer<float4x4> SolidBoxWorldToLocal;   // 回転 + 平行移動のみ（スケールは half extents 側に畳んである）
+StructuredBuffer<float4x4> SolidBoxLocalToWorld;
+StructuredBuffer<float4> SolidBoxHalf;             // xyz = half extents (粒子半径込み), w = 1 で上面定着可（動く床は 0）
 
 // ---- 領域分類 / Overflow 判定 (§11, §14) ----
 // ここは「観測」しかしない。粒子の生成も移動も速度変更も一切行わない。
@@ -695,6 +707,76 @@ float PotOuterAt(float localY)
     return lerp(PotOuterBuf[i0], PotOuterBuf[i1], saturate(f - (float)i0));
 }
 
+// ギミックの箱との衝突解決（宣言部の SolidBox* の注記を参照）。
+// 戻り値: 0 = 接触なし / 1 = 接触して押し出した / 2 = 定着可能な上面に接触した。
+// 最小貫通軸で押し出す単純な OBB 押し出し。箱は厚み 0.6m あり、外の粒子の速度は
+// MaxSpeed=5 m/s・サブステップ刻みなので 1 ステップの移動は箱の厚みより十分小さく、
+// トンネリングは起きない。
+// 注記: StructuredBuffer の行列を式の中で直接 (float3x3) キャストしたり添字のまま
+// mul に渡すと FXC が落ちる (実測: "Lost connection with shader compiler process")。
+// 必ずローカルへコピーしてから使うこと。
+uint ResolveSolidBoxes(inout float3 p, inout float3 v)
+{
+    uint result = 0u;
+    [loop] for (uint b = 0; b < SolidBoxCount; b++)
+    {
+        float4 hw = SolidBoxHalf[b];
+        float3 he = hw.xyz;
+        float4x4 w2l = SolidBoxWorldToLocal[b];
+        float3 lp = mul(w2l, float4(p, 1.0)).xyz;
+        float3 d = he - abs(lp);
+        if (d.x <= 0.0 || d.y <= 0.0 || d.z <= 0.0) continue;
+
+        float3 ln = float3(0, 0, 0);
+        if (d.x < d.y && d.x < d.z) { float s = lp.x >= 0.0 ? 1.0 : -1.0; ln.x = s; lp.x = s * he.x; }
+        else if (d.y < d.z)         { float s = lp.y >= 0.0 ? 1.0 : -1.0; ln.y = s; lp.y = s * he.y; }
+        else                        { float s = lp.z >= 0.0 ? 1.0 : -1.0; ln.z = s; lp.z = s * he.z; }
+
+        float4x4 l2w = SolidBoxLocalToWorld[b];
+        p = mul(l2w, float4(lp, 1.0)).xyz;
+        float3 n = normalize(mul(l2w, float4(ln, 0.0)).xyz);   // 回転+平行移動のみの行列なので方向は w=0 で回る
+        float vn = dot(v, n);
+        if (vn < 0.0)
+        {
+            float3 vt = v - vn * n;
+            v = vt * (1.0 - BoundsFriction) - vn * n * BoundsRestitution;
+        }
+        // 15 度勾配の上面でも n.y ≒ 0.97 なので 0.5 で十分拾える。
+        bool topFace = n.y > 0.5;
+        uint hit = (topFace && hw.w > 0.5) ? 2u : 1u;
+        result = max(result, hit);
+    }
+    return result;
+}
+
+// ギミックの箱との衝突を、Finalize の後に独立したパスとして解決する。
+// Finalize の中に入れると（既に巨大なカーネルなので）FXC がクラッシュした。
+// 対象は「壺の外にいる粒子」だけ: 壺の中の液体は箱に触れない（壺は箱の上に
+// 浮いているので幾何的に重ならない）。Escaped(3) が定着可能な上面に着いたら、
+// 地面と同じくその場の水たまりとして定着する（Ground 集計・GroundLifetime）。
+[numthreads(THREADS, 1, 1)]
+void SolidBoxCollide(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount || SolidBoxCount == 0) return;
+    uint state = RetiredFlags[i];
+    if (state == 1u || state == 2u) return;   // 消滅済み / 定着済みは動かさない
+    float3 p = Positions[i];
+    float3 v = Velocities[i];
+    uint hit = ResolveSolidBoxes(p, v);
+    if (hit == 0u) return;
+    if (hit == 2u && state == 3u)
+    {
+        Positions[i] = p;
+        Velocities[i] = float3(0, 0, 0);
+        RetiredFlags[i] = 2u;
+        return;
+    }
+    // 通常粒子（跳ねて一時的に外へ出ただけ）や側面接触は押し出すだけ。
+    Positions[i] = p;
+    Velocities[i] = v;
+}
+
 // 世界境界（グリッド外周 = 数値的な最終防壁）と、地面、壺内部からの一時貫通の回収。
 // 壺の壁そのものは Boundary Particle が担当する (§10)。ここは例外処理と地面。
 [numthreads(THREADS, 1, 1)]
@@ -750,6 +832,8 @@ void Finalize(uint3 id : SV_DispatchThreadID)
             RetiredFlags[i] = 2u;
             return;
         }
+        // ギミックの箱との衝突は SolidBoxCollide カーネルが Finalize の後に行う
+        // （この巨大カーネルに足すと FXC がクラッシュするため分離した）。
         // 壺が動いて実体が Escaped 粒子を飲み込むことがある（ジャンプで壺が上がり、
         // 落ちてくる液体に胴がぶつかる）。そのままだと壺の中を素通りするので、
         // 外周のすぐ外へ押し出す。こぼれた液体が壺の外側を伝って落ちる形になる。
@@ -781,6 +865,8 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         if (v.y < 0.0) v.y = -v.y * BoundsRestitution;
         v.xz *= (1.0 - BoundsFriction);
     }
+
+    // ギミックの箱との衝突は SolidBoxCollide カーネル (Finalize の後) が担当する。
 
     // 領域の水平端に達した粒子の扱い。
     //

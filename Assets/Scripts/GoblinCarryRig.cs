@@ -98,8 +98,18 @@ public class GoblinCarryRig : MonoBehaviour
     // IsMoving, blended in/out so starting/stopping doesn't pop. Runs BEFORE ApplyStagger() in
     // LateUpdate so a stagger (which reads as more urgent) still wins if both are active at once.
     [Header("Walk cycle (assigns Carry_Balance_Walk to movement)")]
-    [Tooltip("Seconds per full walk cycle at walkSpeed (source Blender animation is 60 frames @ 24fps = 2.5s); scales down automatically while running.")]
+    [Tooltip("Seconds per full walk cycle at walkStrideRefSpeed (source Blender animation is 60 frames @ 24fps = 2.5s); scales automatically with actual speed.")]
     public float walkCycleDuration = 2.5f;
+    // ADDED 2026-08-15 (要望「歩行スピードを速くしたい。ただし歩行アニメと移動量が
+    // 乖離しないように」): 従来は位相速度の基準に locomotion.walkSpeed そのものを
+    // 使っていた。この方式は「1 サイクルで進む距離 = walkSpeed x walkCycleDuration」に
+    // なるため、walkSpeed を上げると歩幅の定義まで一緒に伸びて足滑りが出る。
+    // 基準をこの定数に分離すると、歩幅 = walkStrideRefSpeed x walkCycleDuration
+    // (1.0 x 2.5 = 2.5m/サイクル) が walkSpeed と無関係に固定され、移動速度を
+    // 変えても「速く歩く = 足も比例して速く回る」が常に成り立つ。
+    // 歩行アニメの見え方を調整した当時の速度が 1.0 m/s だったので既定は 1.0。
+    [Tooltip("歩行アニメの周期 (walkCycleDuration) を調整した基準速度 (m/s)。歩幅 = これ x walkCycleDuration。locomotion.walkSpeed を変えてもここは変えないこと。")]
+    public float walkStrideRefSpeed = 1.0f;
     [Tooltip("How fast the walk cycle blends in/out as movement starts/stops.")]
     public float walkBlendSpeed = 4f;
     [Tooltip("Extra vertical bob (meters) added to both arm IK targets while walking, so the carried pot visibly sways with each step.")]
@@ -473,8 +483,10 @@ public class GoblinCarryRig : MonoBehaviour
 
         if (walkIntensity > 0.001f)
         {
+            // 基準は locomotion.walkSpeed ではなく walkStrideRefSpeed (宣言部の注記を参照)。
+            // これで歩幅がゲームプレイ速度から独立し、walkSpeed を上げても足滑りしない。
             float speedRatio = locomotion != null
-                ? Mathf.Max(0.2f, locomotion.CurrentSpeed / Mathf.Max(0.01f, locomotion.walkSpeed))
+                ? Mathf.Max(0.2f, locomotion.CurrentSpeed / Mathf.Max(0.01f, walkStrideRefSpeed))
                 : 1f;
             walkPhase = Mathf.Repeat(walkPhase + Time.deltaTime * speedRatio / Mathf.Max(0.01f, walkCycleDuration), 1f);
         }

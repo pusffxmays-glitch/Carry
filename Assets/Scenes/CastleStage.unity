@@ -2810,7 +2810,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1f986500afe31cb42829b151b732505f, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::GoblinLocomotion
-  walkSpeed: 1
+  walkSpeed: 1.5
   runSpeed: 5
   backStepSpeedMultiplier: 0.6
   turnSpeed: 110
@@ -2870,6 +2870,7 @@ MonoBehaviour:
   staggerMoveSpeed: 1
   invertStaggerMoveSide: 1
   walkCycleDuration: 2.5
+  walkStrideRefSpeed: 1
   walkBlendSpeed: 4
   walkArmBobAmplitude: 0.02
   potScale: {x: 2.366, y: 2.366, z: 2.366}
@@ -3846,14 +3847,20 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PotionGaugeUI
   potionSourceBehaviour: {fileID: 2131736043}
-  barSize: {x: 48, y: 340}
-  screenEdgeOffset: {x: 110, y: 110}
-  anchorLeft: 1
-  frameColor: {r: 0, g: 0, b: 0, a: 0.55}
-  emptyTrackColor: {r: 1, g: 1, b: 1, a: 0.12}
-  fillColor: {r: 0.2, g: 0.52, b: 1, a: 0.95}
-  lowFillColor: {r: 0.85, g: 0.75, b: 0.15, a: 0.95}
-  lowThreshold: 0.2
+  gaugeBarSize: {x: 30, y: 220}
+  gaugeInset: {x: 48, y: 48}
+  followTarget: {fileID: 0}
+  followWorldOffset: {x: 0, y: 1, z: 0}
+  followScreenOffset: {x: -300, y: 0}
+  trailFallPerSecond: 0.18
+  gainFlashSeconds: 0.6
+  lowWarnThreshold: 0.2
+  gaugeFrameColor: {r: 0, g: 0, b: 0, a: 0.6}
+  gaugeTrackColor: {r: 1, g: 1, b: 1, a: 0.1}
+  gaugeFillColor: {r: 0.2, g: 0.52, b: 1, a: 0.95}
+  gaugeTrailColor: {r: 0.9, g: 0.2, b: 0.15, a: 0.9}
+  gaugeGainColor: {r: 0.25, g: 0.95, b: 0.4, a: 0.95}
+  gaugeWarnColor: {r: 0.95, g: 0.8, b: 0.1, a: 0.95}
 --- !u!4 &2056031052
 Transform:
   m_ObjectHideFlags: 0
@@ -3920,6 +3927,7 @@ MonoBehaviour:
   escapeMarginSpacings: 3
   boundsRestitution: 0.02
   boundsFriction: 0.15
+  collideWithGroundSurfaces: 1
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
   synchronousReadback: 1
