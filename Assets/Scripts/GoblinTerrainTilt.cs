@@ -51,6 +51,15 @@ public class GoblinTerrainTilt : MonoBehaviour
     public Vector3 GroundNormal => smoothedNormal;
     /// <summary>現在の傾き角 (deg)。Debug 用。</summary>
     public float TiltAngle => Vector3.Angle(Vector3.up, smoothedNormal);
+    /// <summary>足元の地面の摩擦 (1 = 通常, 0 = 氷)。GroundSurface が無い面は 1。
+    /// ここで一緒に拾っておくと、滑り処理が自前で Raycast を撃ち直さずに済む。</summary>
+    public float GroundFriction { get; private set; } = 1f;
+    /// <summary>足元に地面があるか（Raycast が当たったか）。</summary>
+    public bool HasGround { get; private set; }
+    /// <summary>足元から地面までの距離 (m)。接地判定に使う。
+    /// CharacterController.isGrounded は「最後に呼んだ Move の結果」なので、
+    /// 滑りのように後から Move を足す処理があると当てにならない。こちらは実測値。</summary>
+    public float GroundDistance { get; private set; } = 999f;
 
     const string PivotName = "Goblin_Tilt";
 
@@ -112,24 +121,34 @@ public class GoblinTerrainTilt : MonoBehaviour
     }
 
     // 足元 5 点の平均法線。1 本だと石畳の目地で跳ねる。
+    // 摩擦は「真下の 1 点」で決める（平均すると境目で中途半端な値になり、
+    // 氷の坂に乗った瞬間がぼやける）。
     Vector3 SampleGroundNormal()
     {
         Vector3 f = transform.forward, r = transform.right;
         Vector3 sum = Vector3.zero;
         int hits = 0;
+        float friction = 1f;
+        bool got = false;
 
-        sum += Probe(Vector3.zero, ref hits);
-        sum += Probe(f * probeForward, ref hits);
-        sum += Probe(-f * probeForward, ref hits);
-        sum += Probe(r * probeSide, ref hits);
-        sum += Probe(-r * probeSide, ref hits);
+        float centreDist = 999f;
+        sum += Probe(Vector3.zero, ref hits, ref friction, ref got, ref centreDist);
+        float ignored = 1f; bool ignoredGot = false; float ignoredDist = 999f;
+        sum += Probe(f * probeForward, ref hits, ref ignored, ref ignoredGot, ref ignoredDist);
+        sum += Probe(-f * probeForward, ref hits, ref ignored, ref ignoredGot, ref ignoredDist);
+        sum += Probe(r * probeSide, ref hits, ref ignored, ref ignoredGot, ref ignoredDist);
+        sum += Probe(-r * probeSide, ref hits, ref ignored, ref ignoredGot, ref ignoredDist);
+
+        GroundFriction = friction;
+        HasGround = hits > 0;
+        GroundDistance = centreDist;
 
         if (hits == 0) return Vector3.up;
         Vector3 n = sum.normalized;
         return n.sqrMagnitude < 1e-6f ? Vector3.up : n;
     }
 
-    Vector3 Probe(Vector3 offset, ref int hits)
+    Vector3 Probe(Vector3 offset, ref int hits, ref float friction, ref bool gotFriction, ref float dist)
     {
         Vector3 origin = transform.position + offset + Vector3.up * probeUp;
         RaycastHit hit;
@@ -138,6 +157,13 @@ public class GoblinTerrainTilt : MonoBehaviour
             // 自分自身のコライダーは無視する
             if (hit.collider.transform.IsChildOf(transform)) return Vector3.zero;
             hits++;
+            if (!gotFriction)
+            {
+                var surf = hit.collider.GetComponentInParent<GroundSurface>();
+                friction = surf != null ? surf.friction : 1f;
+                gotFriction = true;
+                dist = hit.distance - probeUp;   // 足元からの距離
+            }
             return hit.normal;
         }
         return Vector3.zero;

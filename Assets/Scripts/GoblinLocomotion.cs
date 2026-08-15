@@ -1,14 +1,17 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
 
-// Movement scheme per 設計図.png "操作方法(キーボード)": Arrow keys drive movement
-// (Up/Down = forward/back, Left/Right = turn-in-place), NOT WASD. This is a deliberate choice:
-// the arm-balance controls need Q/A/E/D (see ArmBalanceController), and 設計図.png's own worked
-// example ("Q+D = 右腕を下げながら左腕を上げる") only makes sense if D is never also a movement
-// key. アニメーション遷移図.png's summary box lists WASD+strafe instead, which collides with
-// the arm keys (A/D used for both "strafe" and "lower arm") -- see WORKLOG.md for the full
-// reasoning. Strafe Left/Right animator states still exist (see CarrySetupBalanceGame) for
-// spec fidelity but are unreachable from this input scheme; flagged in the worklog.
+// 操作系 (2026-08-14 にユーザー指定で変更):
+//   移動      = WASD   … W/S 前後、A/D その場旋回、Shift 走り、Space ジャンプ
+//   壺のバランス = 矢印キー … 左右で左右バランス、上で前傾／下で後傾（GoblinCarryRig）
+//
+// 以前は移動が矢印キー、腕のバランスが Q/E だった。壺のバランスに前後の軸
+// （前傾・後傾）を足したことで操作が 2 軸になり、矢印キーで一括して扱う方が
+// 分かりやすいため入れ替えた。移動と壺の操作でキーが衝突しないので、
+// 旧構成にあった「A/D が旋回と腕操作で取り合いになる」問題も起きない。
+//
+// Strafe Left/Right の Animator ステートは仕様どおり残っているが、この入力構成では
+// 到達しない（A/D は旋回に割り当てているため）。従来どおり worklog に記録済み。
 [RequireComponent(typeof(CharacterController))]
 [RequireComponent(typeof(Animator))]
 public class GoblinLocomotion : MonoBehaviour
@@ -66,18 +69,19 @@ public class GoblinLocomotion : MonoBehaviour
         }
 
         var kb = Keyboard.current;
-        float moveZ = 0f;   // +1 forward (Up), -1 backward (Down)
-        float turnX = 0f;   // +1 turn right, -1 turn left
+        float moveZ = 0f;   // +1 forward (W), -1 backward (S)
+        float turnX = 0f;   // +1 turn right (D), -1 turn left (A)
         // SWAPPED AGAIN 2026-08-12 per explicit request ("走りとジャンプのキーを入れ替えたい。
         // シフトとスペース"): run is now held Shift, jump is now pressed Space (reverse of the
         // previous swap earlier the same day).
         bool runHeld = false;
         if (kb != null)
         {
-            if (kb.upArrowKey.isPressed) moveZ += 1f;
-            if (kb.downArrowKey.isPressed) moveZ -= 1f;
-            if (kb.rightArrowKey.isPressed) turnX += 1f;
-            if (kb.leftArrowKey.isPressed) turnX -= 1f;
+            // 移動は WASD。矢印キーは壺のバランス操作 (GoblinCarryRig) に割り当てている。
+            if (kb.wKey.isPressed) moveZ += 1f;
+            if (kb.sKey.isPressed) moveZ -= 1f;
+            if (kb.dKey.isPressed) turnX += 1f;
+            if (kb.aKey.isPressed) turnX -= 1f;
             runHeld = kb.leftShiftKey.isPressed || kb.rightShiftKey.isPressed;
         }
 

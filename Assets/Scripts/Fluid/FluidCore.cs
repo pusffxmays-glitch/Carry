@@ -167,12 +167,30 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public int OverflowEvents { get; private set; }
     /// <summary>Rim を通らずに外へ出た粒子の累計（壁抜け/底抜け = 異常）。</summary>
     public int PenetrationEvents { get; private set; }
+    /// <summary>リムを越えてもう壺へ戻らない、落下中の液体の粒子数 (§16)。
+    /// Airborne の内数。地面に着けば Ground へ移る。</summary>
+    public int EscapedCount { get; private set; }
+    /// <summary>まだ壺のものである液体の粒子数。跳ね上がって空中にいるだけの分を含む。</summary>
+    public int RecoverableCount => InsideCount + RimCount + (AirborneCount - EscapedCount);
+
     // ---- Fluid Mass (§16) ----
     // 粒子は全て同じ質量なので Mass = 個数 x ParticleMass。
     // どれも「観測から導かれる量」であり、独立に書ける変数ではない。
     public float ParticleMassValue => particleVolume * restDensity;
-    public float PotMass => InsideCount * ParticleMassValue;
-    public float AirborneMass => (RimCount + AirborneCount) * ParticleMassValue;
+
+    // PotMass は「まだ壺のものである液体」。壺の内側にある分だけでなく、
+    // **跳ね上がって空中にいるだけの分も含む**。
+    //
+    // 以前は InsideCount（壺の内側の幾何判定）だけだった。そのため揺れやジャンプで
+    // 液面がリムより上へ持ち上がるたびにゲージが大きく落ち込み、液体が戻ると回復する、
+    // という挙動になっていた。実測（ジャンプ）: 実際に失われたのは 3.3% の時点で
+    // ゲージは 0.998 -> 0.598 まで落ちていた。「こぼれた量と残量がリンクしていない」の正体。
+    //
+    // 失われたかどうかを決めるのは幾何ではなく **Escaped 判定**（リムの外へ出たか）なので、
+    // 残量もそれに合わせる。こうすると、ゲージが減る量 = 実際にこぼれた量になる。
+    public float PotMass => RecoverableCount * ParticleMassValue;
+    /// <summary>こぼれて落下中の液体 (§16)。地面に着くまでの分。</summary>
+    public float AirborneMass => EscapedCount * ParticleMassValue;
     public float GroundMass => GroundCount * ParticleMassValue;
     public float RetiredMass => RetiredCount * ParticleMassValue;
     public float InitialTotalMass => fluidCount * ParticleMassValue;
@@ -200,9 +218,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     GraphicsBuffer[] regionCountersRing;
     int regionRingIndex;
     GraphicsBuffer regionFlags, ages, retiredFlags;
-    static readonly uint[] ZeroCounters = new uint[8];
+    // [0]Inside [1]Rim [2]Airborne [3]Ground [4]Retired [5]Overflow [6]Penetration
+    // [7]maxSpeed*1000 [8]Escaped（落下中でもう戻らない分）
+    static readonly uint[] ZeroCounters = new uint[10];
     uint[] safetyRead = new uint[4];
-    uint[] regionRead = new uint[8];
+    uint[] regionRead = new uint[10];
 
     int fluidCount, boundaryCount, totalCount;
     float spacing, kernelRadius, restDensity, particleVolume;
@@ -467,7 +487,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         {
             regionCountersRing = new GraphicsBuffer[3];
             for (int i = 0; i < regionCountersRing.Length; i++)
-                regionCountersRing[i] = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 8, sizeof(uint));
+                regionCountersRing[i] = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 10, sizeof(uint));
         }
         regionRingIndex = 0;
 
@@ -714,6 +734,28 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     /// <summary>開始時の整定に使ったサブステップ数（Debug 用）。</summary>
     public int PreSettleSteps { get; private set; }
 
+    /// <summary>壺を満タンに戻す。こぼれた液体・地面の水たまりも全て消える。
+    /// デバッグ用のワープなど「その場をリセットしたい」ときに使う。
+    /// 容器が動いた直後に呼ぶこと（現在の姿勢で種を置き直すため）。</summary>
+    public void ResetFluid()
+    {
+        Initialise();
+        if (!IsReady) return;
+
+        // 逃げた/沈殿した/退避した印を全て消す。これをしないと、種を置き直しても
+        // 前回こぼれた粒子が Escaped のまま残り、満タンにならない。
+        var zero = new uint[fluidCount];
+        retiredFlags.SetData(zero);
+        ages.SetData(new float[fluidCount]);
+        foreach (var b in regionCountersRing) b?.SetData(ZeroCounters);
+
+        boundary.ResyncMotion();
+        UpdateGridOrigin();
+        SeedFluid();
+        PreSettle();
+        ClassifyAndRead();
+    }
+
     void ClassifyAndRead()
     {
         var buf = regionCountersRing[regionRingIndex];
@@ -738,7 +780,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             {
                 if (req.hasError || positions == null) return;
                 var data = req.GetData<uint>();
-                for (int i = 0; i < 8 && i < data.Length; i++) regionRead[i] = data[i];
+                for (int i = 0; i < 10 && i < data.Length; i++) regionRead[i] = data[i];
                 ApplyRegionCounters(regionRead);
             });
         }
@@ -754,6 +796,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         OverflowEvents += (int)r[5];
         PenetrationEvents += (int)r[6];
         MeasuredMaxSpeed = r[7] / 1000f;
+        EscapedCount = (int)r[8];
     }
 
     public void ResetOverflowCounters()

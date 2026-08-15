@@ -28,11 +28,22 @@ public class GoblinCarryRig : MonoBehaviour
     // same amount), E raises the right arm (and lowers the left). armBalance=0 is Blender's
     // "Carry_Balance_Neutral" pose exactly (both arms at their captured neutral); +1 = left fully
     // up/right fully down; -1 = right fully up/left fully down.
-    [Header("Arm input: Q raises left (lowers right), E raises right (lowers left)")]
+    // 2026-08-14 ユーザー指定でキー構成を変更。壺のバランスは **矢印キー** で 2 軸操作する。
+    //   左右キー = 左右のバランス（腕の高さ差。armBalance）   … 旧 Q/E
+    //   上下キー = 前後のバランス（前傾・後傾。pitchBalance） … 新規
+    // 移動は WASD へ移した (GoblinLocomotion)。
+    [Header("Pot balance input: 矢印キー（左右=左右バランス / 上下=前後バランス）")]
     // Raised 2026-08-12 per request ("Q/Eキー入力時の変化量をもう少し大きく"), twice: 1.2->2.2
     // was still judged too slow, raised further to 4.0 (full -1..1 range in ~0.5s).
     public float armInputSpeed = 4.0f;
+    [Tooltip("左右のバランス。右キーで右へ、左キーで左へ傾く。")]
     [Range(-1f, 1f)] public float armBalance = 0f;
+    [Tooltip("前後のバランス。上キーで前傾、下キーで後傾。")]
+    [Range(-1f, 1f)] public float pitchBalance = 0f;
+    [Tooltip("pitchBalance = 1 のときの前後の傾き角 (度)。左右バランスの効き (実測 16 度) と同程度にしてある。")]
+    public float pitchRangeDeg = 16f;
+    [Tooltip("前後バランスに合わせて両手を前後へ動かす量 (m)。壺だけが傾いて手が置き去りに見えるのを防ぐ。")]
+    public float pitchHandReach = 0.06f;
     // REDESIGNED 2026-08-10 per explicit request: the palm's front-back/left-right position must
     // stay fixed while only its HEIGHT changes, achieved through natural shoulder
     // abduction/adduction ("armpit opening/closing") plus elbow extension/flexion -- i.e. real
@@ -67,6 +78,12 @@ public class GoblinCarryRig : MonoBehaviour
     public float staggerThresholdDeg = 5.5f;
     [Tooltip("しきい値からこの角度(度)ぶん超えると、よろけが最大になる。")]
     public float staggerRampDeg = 10.5f;
+    // 人は横方向より前後方向にずっと安定している（足が左右に並んでいるので、支持面は
+    // 左右に狭く前後に長い）。実際、上り坂を登ってもよろけないが、横に傾いた斜面では
+    // すぐバランスを崩す。よろけの判定でも前後成分の重みを下げる。
+    // 既定 0.35 なら 15 度の上り坂は 5.25 度相当となり、しきい値 5.5 度に届かない。
+    [Tooltip("前後方向の傾きをよろけ判定に算入する重み。1 で左右と同等、0 で前後を完全に無視。")]
+    [Range(0f, 1f)] public float staggerPitchWeight = 0.35f;
     [Tooltip("Seconds per full stagger cycle (source Blender animation is 60 frames @ 24fps = 2.5s).")]
     public float staggerCycleDuration = 2.5f;
     [Tooltip("How fast the stagger blends in/out as armBalance crosses the threshold.")]
@@ -299,9 +316,16 @@ public class GoblinCarryRig : MonoBehaviour
         // SWAPPED 2026-08-12 per explicit request ("QキーとEキーの機能を逆にしたい。感覚的に
         //逆のほうがやりやすそう"): E now raises the left arm (lowers right), Q now raises the
         // right arm (lowers left) -- opposite of the original mapping.
-        if (kb.eKey.isPressed) armBalance += armInputSpeed * dt;
-        if (kb.qKey.isPressed) armBalance -= armInputSpeed * dt;
+        // 左右キー = 左右バランス（旧 E/Q に相当）
+        if (kb.rightArrowKey.isPressed) armBalance += armInputSpeed * dt;
+        if (kb.leftArrowKey.isPressed) armBalance -= armInputSpeed * dt;
         armBalance = Mathf.Clamp(armBalance, -1f, 1f);
+
+        // 上下キー = 前後バランス。上で前傾（壺の口を前へ倒す）、下で後傾。
+        // 2026-08-14 に上下を入れ替え（ユーザー指定）。
+        if (kb.upArrowKey.isPressed) pitchBalance -= armInputSpeed * dt;
+        if (kb.downArrowKey.isPressed) pitchBalance += armInputSpeed * dt;
+        pitchBalance = Mathf.Clamp(pitchBalance, -1f, 1f);
     }
 
     void LateUpdate()
@@ -329,8 +353,9 @@ public class GoblinCarryRig : MonoBehaviour
             // rightUpperArm the VISUAL left arm, confirmed by the user after the Q/E key-mapping
             // fix. armBalance>0 ("Q", left up/right down) must raise the visual-left arm
             // (rightUpperArm) and lower the visual-right arm (leftUpperArm), hence the sign flip.
-            SolveArm(leftUpperArm, leftForeArm, leftHand, -armBalance, leftNeutral, leftUpperLen, leftForeLen, leftPalmSign, armBob);
-            SolveArm(rightUpperArm, rightForeArm, rightHand, armBalance, rightNeutral, rightUpperLen, rightForeLen, rightPalmSign, armBob);
+            float armPush = -pitchBalance * pitchHandReach;   // 後傾で手を手前へ引く
+            SolveArm(leftUpperArm, leftForeArm, leftHand, -armBalance, leftNeutral, leftUpperLen, leftForeLen, leftPalmSign, armBob, armPush);
+            SolveArm(rightUpperArm, rightForeArm, rightHand, armBalance, rightNeutral, rightUpperLen, rightForeLen, rightPalmSign, armBob, armPush);
         }
 
         // Pot bottom anchored at the midpoint between the two palms (its own object origin is
@@ -359,8 +384,13 @@ public class GoblinCarryRig : MonoBehaviour
             if (sideOnPlane.sqrMagnitude > 1e-8f && refRight.sqrMagnitude > 1e-8f)
                 armRoll = Vector3.SignedAngle(refRight.normalized, sideOnPlane.normalized, fwd);
 
+            // 前後バランス (上下キー) は、体の姿勢に対する **ピッチ** として足す。
+            // 左右バランスが手の高さ差から出てくるのに対し、こちらは両手が同じだけ動くので
+            // 手の位置からは傾きが出ない。壺の回転として明示的に与える必要がある。
+            Quaternion basePose = Posture.rotation * Quaternion.Euler(-pitchBalance * pitchRangeDeg, 0f, 0f);
+
             pot.position = handMid;
-            pot.rotation = Quaternion.AngleAxis(armRoll, fwd) * Posture.rotation;
+            pot.rotation = Quaternion.AngleAxis(armRoll, fwd) * basePose;
             pot.localScale = potScale;
         }
     }
@@ -483,15 +513,18 @@ public class GoblinCarryRig : MonoBehaviour
         // **世界基準**での壺の傾き。ゴブリンに対する相対角ではない。
         // pot.rotation はこの LateUpdate の末尾で更新されるので、ここで読むのは
         // 1 フレーム前の姿勢。よろけの判定にとっては問題にならない遅れ。
+        // 傾きを **左右倒れ** と **前後倒れ** に分けて評価する。
+        // root は yaw だけなので root.right / root.forward は常に水平で、基準に使える。
         float tiltDeg = 0f;
         float leanSide = 0f;          // 正 = 壺の上方向がゴブリンの右へ倒れている
         if (pot != null)
         {
-            tiltDeg = Vector3.Angle(Vector3.up, pot.up);
-            // 傾いている「向き」は、壺の上方向の水平成分で決まる。
-            // root は yaw だけなので root.right は常に水平で、左右の基準に使える。
-            Vector3 lean = Vector3.ProjectOnPlane(pot.up, Vector3.up);
-            leanSide = Vector3.Dot(lean, root.right);
+            Vector3 up = pot.up;
+            leanSide = Vector3.Dot(up, root.right);
+            float lateralDeg = Mathf.Asin(Mathf.Clamp(leanSide, -1f, 1f)) * Mathf.Rad2Deg;
+            float foreDeg = Mathf.Asin(Mathf.Clamp(Vector3.Dot(up, root.forward), -1f, 1f)) * Mathf.Rad2Deg;
+            float weighted = foreDeg * staggerPitchWeight;
+            tiltDeg = Mathf.Sqrt(lateralDeg * lateralDeg + weighted * weighted);
         }
 
         // FIXED 2026-08-12 (bug report: holding Q then E, or vice versa, produces a momentary
@@ -679,7 +712,8 @@ public class GoblinCarryRig : MonoBehaviour
     // extraHeightLocal: a small additional raw-meters offset (not t-scaled) layered on top, used
     // for the walk-cycle arm bob so it doesn't interact with the armBalance -1..+1 range at all.
     void SolveArm(Transform upperArm, Transform foreArm, Transform hand, float t, ArmNeutral neutral,
-        float upperLen, float foreLen, float palmSign, float extraHeightLocal = 0f)
+        float upperLen, float foreLen, float palmSign, float extraHeightLocal = 0f,
+        float extraForwardLocal = 0f)
     {
         Vector3 shoulderPos = upperArm.position;
 
@@ -688,7 +722,11 @@ public class GoblinCarryRig : MonoBehaviour
         // resulting shoulder abduction ("armpit open/close") and elbow bend are whatever a real
         // 2-bone IK solve naturally produces to reach that point, not separately parameterized --
         // that is what keeps the motion anatomically consistent instead of an arbitrary blend.
-        Vector3 targetOffsetLocal = neutral.wristOffsetLocal + Vector3.up * (heightRange * t + extraHeightLocal);
+        // extraForwardLocal は前後バランス。両手を同じだけ前後へ動かすので、これ単体では
+        // 壺は傾かない（傾き自体は壺の回転として与えている）。手が置き去りに見えないための追従。
+        Vector3 targetOffsetLocal = neutral.wristOffsetLocal
+                                  + Vector3.up * (heightRange * t + extraHeightLocal)
+                                  + Vector3.forward * extraForwardLocal;
         Vector3 wristTarget = shoulderPos + Posture.TransformDirection(targetOffsetLocal);
 
         Vector3 toTarget = wristTarget - shoulderPos;

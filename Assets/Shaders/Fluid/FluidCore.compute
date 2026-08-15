@@ -944,6 +944,14 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
                  : (stateIn == 3u) ? REGION_AIR
                  : REGION_RETIRED;
         InterlockedAdd(RegionCounters[reg], 1, d2);
+        // Escaped（もう壺へ戻らない落下中の液体）だけを別に数える。
+        // RegionFlags の領域値は `& 7u` でマスクして使う箇所があるので 8 番は使えない。
+        // 領域は REGION_AIR のままにして、カウンタだけ分ける。
+        //
+        // これが無いと「跳ね上がっただけで戻ってくる液体」と「こぼれて落下中の液体」が
+        // どちらも Airborne に混ざり、残量ゲージが揺れの最中に大きく落ち込む
+        // （実測: 実損失 3.3% の瞬間にゲージが 0.998 -> 0.598）。
+        if (stateIn == 3u) InterlockedAdd(RegionCounters[8], 1, d2);
         RegionFlags[i] = reg | (prev & (FLAG_PASSED_RIM | FLAG_EVER_OUT));
         return;
     }
