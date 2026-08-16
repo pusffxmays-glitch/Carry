@@ -28,6 +28,13 @@ public class GoblinTerrainTilt : MonoBehaviour
     [Range(0f, 60f)] public float maxTiltDeg = 30f;
     [Tooltip("追従の速さ。大きいほど機敏。小さいと斜面に乗ってから傾くまでが緩やかになる。")]
     [Range(1f, 30f)] public float responseSpeed = 8f;
+    // 追補 18: 運搬中は傾きの角速度そのものを制限する。指数追従 (responseSpeed 8) は
+    // 18° のランプ進入で ~60°/s のピッチ回転になり、満杯の壺から 13-17% を一撃で
+    // 捨てていた (プレイヤーに対処不能)。壺なしは従来どおり機敏。
+    [Tooltip("運搬中 (gentleMode) の傾き角速度上限 (deg/s)。18° のランプで約 1.2 秒かけて傾く。")]
+    public float carryTiltRateDeg = 15f;
+    [Tooltip("壺を担いでいる間 true (GoblinPotActions が更新)。")]
+    [HideInInspector] public bool gentleMode = true;
     [Tooltip("傾きの強さ。1 で地面と完全に平行、0.5 で半分だけ傾く。")]
     [Range(0f, 1f)] public float tiltStrength = 1f;
 
@@ -100,11 +107,15 @@ public class GoblinTerrainTilt : MonoBehaviour
     {
         EnsurePivot();
 
+        // **計測は毎フレーム行う** (2026-08-16 修正)。以前は空中でサンプリングを
+        // スキップしていたため、GroundDistance が滞空中「接地時の値のまま凍結」し、
+        // これを滞空判定に使うパリー (GoblinPotActions) が一度も発動しなかった。
+        // 傾きの「適用」だけを接地時に限定する。
+        Vector3 n = SampleGroundNormal();
         Vector3 target = Vector3.up;
         bool grounded = controller == null || controller.isGrounded;
         if (grounded || !levelWhileAirborne)
         {
-            Vector3 n = SampleGroundNormal();
             // 最大角で頭打ちにする。急斜面で体が寝てしまうのを防ぐ。
             float ang = Vector3.Angle(Vector3.up, n);
             if (ang > maxTiltDeg && ang > 1e-3f)
@@ -114,7 +125,16 @@ public class GoblinTerrainTilt : MonoBehaviour
 
         // 時間刻みに依存しない指数追従。フレームレートが変わっても同じ速さで傾く。
         float k = 1f - Mathf.Exp(-responseSpeed * Time.deltaTime);
-        smoothedNormal = Vector3.Slerp(smoothedNormal, target, k).normalized;
+        Vector3 desired = Vector3.Slerp(smoothedNormal, target, k).normalized;
+        // 運搬中は角速度上限をかける (追補 18)。指数追従は差分が大きいほど初速が
+        // 速くなる (18° 差で ~60°/s) ので、レートで頭打ちにする。
+        if (gentleMode && carryTiltRateDeg > 0f)
+        {
+            float ang = Vector3.Angle(smoothedNormal, desired);
+            float maxAng = carryTiltRateDeg * Time.deltaTime;
+            if (ang > maxAng) desired = Vector3.Slerp(smoothedNormal, desired, maxAng / ang).normalized;
+        }
+        smoothedNormal = desired;
 
         // root は yaw だけ。そこへ地面法線ぶんの傾きを world 側から掛ける。
         Pivot.rotation = Quaternion.FromToRotation(Vector3.up, smoothedNormal) * transform.rotation;

@@ -21,23 +21,27 @@ Shader "Custom/PotionLiquidSurface"
     Properties
     {
         // 深い青。薄い部分は水色〜白に近く、厚い部分は濃紺へ沈む。
-        _ShallowColor("Shallow (thin) Color", Color) = (0.16, 0.56, 1.00, 1)
-        _BaseColor("Base Color", Color)              = (0.01, 0.11, 0.85, 1)
+        // 2026-08-16: 発光化に合わせて彩度を上げた (淡いパステルだと光っても白っぽく飛ぶ)。
+        _ShallowColor("Shallow (thin) Color", Color) = (0.08, 0.38, 1.00, 1)
+        _BaseColor("Base Color", Color)              = (0.02, 0.13, 0.95, 1)
         _DeepColor("Deep Color", Color)              = (0.01, 0.04, 0.26, 1)
-        _RimColor("Fresnel Rim Color", Color)        = (0.45, 0.82, 1.00, 1)
+        _RimColor("Fresnel Rim Color", Color)        = (0.40, 0.80, 1.00, 1)
         _Smoothness("Smoothness", Range(0,1))        = 0.96
-        _SpecIntensity("Specular Intensity", Range(0,12)) = 7.5
+        _SpecIntensity("Specular Intensity", Range(0,12)) = 6.0
         _FresnelPower("Fresnel Power", Range(0.5,8)) = 2.8
         _FresnelStrength("Fresnel Strength", Range(0,2)) = 0.85
         _Translucency("Subtle internal scatter", Range(0,2)) = 0.30
         _AmbientBoost("Ambient Boost", Range(0,2))   = 0.30
 
         // 内部からの発光 (神聖感)。光源に依存しない項として足すので影の中でも光る。
-        _EmissionColor("Inner Glow Color", Color)    = (0.08, 0.34, 1.00, 1)
-        _EmissionStrength("Inner Glow Strength", Range(0,4)) = 0.70
+        // 2026-08-16: Bloom (シーンの PotionGlow Volume, 閾値 1.1) と組で調整。
+        // 発光を HDR 域 (>1) に上げて「白飛び」ではなく Bloom の柔らかい滲みで
+        // 「液体自体が光を帯びている」ように見せる。色は彩度の高い青のまま保つこと。
+        _EmissionColor("Inner Glow Color", Color)    = (0.14, 0.42, 1.00, 1)
+        _EmissionStrength("Inner Glow Strength", Range(0,4)) = 2.8
         _GlowRise("Glow Rise (薄いほど早く光る)", Range(0.5,12)) = 5.0
-        _GlowAbsorb("Glow Absorption (厚いほど翳る)", Range(0,6)) = 2.2
-        _CoreGlow("Core Glow (厚い中心のほのかな光)", Range(0,1)) = 0.18
+        _GlowAbsorb("Glow Absorption (厚いほど翳る)", Range(0,6)) = 1.0
+        _CoreGlow("Core Glow (厚い中心のほのかな光)", Range(0,1)) = 0.5
 
         _ThicknessRef("Thickness reference (m)", Float) = 0.45
         _ThicknessSteps("Thickness samples", Range(2,24)) = 12

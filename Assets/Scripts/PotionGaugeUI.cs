@@ -66,6 +66,20 @@ public class PotionGaugeUI : MonoBehaviour
     public Color gaugeTrailColor = new Color(0.90f, 0.20f, 0.15f, 0.90f);  // 失った分
     public Color gaugeGainColor = new Color(0.25f, 0.95f, 0.40f, 0.95f);   // 増加フラッシュ
     public Color gaugeWarnColor = new Color(0.95f, 0.80f, 0.10f, 0.95f);   // 低残量警告
+    // 追補 20: パリー (着地クッション) 成功のフラッシュ。グッド = シアン / ジャスト = 金
+    public Color gaugeParryGoodColor = new Color(0.30f, 0.95f, 1.00f, 0.95f);
+    public Color gaugeParryJustColor = new Color(1.00f, 0.85f, 0.25f, 0.95f);
+    [Tooltip("パリーフラッシュの長さ (秒)。")]
+    public float parryFlashSeconds = 0.7f;
+    float parryFlashTimer;
+    Color parryFlashColor;
+
+    /// <summary>パリー成功をゲージ色で知らせる (GoblinPotActions が呼ぶ)。</summary>
+    public void FlashParry(bool just)
+    {
+        parryFlashColor = just ? gaugeParryJustColor : gaugeParryGoodColor;
+        parryFlashTimer = parryFlashSeconds;
+    }
 
     // 2026-08-15 (要望「ゲージの上に、壺が今どっちに傾いているのかわかる表示が欲しい。
     // 上下左右キーでどれくらい動かしたのかわからなくなる」): バーの上に正方形の
@@ -376,6 +390,12 @@ public class PotionGaugeUI : MonoBehaviour
             c = Color.Lerp(gaugeFillColor, gaugeWarnColor, Mathf.PingPong(Time.unscaledTime * 2.5f, 1f));
         if (gainFlashTimer > 0f)
             c = Color.Lerp(c, gaugeGainColor, Mathf.Clamp01(gainFlashTimer / Mathf.Max(0.01f, gainFlashSeconds)));
+        // パリーフラッシュは最優先 (追補 20)。成立の瞬間を見逃させない
+        if (parryFlashTimer > 0f)
+        {
+            parryFlashTimer -= Time.deltaTime;
+            c = Color.Lerp(c, parryFlashColor, Mathf.Clamp01(parryFlashTimer / Mathf.Max(0.01f, parryFlashSeconds)));
+        }
         fillImage.color = c;
 
         if (percentText != null)

@@ -29,6 +29,32 @@ public class GoblinLocomotion : MonoBehaviour
 
     [Header("Jump")]
     public float jumpSpeed = 6f;
+    // 熱い床 (マグマ、2026-08-16 ギミック 9): 踏むと強制的に高く飛ばされる。
+    [Tooltip("熱い床を踏んだときの強制ジャンプ初速 (m/s)。8.5 で高さ約 3.7m (通常ジャンプ 1.8m の 2 倍)。")]
+    public float hotJumpSpeed = 8.5f;
+    float hotFloorCooldown;
+    bool hotJumpQueued;
+    bool hotFlightActive;   // 滞空中の落下速度制限に使う
+    // 着地クッション (追補 15): 着地直後の Space をジャンプにしない猶予。
+    // 「着地直前に押すつもりが僅かに遅れた」入力が意図しないジャンプに化けるのを防ぐ。
+    [HideInInspector] public float jumpSuppressedUntil;
+    /// <summary>熱い床で飛ばされた瞬間 true を 1 回返す (「あちち」アニメ再生用)。</summary>
+    public bool ConsumeHotJump() { bool v = hotJumpQueued; hotJumpQueued = false; return v; }
+    /// <summary>熱い床ジャンプで滞空中か (着地で false)。アニメの早期終了判定用。</summary>
+    public bool HotFlightActive => hotFlightActive;
+    /// <summary>最後にジャンプ (通常・熱い床とも) が始まった時刻。
+    /// 追補 16: 離陸の瞬間から壺内 calm を効かせるための通知。滞空検出 (0.12 秒ゲート)
+    /// だけだと離陸直後の無重力区間でスロッシュが育ってしまう。</summary>
+    public float LastJumpStartTime { get; private set; } = -999f;
+
+    // 追補 25: パリー押下で「膝で受ける」= 残りの落下速度を軟化する。
+    // 高所からのパリーでも衝撃自体が小さくなり、clamp だけでは防げない
+    // PBF の位置解決由来の吹き出しが減る。
+    float softLandUntil = -999f;
+    [Tooltip("パリー押下後の落下速度上限 (m/s)。膝のクッションで受ける表現。")]
+    public float parrySoftFallSpeed = 3.5f;
+    /// <summary>パリー押下時に呼ぶ。seconds の間、落下速度を parrySoftFallSpeed に抑える。</summary>
+    public void SoftenLanding(float seconds) { softLandUntil = Time.time + seconds; }
     // ADDED 2026-08-15 (要望「W＋ジャンプはもっと飛距離出るように」): 歩きジャンプは
     // walkSpeed 1.5 をそのまま引き継ぐと滞空 0.6 秒で約 0.9m しか飛ばない。
     // 離陸時だけ水平速度を増幅して 2.4 m/s ≒ 1.44m にする。
@@ -36,8 +62,44 @@ public class GoblinLocomotion : MonoBehaviour
     // 「走りジャンプなら届き、歩きジャンプでは届かない隙間 1.6m」の設計なので、
     // 歩きジャンプの飛距離 (walkSpeed x これ x 0.6s) は 1.6m 未満に収める。
     // 走りジャンプ (runSpeed 5 ≒ 3m) には掛けない。
-    [Tooltip("歩き中ジャンプの水平速度倍率。飛距離 ≒ walkSpeed x これ x 0.6s。1.78 以上でジャンプ台の隙間 1.6m を歩きで越えられてしまう。")]
-    public float walkJumpBoost = 1.6f;
+    // 追補 23: walkSpeed 1.5 → 1.8 に伴い 1.6 → 1.4 へ (飛距離 1.8×1.4×0.6 = 1.51m < 1.6m を維持)。
+    [Tooltip("歩き中ジャンプの水平速度倍率。飛距離 ≒ walkSpeed x これ x 0.6s。ジャンプ台の隙間 1.6m を歩きで越えられない値にすること (walkSpeed 1.8 なら 1.48 未満)。")]
+    public float walkJumpBoost = 1.4f;
+
+    // 2026-08-16 追補 13: 運搬中の加減速ランプ。
+    // 満杯の壺は静止液面がリム直下 (fillFraction 0.95) にあり、瞬間的な速度変化
+    // (従来は 1 フレームで 0 -> 1.5 m/s) が作るスロッシュ波が 0.7〜1.0 秒後にリムへ
+    // 到達して一気に 25-30% 捨てられていた (WORKLOG 追補 12 の調査)。
+    // 加減速を数百 ms かけて行うことで波の生成自体を抑える。
+    [Header("Carry acceleration ramp (追補 13)")]
+    // 実測 (満杯・平地歩き出し、calm なし): accel 3.0 → 残 71% / 2.0 → 95% / 1.5 → 99%。
+    // 追補 22: 1.5 は「歩き出しが遅い」(ユーザー) ため 3.5 へ戻し、加速中だけ
+    // 壺内 calm を自動適用してこぼれを抑える方式に変更 (RampingHard を参照)。
+    [Tooltip("運搬中の加速上限 (m/s^2)。3.5 で歩行速度まで約 0.4 秒。加速中は自動 calm がこぼれを抑える。")]
+    public float carryAccel = 3.5f;
+    /// <summary>運搬中に大きく加減速している最中か (追補 22: 加速時 calm のトリガー)。</summary>
+    public bool RampingHard { get; private set; }
+    [Tooltip("運搬中の減速上限 (m/s^2)。5 なら満杯でも停止時の流出は実測ゼロ (減速は短時間で済むため)。")]
+    public float carryDecel = 5f;
+    // 旋回の横加速度は v×ω。walk 1.5 m/s × 110°/s = 2.9 m/s^2 で、直進加速と同じ理屈で
+    // 満杯時に大量流出する (実測 67% まで減)。移動中だけ旋回速度を落として上限に収める。
+    [Tooltip("運搬中の旋回による横加速度上限 (m/s^2)。旋回速度を min(turnSpeed, これ/速度) に制限。静止時は制限なし。")]
+    public float carryTurnLatAccel = 1.4f;   // 追補 23: walkSpeed 1.8 で旋回 ~44°/s を維持
+    // その場旋回でも 28% 流出した (実測)。原因は旋回開始の瞬間に壁の接線速度が
+    // 0 -> 0.88 m/s (リム半径 0.46m × 110°/s) へステップして撹拌波が立つこと。
+    // 直進の加速ランプと同じ理屈で、旋回角速度もランプさせる。
+    [Tooltip("運搬中の旋回角加速度上限 (deg/s^2)。110°/s まで約 0.7 秒。0 で無効。")]
+    public float carryTurnAccel = 150f;
+    float smoothedTurnDegPerSec;
+    [Tooltip("壺を担いでいる間だけランプを使う (GoblinPotActions が更新)。壺なしは即応のまま。")]
+    [HideInInspector] public bool gentleAccel = true;
+    float smoothedSignedSpeed;   // 前後方向の平滑化済み速度 (+前 / -後)
+
+    // 2026-08-15 追加: ツボおろし/拾い上げ/転倒のワンショット再生中は移動入力を受けない
+    // (GoblinPotActions が立てる)。重力だけは効かせる。
+    [HideInInspector] public bool movementLocked;
+    NarrowBeamSensor beamSensor;   // 細い足場の上では減速する
+    GoblinSwimmer swimmer;         // 水中では浮力 + 流れ + 泳ぎ速度 (2026-08-16 川ギミック)
 
     CharacterController controller;
     Animator animator;
@@ -64,6 +126,8 @@ public class GoblinLocomotion : MonoBehaviour
         controller = GetComponent<CharacterController>();
         animator = GetComponent<Animator>();
         animator.applyRootMotion = false;
+        beamSensor = GetComponent<NarrowBeamSensor>();
+        swimmer = GetComponent<GoblinSwimmer>();
     }
 
     void Update()
@@ -74,6 +138,19 @@ public class GoblinLocomotion : MonoBehaviour
         {
             ApplyGravityOnly();
             animator.speed = 0f;
+            return;
+        }
+
+        if (movementLocked)
+        {
+            // ワンショットアニメ中: 入力は無視、重力だけ適用して静止する。
+            ApplyGravityOnly();
+            IsMoving = false; IsRunning = false; IsMovingBackward = false;
+            CurrentSpeed = 0f; TurnInputThisFrame = 0f;
+            smoothedSignedSpeed = 0f; smoothedTurnDegPerSec = 0f;
+            animator.speed = 0f;
+            animator.SetBool("IsMoving", false);
+            animator.SetBool("IsRunning", false);
             return;
         }
 
@@ -95,9 +172,28 @@ public class GoblinLocomotion : MonoBehaviour
         }
 
         TurnInputThisFrame = turnX;
-        if (Mathf.Abs(turnX) > 0.001f)
         {
-            transform.Rotate(0f, turnX * turnSpeed * Time.deltaTime, 0f, Space.World);
+            // 追補 13: 運搬中の旋回は (a) 横加速度 v×ω を carryTurnLatAccel に収める
+            // (移動中のみ)、(b) 角速度の変化自体を carryTurnAccel でランプさせる
+            // (その場旋回の撹拌波対策)。壺なしは従来どおり即応。
+            float targetTurn = 0f;
+            if (Mathf.Abs(turnX) > 0.001f)
+            {
+                float allowed = turnSpeed;
+                if (gentleAccel && carryTurnLatAccel > 0f)
+                {
+                    float v = Mathf.Abs(smoothedSignedSpeed);
+                    if (v > 0.05f)
+                        allowed = Mathf.Min(turnSpeed, carryTurnLatAccel / v * Mathf.Rad2Deg);
+                }
+                targetTurn = turnX * allowed;
+            }
+            if (gentleAccel && carryTurnAccel > 0f)
+                smoothedTurnDegPerSec = Mathf.MoveTowards(smoothedTurnDegPerSec, targetTurn, carryTurnAccel * Time.deltaTime);
+            else
+                smoothedTurnDegPerSec = targetTurn;
+            if (Mathf.Abs(smoothedTurnDegPerSec) > 0.001f)
+                transform.Rotate(0f, smoothedTurnDegPerSec * Time.deltaTime, 0f, Space.World);
         }
 
         bool movingForward = moveZ > 0.001f;
@@ -111,22 +207,53 @@ public class GoblinLocomotion : MonoBehaviour
         bool inJumpState = IsInJumpState();
 
         // Jump: Space. Only from the ground and only when not already mid-jump.
-        bool canJump = controller.isGrounded && !inJumpState;
+        // 水に浮いている間もジャンプ可 (川から岸へ上がる手段)。
+        bool inWaterNow = swimmer != null && swimmer.InWater;
+        bool canJump = (controller.isGrounded || inWaterNow) && !inJumpState;
         bool jumpTriggered = kb != null
             && kb.spaceKey.wasPressedThisFrame
-            && canJump;
-        if (jumpTriggered)
+            && canJump
+            && Time.time >= jumpSuppressedUntil;   // 追補 15: 着地クッション直後の誤ジャンプ防止
+
+        // 熱い床 (マグマ): 接地した瞬間に強制ハイジャンプ。着地するたび再発射されるので
+        // マグマ帯はバウンドしながら渡ることになる。クールダウンは接地 1 回分の多重発火防止。
+        if (hotFloorCooldown > 0f) hotFloorCooldown -= Time.deltaTime;
+        HotFloorSurface hot = null;
+        bool hotLaunch = !jumpTriggered && !inJumpState && controller.isGrounded
+                      && hotFloorCooldown <= 0f && (hot = HotFloorUnderfoot()) != null;
+
+        if (jumpTriggered || hotLaunch)
         {
             animator.SetTrigger("Jump");
             jumpHorizontalSpeed = IsRunning ? runSpeed : (IsMoving ? walkSpeed * walkJumpBoost : 0f);
             inJumpState = true; // about to transition this frame; treat as locked immediately
+            LastJumpStartTime = Time.time;
+            if (hotLaunch)
+            {
+                hotFloorCooldown = 0.35f;
+                hotJumpQueued = true;
+                hotFlightActive = true;
+            }
         }
 
         // Vertical velocity is resolved once per frame -- computing it separately inside
         // both the moving/stationary branches let a same-frame jump impulse get immediately
         // stomped back to -1 by the grounded check, so it lives here instead.
         if (jumpTriggered) verticalVelocity = jumpSpeed;
+        else if (hotLaunch) verticalVelocity = hot != null ? hot.launchSpeed : hotJumpSpeed;
         else ApplyVerticalVelocity();
+
+        // 熱い床ジャンプの滞空中は落下速度を制限する (8.5 のままだと流体が一撃 40% 吹き出す)。
+        // 追補 19: -5 → -6.5。パリー導入後は「生着地は痛い / パリーで守る」が狙いなので
+        // 少し痛くした。ふわっと感は残る。
+        if (hotFlightActive)
+        {
+            if (controller.isGrounded && !hotLaunch) hotFlightActive = false;
+            else verticalVelocity = Mathf.Max(verticalVelocity, -6.5f);
+        }
+        // 追補 25: パリー押下中はさらに柔らかく落ちる (膝で受ける)
+        if (Time.time < softLandUntil && !controller.isGrounded)
+            verticalVelocity = Mathf.Max(verticalVelocity, -parrySoftFallSpeed);
 
         Vector3 horizontalMove = Vector3.zero;
         if (inJumpState)
@@ -134,14 +261,61 @@ public class GoblinLocomotion : MonoBehaviour
             // Keep the takeoff direction/speed locked for the whole jump so late Space taps
             // (or releasing the arrow key mid-air) can't alter it.
             horizontalMove = transform.forward * jumpHorizontalSpeed;
+            // 着地後の減速ランプが離陸速度から始まるように起点を合わせる
+            smoothedSignedSpeed = jumpHorizontalSpeed;
+            RampingHard = false;
         }
-        else if (IsMoving)
+        else
         {
-            float speed = movingForward ? (IsRunning ? runSpeed : walkSpeed) : walkSpeed * backStepSpeedMultiplier;
-            horizontalMove = transform.forward * Mathf.Sign(moveZ) * speed;
+            float targetSigned = 0f;
+            if (IsMoving)
+            {
+                float speed = movingForward ? (IsRunning ? runSpeed : walkSpeed) : walkSpeed * backStepSpeedMultiplier;
+                // 細い足場の上は慎重に (NarrowBeamSurface.speedMultiplier)
+                if (beamSensor != null && beamSensor.OnBeam) speed *= beamSensor.SpeedMultiplier;
+                targetSigned = Mathf.Sign(moveZ) * speed;
+            }
+            // 追補 13: 運搬中は加減速をなだらかに。水中は浮力・流れ側の挙動を優先して従来通り。
+            if (gentleAccel && carryAccel > 0f && !inWaterNow)
+            {
+                float rate = Mathf.Abs(targetSigned) > Mathf.Abs(smoothedSignedSpeed) ? carryAccel : carryDecel;
+                smoothedSignedSpeed = Mathf.MoveTowards(smoothedSignedSpeed, targetSigned, rate * Time.deltaTime);
+                // 追補 22: 大きな加減速の最中 (差 0.25 m/s 超) は GoblinPotActions が壺内 calm を当てる
+                RampingHard = Mathf.Abs(targetSigned - smoothedSignedSpeed) > 0.25f;
+            }
+            else
+            {
+                smoothedSignedSpeed = targetSigned;
+                RampingHard = false;
+            }
+            horizontalMove = transform.forward * smoothedSignedSpeed;
         }
 
         CurrentSpeed = horizontalMove.magnitude;
+
+        // 水中 (2026-08-16 川ギミック): 入力は泳ぎ速度へ減速し、川の流れを加算。
+        // 浮力はバネ + 減衰で浮き目標 (水面 - 浸かり深さ + ぷかぷか) へ吸い付く。
+        // 重力も打ち消す (打ち消さないと平衡点が目標より下にずれる)。
+        // ジャンプ直後 (上昇 3 m/s 超) は浮力を切って飛び出しを妨げない。
+        if (inWaterNow)
+        {
+            horizontalMove = horizontalMove * swimmer.swimSpeedMultiplier + swimmer.Flow;
+            CurrentSpeed = horizontalMove.magnitude;
+            // 追補 25: 水底に足が着くと、接地リセット (verticalVelocity = -1) が浮力バネに
+            // 勝ち続けて底から浮上できなくなる (水深 1.2 化で顕在化)。水中の接地では
+            // リセットを打ち消してバネに任せる。
+            if (controller.isGrounded && verticalVelocity < 0f) verticalVelocity = 0f;
+            if (verticalVelocity < 3f)
+            {
+                // 明示オイラー積分は dt が跳ねると発散する (実測: エディタのヒッチで
+                // 5m 打ち上げられた)。dt をクランプし、臨界減衰 (c = 2√k)、
+                // 目標差と速度もクランプして絶対に暴れないようにする。
+                float dtc = Mathf.Min(Time.deltaTime, 0.05f);
+                float dy = Mathf.Clamp(swimmer.FloatTargetY - transform.position.y, -0.5f, 0.5f);
+                verticalVelocity += ((dy * 25f - verticalVelocity * 10f) - gravity) * dtc;
+                verticalVelocity = Mathf.Clamp(verticalVelocity, -4f, 3f);
+            }
+        }
 
         Vector3 fullMove = horizontalMove;
         fullMove.y = verticalVelocity;
@@ -192,8 +366,29 @@ public class GoblinLocomotion : MonoBehaviour
         }
     }
 
+    HotFloorSurface HotFloorUnderfoot()
+    {
+        var hits = Physics.RaycastAll(transform.position + Vector3.up * 0.2f, Vector3.down, 0.6f,
+                                      Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+        float best = float.MaxValue;
+        HotFloorSurface found = null;
+        foreach (var h in hits)
+        {
+            if (h.collider.transform.IsChildOf(transform)) continue;
+            if (h.distance < best)
+            {
+                best = h.distance;
+                found = h.collider.GetComponent<HotFloorSurface>();
+            }
+        }
+        return found;
+    }
+
     void ApplyGravityOnly()
     {
+        // 拾い上げの位置合わせ中などは CharacterController が一時的に無効になっている。
+        // 無効な controller に Move するとエラーログが出るだけなのでスキップする。
+        if (controller == null || !controller.enabled) return;
         ApplyVerticalVelocity();
         controller.Move(new Vector3(0f, verticalVelocity, 0f) * Time.deltaTime);
     }

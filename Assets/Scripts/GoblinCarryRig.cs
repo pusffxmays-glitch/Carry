@@ -54,6 +54,18 @@ public class GoblinCarryRig : MonoBehaviour
     public float pitchRangeDeg = 18f;
     [Tooltip("前後バランスに合わせて両手を前後へ動かす量 (m)。壺だけが傾いて手が置き去りに見えるのを防ぐ。")]
     public float pitchHandReach = 0.07f;
+    // 追補 18: 入力値 (armBalance/pitchBalance = プレイヤーの意図、UI のドットもこれ) と
+    // 「実際に壺へ適用される傾き」を分離する。従来は入力速度 (2.4-3.6/s ≈ 40-65°/s の
+    // 壺回転) がそのまま適用され、満杯時は**バランス操作をすること自体**がこぼれを生んで
+    // いた (実測: 坂の対抗チルトで 85%→54-55%、タップでも 40%)。適用側をスルーレート
+    // 制限することで「ゆっくり効く重い操作」になり、対抗チルトが成立する。
+    // 追補 23: 0.8 は「動き始めが遅い」(ユーザー) ため 1.8 (約 32°/s) へ。代償の
+    // スロッシュは操作中の自動 calm (GoblinPotActions が BalanceMoving を見る) で吸収。
+    [Tooltip("バランスの適用速度 (units/s)。壺の回転速度 ≒ これ × 18°。1.8 で約 32°/s。")]
+    public float balanceApplySpeed = 1.8f;
+    float appliedArmBalance, appliedPitchBalance;
+    /// <summary>適用中のバランスが動いているか (追補 23: 操作中 calm のトリガー)。</summary>
+    public bool BalanceMoving { get; private set; }
     // REDESIGNED 2026-08-10 per explicit request: the palm's front-back/left-right position must
     // stay fixed while only its HEIGHT changes, achieved through natural shoulder
     // abduction/adduction ("armpit opening/closing") plus elbow extension/flexion -- i.e. real
@@ -132,6 +144,16 @@ public class GoblinCarryRig : MonoBehaviour
     float rightUpLegLen, rightLegLen, rightFootLen;
     CharacterController controller;
     GoblinLocomotion locomotion;
+    // 2026-08-15 追加: ベイク済み全身クリップ (ツボおろし/転倒/壺なしロコモーション) の再生機と、
+    // 細い足場センサー (綱渡り歩容への切り替え)。どちらも無ければ従来どおり。
+    GoblinClipAnimator clipAnimator;
+    NarrowBeamSensor beamSensor;
+    GoblinSwimmer swimmer;         // 水中はバタ足歩容 (GoblinSwimGait) に切り替え
+    bool swimGaitActive;           // ClampFeetToGround を止めるためのフラグ (足が水中に潜るため)
+    /// <summary>よろけ強度 (0..1)。転倒トリガー (GoblinPotActions) が読む。</summary>
+    public float StaggerIntensity01 => staggerIntensity;
+    /// <summary>いまのよろけが右側 (root.right = +X) か。転倒の向き (ミラー再生) の判定に使う。</summary>
+    public bool StaggerLeanRightNow => staggerLeanRight;
     float staggerPhase, staggerIntensity;
     bool staggerLeanRight;
     float walkPhase, walkIntensity;
@@ -286,6 +308,9 @@ public class GoblinCarryRig : MonoBehaviour
         rightToeBone = GoblinBoneUtil.FindDeep(root, "LeftToeBase");
         controller = GetComponent<CharacterController>();
         locomotion = GetComponent<GoblinLocomotion>();
+        clipAnimator = GetComponent<GoblinClipAnimator>();
+        beamSensor = GetComponent<NarrowBeamSensor>();
+        swimmer = GetComponent<GoblinSwimmer>();
 
         bonesFound = leftUpperArm && leftForeArm && leftHand && rightUpperArm && rightForeArm && rightHand;
         if (!bonesFound)
@@ -329,11 +354,58 @@ public class GoblinCarryRig : MonoBehaviour
         return Vector3.zero;
     }
 
+    // パリー成功時の高速リセンタリング (追補 19)。この時刻まで適用スルーを増速し、
+    // 入力値も 0 へ引き戻す。強 calm 下で回るので横スロッシュごと吸収される。
+    float recenterUntil = -1f;
+    public void CushionRecenter(float seconds) { recenterUntil = Time.time + seconds; }
+
+    // 適用値を入力値へスルーレート制限つきで追従させる (追補 18)。
+    void ApplyBalanceSlew(float dt)
+    {
+        bool recenter = Time.time < recenterUntil;
+        if (recenter)
+        {
+            armBalance = Mathf.MoveTowards(armBalance, 0f, 4f * dt);
+            pitchBalance = Mathf.MoveTowards(pitchBalance, 0f, 4f * dt);
+        }
+        float rate = recenter ? 2.5f : balanceApplySpeed;
+        float step = rate > 0f ? rate * dt : 999f;
+        appliedArmBalance = Mathf.MoveTowards(appliedArmBalance, armBalance, step);
+        appliedPitchBalance = Mathf.MoveTowards(appliedPitchBalance, pitchBalance, step);
+        // 入力と適用値に差が残っている = 壺が回転している最中
+        BalanceMoving = Mathf.Abs(armBalance - appliedArmBalance) > 0.03f
+                     || Mathf.Abs(pitchBalance - appliedPitchBalance) > 0.03f;
+    }
+
+    /// <summary>バランス入力と適用値を即座にゼロへ戻す (デバッグワープ用)。</summary>
+    public void ResetBalance()
+    {
+        armBalance = pitchBalance = 0f;
+        appliedArmBalance = appliedPitchBalance = 0f;
+    }
+
+    /// <summary>外部から小さなバランス外乱を与える (追補 15: 着地クッションの早すぎ押し
+    /// ペナルティ)。armBalance 換算なので ±1 が最大傾き入力に相当する。</summary>
+    public void NudgeBalance(float amount)
+    {
+        armBalance = Mathf.Clamp(armBalance + amount, -1f, 1f);
+    }
+
     void Update()
     {
+        // クリップ再生中 (ツボおろし/転倒/壺なし) は矢印キーのバランス入力を受けない。
+        // 壺を持っていないのにバランスパッドのドットだけ動く、を防ぐ。
+        if (clipAnimator != null && clipAnimator.IsDrivingBody)
+        {
+            armBalance = Mathf.MoveTowards(armBalance, 0f, 4f * Time.deltaTime);
+            pitchBalance = Mathf.MoveTowards(pitchBalance, 0f, 4f * Time.deltaTime);
+            ApplyBalanceSlew(Time.deltaTime);
+            return;
+        }
         var kb = Keyboard.current;
         if (kb == null) return;
         float dt = Time.deltaTime;
+        ApplyBalanceSlew(dt);
         // SWAPPED 2026-08-12 per explicit request ("QキーとEキーの機能を逆にしたい。感覚的に
         //逆のほうがやりやすそう"): E now raises the left arm (lowers right), Q now raises the
         // right arm (lowers left) -- opposite of the original mapping.
@@ -351,6 +423,16 @@ public class GoblinCarryRig : MonoBehaviour
 
     void LateUpdate()
     {
+        // 2026-08-15: ベイク済みクリップが体を駆動している間 (ツボおろし/転倒/壺なし) は
+        // 運搬パイプライン (BasePose + 歩行 + よろけ + 腕 IK + 壺配置) を丸ごと休止する。
+        // 壺はクリップ側が駆動するか、地面に置かれたまま (子から外れている) なので触らない。
+        if (clipAnimator != null && clipAnimator.ApplyBody())
+        {
+            staggerIntensity = 0f;
+            walkIntensity = 0f;
+            return;
+        }
+
         ApplyBasePose();
         ApplyWalkCycle();
         ApplyStagger();
@@ -374,9 +456,14 @@ public class GoblinCarryRig : MonoBehaviour
             // rightUpperArm the VISUAL left arm, confirmed by the user after the Q/E key-mapping
             // fix. armBalance>0 ("Q", left up/right down) must raise the visual-left arm
             // (rightUpperArm) and lower the visual-right arm (leftUpperArm), hence the sign flip.
-            float armPush = -pitchBalance * pitchHandReach;   // 後傾で手を手前へ引く
-            SolveArm(leftUpperArm, leftForeArm, leftHand, -armBalance, leftNeutral, leftUpperLen, leftForeLen, leftPalmSign, armBob, armPush);
-            SolveArm(rightUpperArm, rightForeArm, rightHand, armBalance, rightNeutral, rightUpperLen, rightForeLen, rightPalmSign, armBob, armPush);
+            float armPush = -appliedPitchBalance * pitchHandReach;   // 後傾で手を手前へ引く
+            SolveArm(leftUpperArm, leftForeArm, leftHand, -appliedArmBalance, leftNeutral, leftUpperLen, leftForeLen, leftPalmSign, armBob, armPush);
+            SolveArm(rightUpperArm, rightForeArm, rightHand, appliedArmBalance, rightNeutral, rightUpperLen, rightForeLen, rightPalmSign, armBob, armPush);
+
+            // 追補 25: 直前に終わったワンショットの最終ポーズを 0.25 秒かけて混ぜ、
+            // 「転倒復帰した瞬間に通常ポーズへパッと切り替わる」唐突さを消す。
+            // 壺配置 (下) より前に呼ぶこと — 壺は手ボーンの位置から置かれるため。
+            if (clipAnimator != null) clipAnimator.ApplyHandoverBlend();
         }
 
         // Pot bottom anchored at the midpoint between the two palms (its own object origin is
@@ -408,7 +495,7 @@ public class GoblinCarryRig : MonoBehaviour
             // 前後バランス (上下キー) は、体の姿勢に対する **ピッチ** として足す。
             // 左右バランスが手の高さ差から出てくるのに対し、こちらは両手が同じだけ動くので
             // 手の位置からは傾きが出ない。壺の回転として明示的に与える必要がある。
-            Quaternion basePose = Posture.rotation * Quaternion.Euler(-pitchBalance * pitchRangeDeg, 0f, 0f);
+            Quaternion basePose = Posture.rotation * Quaternion.Euler(-appliedPitchBalance * pitchRangeDeg, 0f, 0f);
 
             pot.position = handMid;
             pot.rotation = Quaternion.AngleAxis(armRoll, fwd) * basePose;
@@ -488,18 +575,42 @@ public class GoblinCarryRig : MonoBehaviour
     // pop, and running scales the cycle rate so the stride keeps pace with CurrentSpeed.
     void ApplyWalkCycle()
     {
-        bool moving = locomotion != null && locomotion.IsMoving;
+        // 水中 (2026-08-16 川ギミック): バタ足歩容。浮かんでいる間は入力が無くても
+        // 足を動かし続ける (立ち泳ぎ) ので、moving 扱いにする。
+        swimGaitActive = swimmer != null && swimmer.InWater;
+        // 2026-08-15: 細い足場 (NarrowBeamSurface) の上では綱渡り歩容 (GoblinRopeGait) に
+        // 切り替える。足をほぼ一直線に置き、腰を支持脚側へ移す慎重な歩き。
+        bool ropeGait = !swimGaitActive && beamSensor != null && beamSensor.OnBeam;
+        // 追補 25: ビーム上では停止中も歩容を維持する (moving 扱い)。従来は停止すると
+        // walkIntensity が減衰して通常の突っ立ちポーズに戻ってしまっていた (ユーザー報告)。
+        // 位相は下の Max(0.15, speed) によりゆっくり進み、「バランスを取りながらの足踏み」になる。
+        bool moving = swimGaitActive || ropeGait || (locomotion != null && locomotion.IsMoving);
         float target = moving ? 1f : 0f;
         walkIntensity = Mathf.MoveTowards(walkIntensity, target, walkBlendSpeed * Time.deltaTime);
 
         if (walkIntensity > 0.001f)
         {
-            // 基準は locomotion.walkSpeed ではなく walkStrideRefSpeed (宣言部の注記を参照)。
-            // これで歩幅がゲームプレイ速度から独立し、walkSpeed を上げても足滑りしない。
-            float speedRatio = locomotion != null
-                ? Mathf.Max(0.2f, locomotion.CurrentSpeed / Mathf.Max(0.01f, walkStrideRefSpeed))
-                : 1f;
-            walkPhase = Mathf.Repeat(walkPhase + Time.deltaTime * speedRatio / Mathf.Max(0.01f, walkCycleDuration), 1f);
+            float dtw = Time.deltaTime;
+            if (swimGaitActive)
+            {
+                // バタ足: 停止中もゆっくり、泳ぐと速く
+                float speed = locomotion != null ? locomotion.CurrentSpeed : 0f;
+                walkPhase = Mathf.Repeat(walkPhase + dtw * (0.55f + 0.20f * speed), 1f);
+            }
+            else if (ropeGait)
+            {
+                float speed = locomotion != null ? Mathf.Max(0.15f, locomotion.CurrentSpeed) : 0.8f;
+                walkPhase = Mathf.Repeat(walkPhase + dtw * speed / GoblinRopeGait.StrideLength, 1f);
+            }
+            else
+            {
+                // 基準は locomotion.walkSpeed ではなく walkStrideRefSpeed (宣言部の注記を参照)。
+                // これで歩幅がゲームプレイ速度から独立し、walkSpeed を上げても足滑りしない。
+                float speedRatio = locomotion != null
+                    ? Mathf.Max(0.2f, locomotion.CurrentSpeed / Mathf.Max(0.01f, walkStrideRefSpeed))
+                    : 1f;
+                walkPhase = Mathf.Repeat(walkPhase + dtw * speedRatio / Mathf.Max(0.01f, walkCycleDuration), 1f);
+            }
         }
         else
         {
@@ -508,13 +619,47 @@ public class GoblinCarryRig : MonoBehaviour
 
         if (walkIntensity <= 0.001f || hipsBone == null) return;
 
-        GoblinWalk.SampleHips(walkPhase, out Vector3 hy, out Vector3 hx);
-        GoblinWalk.SampleLeftUpLeg(walkPhase, out Vector3 luy, out Vector3 lux);
-        GoblinWalk.SampleLeftLeg(walkPhase, out Vector3 lly, out Vector3 llx);
-        GoblinWalk.SampleRightUpLeg(walkPhase, out Vector3 ruy, out Vector3 rux);
-        GoblinWalk.SampleRightLeg(walkPhase, out Vector3 rly, out Vector3 rlx);
-        GoblinWalk.SampleLeftFoot(walkPhase, out Vector3 lfy, out Vector3 lfx);
-        GoblinWalk.SampleRightFoot(walkPhase, out Vector3 rfy, out Vector3 rfx);
+        Vector3 hy, hx, luy, lux, lly, llx, ruy, rux, rly, rlx, lfy, lfx, rfy, rfx;
+        if (swimGaitActive)
+        {
+            GoblinSwimGait.SampleHips(walkPhase, out hy, out hx);
+            GoblinSwimGait.SampleLeftUpLeg(walkPhase, out luy, out lux);
+            GoblinSwimGait.SampleLeftLeg(walkPhase, out lly, out llx);
+            GoblinSwimGait.SampleRightUpLeg(walkPhase, out ruy, out rux);
+            GoblinSwimGait.SampleRightLeg(walkPhase, out rly, out rlx);
+            GoblinSwimGait.SampleLeftFoot(walkPhase, out lfy, out lfx);
+            GoblinSwimGait.SampleRightFoot(walkPhase, out rfy, out rfx);
+            // 後傾 + ぷかぷかは腰の位置が本体。ネイティブ座標系 (GroundOffset 込み) で適用。
+            Vector3 hp = GoblinSwimGait.SampleHipsPosNative(walkPhase);
+            Vector3 hipsTarget = Posture.position + Posture.rotation * hp;
+            hipsBone.position = Vector3.Lerp(hipsBone.position, hipsTarget, walkIntensity);
+        }
+        else if (ropeGait)
+        {
+            GoblinRopeGait.SampleHips(walkPhase, out hy, out hx);
+            GoblinRopeGait.SampleLeftUpLeg(walkPhase, out luy, out lux);
+            GoblinRopeGait.SampleLeftLeg(walkPhase, out lly, out llx);
+            GoblinRopeGait.SampleRightUpLeg(walkPhase, out ruy, out rux);
+            GoblinRopeGait.SampleRightLeg(walkPhase, out rly, out rlx);
+            GoblinRopeGait.SampleLeftFoot(walkPhase, out lfy, out lfx);
+            GoblinRopeGait.SampleRightFoot(walkPhase, out rfy, out rfx);
+            // ロープ歩きは腰の位置 (低め + 支持脚側へのスウェイ) が本体なので、位置も適用する。
+            // SampleHipsPos は接地正規化済み (クリップ内 GroundY を減算済み) なので、
+            // ここで GroundOffset を足してはいけない (二重加算になる)。
+            Vector3 hp = GoblinRopeGait.SampleHipsPos(walkPhase);
+            Vector3 hipsTarget = Posture.position + Posture.rotation * hp;
+            hipsBone.position = Vector3.Lerp(hipsBone.position, hipsTarget, walkIntensity);
+        }
+        else
+        {
+            GoblinWalk.SampleHips(walkPhase, out hy, out hx);
+            GoblinWalk.SampleLeftUpLeg(walkPhase, out luy, out lux);
+            GoblinWalk.SampleLeftLeg(walkPhase, out lly, out llx);
+            GoblinWalk.SampleRightUpLeg(walkPhase, out ruy, out rux);
+            GoblinWalk.SampleRightLeg(walkPhase, out rly, out rlx);
+            GoblinWalk.SampleLeftFoot(walkPhase, out lfy, out lfx);
+            GoblinWalk.SampleRightFoot(walkPhase, out rfy, out rfx);
+        }
 
         BlendAimFull(hipsBone, hy, hx, walkIntensity);
         ApplyLegChain(leftUpLegBone, leftLegBone, leftFootBone, leftToeBone,
@@ -704,6 +849,8 @@ public class GoblinCarryRig : MonoBehaviour
     void ClampFeetToGround()
     {
         if (leftFootBone == null || rightFootBone == null) return;
+        // 水中のバタ足は足が意図的に基準より下 (水面下) へ潜るので、持ち上げ補正をしない。
+        if (swimGaitActive) return;
         // + GroundOffset.y: PosOf() returns the raw (un-offset) captured value; ApplyBasePose adds
         // GroundOffset before placing any bone, so the baseline compared against here must too.
         float baseFootY = Mathf.Min(PosOf("LeftFoot").y, PosOf("RightFoot").y) + GroundOffset.y;

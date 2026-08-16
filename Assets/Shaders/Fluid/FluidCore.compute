@@ -126,6 +126,10 @@ float BoundaryViscosity;   // §2: 接線方向の運動量伝達。法線方向
 float CohesionStrength;    // §9 Akinci
 float CurvatureStrength;   // §9 Akinci
 float MaxSpeed;
+// 壺内ゲート限定のクランプ (2026-08-16)。通常は MaxSpeed と同値。おろし/拾い/熱い床
+// ジャンプ中だけ CPU 側が絞る。壺外 (落下中の液滴・地面の水たまり) は MaxSpeed のままに
+// することで、「こぼれた液体がスローモーションで落ちる」のを防ぐ。
+float MaxSpeedPot;
 
 float3 GridOrigin;
 float  CellSize;
@@ -393,25 +397,30 @@ void ScatterParticles(uint3 id : SV_DispatchThreadID)
 // 速く動くたびに静止した水たまりが引きずられてしまう。ゲートはプロファイルバッファに
 // 依存しない円筒近似 (半径 1.5 倍・上下に余裕) — Integrate には PotProfileBuf が
 // 束縛されていないので、ここでプロファイルを読んではいけない。
+bool InPotGate(float3 worldPos)
+{
+    if (SafetyEnabled == 0) return false;
+    float3 pl = mul(WorldToPotSafety, float4(worldPos, 1.0)).xyz;
+    float span = max(PotRimY - PotFloorY, 1e-3);
+    return pl.y > PotMeshMinY - 0.5 * span && pl.y < PotRimY + span &&
+           dot(pl.xz, pl.xz) < PotMaxRadius * PotMaxRadius * 2.25;
+}
+
 float3 SpeedClampRef(float3 worldPos)
 {
-    if (SafetyEnabled != 0)
-    {
-        float3 pl = mul(WorldToPotSafety, float4(worldPos, 1.0)).xyz;
-        float span = max(PotRimY - PotFloorY, 1e-3);
-        if (pl.y > PotMeshMinY - 0.5 * span && pl.y < PotRimY + span &&
-            dot(pl.xz, pl.xz) < PotMaxRadius * PotMaxRadius * 2.25)
-            return ContainerLinearVelocity;
-    }
-    return float3(0, 0, 0);
+    return InPotGate(worldPos) ? ContainerLinearVelocity : float3(0, 0, 0);
 }
 
 float3 ClampSpeed(float3 v, float3 worldPos)
 {
-    float3 vref = SpeedClampRef(worldPos);
+    // 壺内は容器基準 + MaxSpeedPot、壺外は世界基準 + MaxSpeed。
+    // calm (MaxSpeedPot を絞る) の間も、こぼれた液滴は通常速度で落ちる。
+    bool gated = InPotGate(worldPos);
+    float3 vref = gated ? ContainerLinearVelocity : float3(0, 0, 0);
+    float lim = gated ? MaxSpeedPot : MaxSpeed;
     float3 rel = v - vref;
     float sp = length(rel);
-    if (sp > MaxSpeed) rel *= MaxSpeed / sp;
+    if (sp > lim) rel *= lim / sp;
     return vref + rel;
 }
 

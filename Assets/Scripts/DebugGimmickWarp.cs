@@ -84,6 +84,11 @@ public class DebugGimmickWarp : MonoBehaviour
 
         if (slide != null) slide.ResetSlide();   // 前の場所の滑りを持ち越さない
 
+        // 2026-08-15: 壺を下ろした状態やツボおろし再生中にワープしても詰まないよう、
+        // ワープ時は必ず「壺を担いだ状態」へ戻す (ポーションも満タンに戻すのだから一貫する)。
+        var potActions = GetComponent<GoblinPotActions>();
+        if (potActions != null) potActions.ForceCarry();
+
         pendingRefill = refillOnWarp;
         if (logWarp)
             Debug.Log($"DebugGimmickWarp: 「{label}」へワープ {pos}");

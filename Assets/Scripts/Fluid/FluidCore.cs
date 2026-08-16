@@ -67,6 +67,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 8 m/s だと 3.3m も噴き上がって「発散」に見える。5 m/s なら 1.3m。
     // 壺の直径が 0.9m なので、この程度が運搬中の跳ねとして妥当。
     public float maxSpeed = 5f;
+    // 壺内 (容器基準ゲート内) 限定の速度クランプ。負なら maxSpeed と同じ。
+    // おろし/拾い/熱い床ジャンプ中に GoblinPotActions が一時的に絞る (calm)。
+    // 壺外の液滴・水たまりには適用しないので、こぼれがスローモーションにならない。
+    [HideInInspector] public float maxSpeedInPot = -1f;
 
     [Header("Fill / region")]
     [Tooltip("容器の内容積に対する初期充填率。")]
@@ -1067,6 +1071,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("CohesionStrength", cohesionStrength);
         fluidCompute.SetFloat("CurvatureStrength", curvatureStrength);
         fluidCompute.SetFloat("MaxSpeed", maxSpeed);
+        fluidCompute.SetFloat("MaxSpeedPot", maxSpeedInPot > 0f ? maxSpeedInPot : maxSpeed);
 
         fluidCompute.SetVector("GridOrigin", gridOrigin);
         fluidCompute.SetFloat("CellSize", cellSize);
