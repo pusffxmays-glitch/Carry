@@ -1,0 +1,921 @@
+// ============================================================================================
+// FluidCore.compute -- Position Based Fluids, World Space, GPU.
+//
+// 設計書 FLUID_DESIGN.md の §2/§3/§6/§7/§8/§9/§10 に対応する。
+//
+// ORIGIN / LICENCE: first-party code, written from scratch. 参照したのは論文のアルゴリズムのみ
+// (PBF: Macklin & Muller 2013 / Boundary handling + Surface tension: Akinci et al. 2012, 2013)。
+// これらは公表されたアルゴリズムであってコード著作物ではないため、ライセンス義務は発生しない。
+//
+// 設計上ここで絶対に守っていること:
+//  * 外力は World Gravity のみ。疑似重力 (-a_pot) は存在しない (§2)。容器の運動は
+//    Moving Boundary が実際の運動量として伝える。
+//  * 壁は Boundary Particle として密度計算に参加する = 圧力ソルバーの「内側」にいる (§10)。
+//    位置クランプで壁を表現しない。
+//  * SafetyCorrection は例外処理であり、その位置差は速度に変換しない (§10)。
+// ============================================================================================
+
+#pragma kernel UpdateBoundary
+#pragma kernel ClearCellCounts
+#pragma kernel BuildSortPositions
+#pragma kernel CountParticlesPerCell
+#pragma kernel ScanLocal
+#pragma kernel ScanBlockSums
+#pragma kernel ScanAddOffsets
+#pragma kernel ScatterParticles
+#pragma kernel Integrate
+#pragma kernel ComputeDensityLambda
+#pragma kernel ComputeDeltaP
+#pragma kernel ApplyDeltaP
+#pragma kernel ComputeVelocity
+#pragma kernel ComputeNormals
+#pragma kernel ApplyViscosityTension
+#pragma kernel Finalize
+#pragma kernel ClassifyRegions
+#pragma kernel TeleportFluid
+
+#define THREADS 256
+#define SCAN_BLOCK 256
+
+// ---------------------------------------------------------------------------- fluid state
+//
+// 読み取り専用の使い方をするバッファは SRV (StructuredBuffer) として別名で宣言してある。
+// D3D11 の UAV スロット上限は 8 で、全部を RWStructuredBuffer にすると
+// ApplyViscosityTension が 9 個使ってしまい「more uavs than supported」でカーネルごと
+// 実行されない（＝粘性が一切効かず流体が発散する）。同じ GraphicsBuffer を、書くカーネルには
+// RW 名で、読むカーネルには RO 名でバインドする。1 つのカーネルに両方を同時にバインドしない
+// ことは C# 側の per-kernel バインドで保証する。
+RWStructuredBuffer<float3> Positions;
+// 分類カーネル用の読み取り専用エイリアス。
+// RimOpening 判定が液体を押し出すことがコード上不可能になるよう、
+// ClassifyRegions には位置・速度を SRV としてしかバインドしない (§11/追加修正1)。
+StructuredBuffer<float3>   PositionsIn;
+StructuredBuffer<float3>   VelocitiesIn;   // 分類カーネル用（CFL の実測最大速度を取るため）
+RWStructuredBuffer<float3> PredictedPositions;
+StructuredBuffer<float3>   PredictedIn;
+RWStructuredBuffer<float3> Velocities;
+RWStructuredBuffer<float3> DeltaP;
+StructuredBuffer<float3>   VelocityIn;        // = DeltaP（ComputeVelocity が新速度を置いた後）
+RWStructuredBuffer<float3> Normals;
+StructuredBuffer<float3>   NormalsIn;
+RWStructuredBuffer<float3> SafetyCorrection;
+RWStructuredBuffer<float>  Densities;
+StructuredBuffer<float>    DensitiesIn;
+RWStructuredBuffer<float>  Lambdas;
+StructuredBuffer<float>    LambdasIn;
+
+// ---------------------------------------------------------------------------- boundary
+// 境界は「動く壁」。容器ローカルに固定された座標を、毎サブステップ World へ変換し直す。
+// 速度は V_b = v_container + cross(omega_container, p_b - center) (§3)。
+// これが Fluid への容器運動の唯一の伝達経路であり、疑似重力は存在しない (§2)。
+StructuredBuffer<float3>   BoundaryLocal;
+RWStructuredBuffer<float3> BoundaryPositionsRW;
+RWStructuredBuffer<float3> BoundaryVelocitiesRW;
+StructuredBuffer<float3>   BoundaryPositions;
+StructuredBuffer<float3>   BoundaryVelocities;
+StructuredBuffer<float>    BoundaryVolumes;
+
+float4x4 BoundaryToWorld;
+float3   ContainerLinearVelocity;
+float3   ContainerAngularVelocity;
+float3   ContainerCenter;
+uint     BoundaryCount;
+
+// ---------------------------------------------------------------------------- sorting
+RWStructuredBuffer<float3> SortPositions;
+StructuredBuffer<float3>   SortPositionsIn;
+RWStructuredBuffer<uint>   CellCounts;
+StructuredBuffer<uint>     CellCountsIn;
+RWStructuredBuffer<uint>   CellStart;
+StructuredBuffer<uint>     CellStartIn;
+RWStructuredBuffer<uint>   CellCursor;
+RWStructuredBuffer<uint>   BlockSums;
+RWStructuredBuffer<uint>   SortedIndices;
+StructuredBuffer<uint>     SortedIndicesIn;
+
+// ---------------------------------------------------------------------------- uniforms
+uint  FluidCount;
+uint  TotalCount;          // FluidCount + BoundaryCount
+uint  CellTotal;
+uint  BlockCount;
+
+float DeltaTime;
+float3 Gravity;            // §2: Physics.gravity のみ
+
+float KernelRadius;        // h
+float RestDensity;         // rho0
+float ParticleMass;        // m0
+float RelaxationEps;
+float MinDenom;            // lambda の分母の下限（自由表面の暴走を止める）
+float BoundaryPressureScale;  // 境界からの圧力押し戻しの強さ（切り分け用に外出し）
+// 位置補正の緩和係数 (SOR)。1 = 完全な Newton ステップ。
+// これが無いと補正が毎反復で行き過ぎ、その位置差が v=(p'-p)/dt で速度に変わり、
+// サブステップごとにエネルギーが注入されて流体が浮き上がる。実測: 反復 0 で完全静止
+// (topY 0.425)、反復 1 で 1.197、反復 4 で 1.350 と反復数に比例して吹き上がった。
+float SolverRelaxation;
+float ArtificialPressure;
+float ArtificialPressureQ;
+float MaxDeltaP;           // 1反復あたりの位置補正上限
+
+float ViscosityXSPH;
+float ViscosityRefStep;    // 粘性係数の基準時間刻み。ブレンド率 = 係数 * dt / これ
+float BoundaryViscosity;   // §2: 接線方向の運動量伝達。法線方向(圧力)とは直交する
+float CohesionStrength;    // §9 Akinci
+float CurvatureStrength;   // §9 Akinci
+float MaxSpeed;
+
+float3 GridOrigin;
+float  CellSize;
+uint3  GridSize;
+
+float3 BoundsMin;
+float3 BoundsMax;
+float  BoundsRestitution;
+float  BoundsFriction;
+
+// ---- SafetyCorrection (§10) ----
+// 通常時の壁は Boundary Particles + PBF + CFL が担当する。これは「数値的不安定や
+// 極端な一時貫通」だけを拾う最終安全装置であり、常態化したら破綻とみなす指標を出す。
+// 補正は ComputeVelocity より後（Finalize）で行うため、構造的に速度へ変換されない。
+StructuredBuffer<float> PotProfileBuf;
+uint   PotProfileCount;
+float  PotFloorY;
+float  PotRimY;
+float  SafetyTopY;   // ここより上では SafetyCorrection を一切かけない（リムは出口であって壁ではない）
+float  PotMaxRadius;
+float  PotRimR;            // リム半径。Rim Opening 領域の判定に使う
+float  SafetyMargin;
+int    SafetyEnabled;
+float4x4 WorldToPotSafety;
+float4x4 PotToWorldSafety;
+RWStructuredBuffer<uint> SafetyCounters;   // [0] = 発動粒子数
+
+// ---- 領域分類 / Overflow 判定 (§11, §14) ----
+// ここは「観測」しかしない。粒子の生成も移動も速度変更も一切行わない。
+RWStructuredBuffer<uint> RegionFlags;
+RWStructuredBuffer<uint> RegionCounters;
+// [0]=Inside [1]=RimOpening [2]=Airborne [3]=Ground [4]=Retired
+// [5]=正常Overflow遷移 [6]=貫通(異常) [7]=流体の最大速さ（固定小数 x1000）
+//
+// Retired (§16/§20): 地面に一定時間留まった粒子は「ゲーム世界から消滅した」扱いになる。
+// 消滅の実行は Finalize が行い（位置を動かすのは物理カーネルの仕事）、
+// ここでは観測して数えるだけ。
+RWStructuredBuffer<float> Ages;            // 地面に留まっている時間 (s)
+// 0 = 通常, 1 = Retired（世界から消滅・回収不可）, 2 = Settled（地面に取り残された水たまり）
+//
+// Settled: 地面に落ちた液体は、ゴブリンが歩いて計算領域が離れても
+// **その場に残っていてほしい**。領域の外へ出た地面の液体は、消すのではなく
+// その場で凍結する。位置はそのままなので、戻ってくれば再び描画される。
+// Mass の扱いは Ground のまま（§16 で「将来的に回収可能」な分類）。
+RWStructuredBuffer<uint>  RetiredFlags;
+StructuredBuffer<uint>    RetiredFlagsIn;  // 分類カーネル用の読み取り専用エイリアス
+float  GroundLifetime;                     // これを超えたら Retired
+float3 RetiredPark;                        // Retired 粒子の待避先（領域外）
+// ---- Waterfall Recycle (stage branch only -- not present in the Player-branch pot system) ----
+// Retired(state==1) の粒子を RetiredPark へ駐め置く代わりにこの箱内へ再配置し、
+// 有限粒子数を循環させて滝が無限に流れ続けているように見せる。
+float3 SpawnBoxMin;
+float3 SpawnBoxSize;
+float3 SpawnVelocity;
+uint   FrameSeed;
+float RimOpeningHeight;
+float GroundY;
+float GroundBandHeight;   // 地面から上へこの高さまでを Ground 領域とみなす (§20)
+// 壁際の粒子は中心が R(y) をわずかに超えた位置で静止しうる。これを「壁抜け」と
+// 数えないための許容幅（local 単位、粒子半径程度）。
+float WallTolerance;
+
+// ---- Terrain-hugging slope collision (stage branch only -- the waterfall cascades down the
+// lake cliff's actual slope instead of free-falling to a single flat GroundY plane). 1D height
+// profile sampled from the real Terrain along the fall column (x fixed, z varying); the local
+// surface normal is reconstructed from the profile's finite difference so particles bounce off
+// the real terrain shape instead of an idealized ramp. ----
+StructuredBuffer<float> SlopeProfileBuf;
+uint  SlopeProfileCount;
+float SlopeZStart;   // world Z at profile index 0 (closer to the pool, less negative)
+float SlopeZEnd;     // world Z at profile index (count-1) (further back/up the slope, more negative)
+float SlopeRestitution; // separate, bouncier restitution for slope contact (BoundsRestitution is tuned for the pool floor/box safety net, not the cascade)
+float SlopeFriction;    // separate, lighter friction for slope contact -- keeps downhill momentum instead of gluing to the rock
+
+// ============================================================================ SPH kernels
+static const float PI = 3.14159265359;
+
+float Poly6(float r2, float h)
+{
+    float h2 = h * h;
+    if (r2 >= h2) return 0.0;
+    float d = h2 - r2;
+    float h9 = h2 * h2 * h2 * h2 * h;
+    return 315.0 / (64.0 * PI * h9) * d * d * d;
+}
+
+float3 SpikyGrad(float3 rij, float h)
+{
+    float r = length(rij);
+    if (r >= h || r < 1e-7) return float3(0, 0, 0);
+    float h6 = h * h * h * h * h * h;
+    float d = h - r;
+    return rij * (-45.0 / (PI * h6) * d * d / r);
+}
+
+// Akinci et al. 2013 の cohesion スプライン。h で 0 に落ちる。
+float CohesionKernel(float r, float h)
+{
+    if (r <= 0.0 || r >= h) return 0.0;
+    float c = 32.0 / (PI * pow(h, 9));
+    float hr = h - r;
+    if (r > h * 0.5) return c * hr * hr * hr * r * r * r;
+    return c * (2.0 * hr * hr * hr * r * r * r - pow(h, 6) / 64.0);
+}
+
+// ============================================================================ grid helpers
+int3 CellCoord(float3 p) { return (int3)floor((p - GridOrigin) / CellSize); }
+bool CellValid(int3 c) { return all(c >= 0) && all((uint3)c < GridSize); }
+uint CellIndex(int3 c) { return (uint)c.x + (uint)c.y * GridSize.x + (uint)c.z * GridSize.x * GridSize.y; }
+
+// ============================================================================ teleport (§21)
+// 容器が瞬間移動したときに、中身を同じ剛体変換で連れて行く。
+// 相対速度は与えない（速度はワールドの回転ぶんだけ向きを変える）。
+float4x4 TeleportMatrix;
+
+[numthreads(THREADS, 1, 1)]
+void TeleportFluid(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+    Positions[i] = mul(TeleportMatrix, float4(Positions[i], 1.0)).xyz;
+    Velocities[i] = mul((float3x3)TeleportMatrix, Velocities[i]);
+}
+
+// ============================================================================ moving boundary
+[numthreads(THREADS, 1, 1)]
+void UpdateBoundary(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= BoundaryCount) return;
+
+    float3 w = mul(BoundaryToWorld, float4(BoundaryLocal[i], 1.0)).xyz;
+    BoundaryPositionsRW[i] = w;
+    BoundaryVelocitiesRW[i] = ContainerLinearVelocity
+                            + cross(ContainerAngularVelocity, w - ContainerCenter);
+}
+
+// ============================================================================ sorting passes
+[numthreads(THREADS, 1, 1)]
+void ClearCellCounts(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= CellTotal) return;
+    CellCounts[id.x] = 0;
+}
+
+// 流体は予測位置、境界は World 位置を探索座標にする。
+[numthreads(THREADS, 1, 1)]
+void BuildSortPositions(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= TotalCount) return;
+    SortPositions[i] = (i < FluidCount) ? PredictedPositions[i] : BoundaryPositions[i - FluidCount];
+}
+
+[numthreads(THREADS, 1, 1)]
+void CountParticlesPerCell(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= TotalCount) return;
+    int3 c = CellCoord(SortPositions[i]);
+    if (!CellValid(c)) return;
+    uint dummy;
+    InterlockedAdd(CellCounts[CellIndex(c)], 1, dummy);
+}
+
+// 3段スキャン: ブロック内排他スキャン -> ブロック合計のスキャン -> ブロックオフセット加算。
+// カウンティングソートを採用した理由は §7 の設計注記を参照（セル毎の粒子数に上限を作らない
+// 完全ソートであることが要件。Bitonic だと 105 ディスパッチ必要で、これは 4 で済む）。
+groupshared uint gScan[SCAN_BLOCK];
+
+[numthreads(SCAN_BLOCK, 1, 1)]
+void ScanLocal(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
+{
+    uint i = id.x;
+    uint t = tid.x;
+    gScan[t] = (i < CellTotal) ? CellCounts[i] : 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    // Hillis-Steele inclusive scan
+    [unroll] for (uint offset = 1; offset < SCAN_BLOCK; offset <<= 1)
+    {
+        uint v = (t >= offset) ? gScan[t - offset] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        gScan[t] += v;
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    uint inclusive = gScan[t];
+    if (i < CellTotal) CellStart[i] = inclusive - ((i < CellTotal) ? CellCounts[i] : 0); // exclusive
+    if (t == SCAN_BLOCK - 1) BlockSums[gid.x] = inclusive;
+}
+
+[numthreads(1024, 1, 1)]
+void ScanBlockSums(uint3 tid : SV_GroupThreadID)
+{
+    // BlockCount <= 1024 を前提（CellTotal <= 262144）。単一グループで走査する。
+    uint t = tid.x;
+    uint v = (t < BlockCount) ? BlockSums[t] : 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    // 素朴だが確実な逐次排他スキャン（1024 要素、1 スレッドのみ）
+    if (t == 0)
+    {
+        uint acc = 0;
+        for (uint k = 0; k < BlockCount; k++)
+        {
+            uint c = BlockSums[k];
+            BlockSums[k] = acc;
+            acc += c;
+        }
+    }
+}
+
+[numthreads(THREADS, 1, 1)]
+void ScanAddOffsets(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID)
+{
+    uint i = id.x;
+    if (i >= CellTotal) return;
+    uint off = BlockSums[i / SCAN_BLOCK];
+    CellStart[i] += off;
+    CellCursor[i] = CellStart[i];
+}
+
+[numthreads(THREADS, 1, 1)]
+void ScatterParticles(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= TotalCount) return;
+    int3 c = CellCoord(SortPositions[i]);
+    if (!CellValid(c)) return;
+    uint slot;
+    InterlockedAdd(CellCursor[CellIndex(c)], 1, slot);
+    SortedIndices[slot] = i;
+}
+
+// ============================================================================ PBF
+// §2: 外力は World Gravity のみ。
+[numthreads(THREADS, 1, 1)]
+void Integrate(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+
+    float3 v = Velocities[i] + Gravity * DeltaTime;
+    float sp = length(v);
+    if (sp > MaxSpeed) v *= MaxSpeed / sp;
+
+    Velocities[i] = v;
+    PredictedPositions[i] = Positions[i] + v * DeltaTime;
+    SafetyCorrection[i] = float3(0, 0, 0);
+}
+
+// 近傍走査マクロ。流体・境界を区別せず 3x3x3 セルを回る。
+#define FOREACH_NEIGHBOUR(centre, body)                                            \
+{                                                                                  \
+    int3 _base = CellCoord(centre);                                                \
+    [loop] for (int _dz = -1; _dz <= 1; _dz++)                                     \
+    [loop] for (int _dy = -1; _dy <= 1; _dy++)                                     \
+    [loop] for (int _dx = -1; _dx <= 1; _dx++)                                     \
+    {                                                                              \
+        int3 _c = _base + int3(_dx, _dy, _dz);                                     \
+        if (!CellValid(_c)) continue;                                              \
+        uint _ci = CellIndex(_c);                                                  \
+        uint _s = CellStartIn[_ci];                                                  \
+        uint _e = _s + CellCountsIn[_ci];                                            \
+        [loop] for (uint _k = _s; _k < _e; _k++)                                   \
+        {                                                                          \
+            uint j = SortedIndicesIn[_k];                                            \
+            body                                                                   \
+        }                                                                          \
+    }                                                                              \
+}
+
+[numthreads(THREADS, 1, 1)]
+void ComputeDensityLambda(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+
+    float h = KernelRadius;
+    float3 pi = PredictedPositions[i];
+
+    float rho = ParticleMass * Poly6(0.0, h);
+    float3 gradSelf = float3(0, 0, 0);
+    float sumGradSq = 0.0;
+
+    FOREACH_NEIGHBOUR(pi,
+    {
+        if (j == i) continue;
+        bool isBoundary = (j >= FluidCount);
+        float3 pj = SortPositionsIn[j];
+        float3 rij = pi - pj;
+        float r2 = dot(rij, rij);
+        if (r2 >= h * h) continue;
+
+        if (isBoundary)
+        {
+            // Akinci 境界: 質量ではなく体積 psi で密度に寄与する。
+            float psi = RestDensity * BoundaryVolumes[j - FluidCount];
+            rho += psi * Poly6(r2, h);
+            float3 g = psi * SpikyGrad(rij, h) / RestDensity;
+            gradSelf += g;
+            sumGradSq += dot(g, g);
+        }
+        else
+        {
+            rho += ParticleMass * Poly6(r2, h);
+            float3 g = ParticleMass * SpikyGrad(rij, h) / RestDensity;
+            gradSelf += g;
+            sumGradSq += dot(g, g);   // 隣接側の勾配（境界は動かないので寄与しない）
+        }
+    })
+
+    Densities[i] = rho;
+
+    // 圧縮のみ拘束する。自由表面の粒子は近傍が少なく密度が低いのが正常であり、
+    // これを負の拘束にすると表面を内側へ吸い込んで粒状化する。
+    float C = max(0.0, rho / RestDensity - 1.0);
+    sumGradSq += dot(gradSelf, gradSelf);
+
+    // 分母に下限を入れる。自由表面の粒子は近傍が少ないので sum|gradC|^2 が小さく、
+    // lambda = -C / sum|gradC|^2 が桁違いに大きくなって表面の粒子だけが射出される。
+    // 実測: 反復 0 で完全静止 (topY 0.425) だったものが、反復 1 で 1.197、反復 4 で 1.350 と
+    // 反復数に比例して吹き上がった。エネルギーを注入していたのはこの項。
+    float denom = max(sumGradSq, MinDenom) + RelaxationEps;
+    Lambdas[i] = -C / denom;
+}
+
+[numthreads(THREADS, 1, 1)]
+void ComputeDeltaP(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+
+    float h = KernelRadius;
+    float3 pi = PredictedPositions[i];
+    float li = LambdasIn[i];
+    float wq = Poly6(ArtificialPressureQ * h * ArtificialPressureQ * h, h);
+    float3 dp = float3(0, 0, 0);
+
+    FOREACH_NEIGHBOUR(pi,
+    {
+        if (j == i) continue;
+        float3 pj = SortPositionsIn[j];
+        float3 rij = pi - pj;
+        float r2 = dot(rij, rij);
+        if (r2 >= h * h) continue;
+
+        if (j >= FluidCount)
+        {
+            float psi = RestDensity * BoundaryVolumes[j - FluidCount];
+            dp += BoundaryPressureScale * psi * li * SpikyGrad(rij, h);
+        }
+        else
+        {
+            float corr = 0.0;
+            if (ArtificialPressure > 0.0 && wq > 1e-12)
+            {
+                float ratio = Poly6(r2, h) / wq;
+                corr = -ArtificialPressure * ratio * ratio * ratio * ratio;
+            }
+            dp += ParticleMass * (li + LambdasIn[j] + corr) * SpikyGrad(rij, h);
+        }
+    })
+
+    dp *= SolverRelaxation / RestDensity;
+
+    // 1反復の移動量に上限。単一の大きな λ が粒子を壁の向こうへ飛ばすのを防ぐ。
+    float len = length(dp);
+    if (len > MaxDeltaP) dp *= MaxDeltaP / len;
+    DeltaP[i] = dp;
+}
+
+[numthreads(THREADS, 1, 1)]
+void ApplyDeltaP(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+    PredictedPositions[i] += DeltaP[i];
+}
+
+// §10: SafetyCorrection の位置差は速度に変換しない。
+[numthreads(THREADS, 1, 1)]
+void ComputeVelocity(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+    DeltaP[i] = (PredictedPositions[i] - Positions[i] - SafetyCorrection[i]) / max(DeltaTime, 1e-6);
+}
+
+// Akinci 表面張力用の法線。目的は粒子の球体化ではなく表面の平滑化 (§9)。
+[numthreads(THREADS, 1, 1)]
+void ComputeNormals(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+
+    float h = KernelRadius;
+    float3 pi = PredictedIn[i];
+    float3 n = float3(0, 0, 0);
+
+    FOREACH_NEIGHBOUR(pi,
+    {
+        if (j == i || j >= FluidCount) continue;
+        // 読み取り専用エイリアスを使う。RW 版 (SortPositions) を書くと、
+        // このカーネルには束縛されていないため未束縛バッファを読んでしまう。
+        float3 rij = pi - SortPositionsIn[j];
+        float r2 = dot(rij, rij);
+        if (r2 >= h * h) continue;
+        n += (ParticleMass / max(DensitiesIn[j], 1e-6)) * SpikyGrad(rij, h);
+    })
+
+    Normals[i] = n * h;
+}
+
+[numthreads(THREADS, 1, 1)]
+void ApplyViscosityTension(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+
+    float h = KernelRadius;
+    float3 pi = PredictedIn[i];
+    float3 vi = VelocityIn[i];          // ComputeVelocity が置いた新速度
+    float3 ni = NormalsIn[i];
+
+    float3 xsph = float3(0, 0, 0);
+    float3 boundaryDrag = float3(0, 0, 0);
+    float3 tensionAccel = float3(0, 0, 0);   // 力ではなく加速度として積む（下の注記参照）
+    float rhoI = max(DensitiesIn[i], 1e-9);
+
+    FOREACH_NEIGHBOUR(pi,
+    {
+        if (j == i) continue;
+        float3 pj = SortPositionsIn[j];
+        float3 rij = pi - pj;
+        float r2 = dot(rij, rij);
+        if (r2 >= h * h) continue;
+        float r = sqrt(max(r2, 1e-12));
+
+        if (j >= FluidCount)
+        {
+            // §2 の補正項: 境界粘性。圧力結合が伝えるのは法線成分、これは接線成分。
+            // 直交する独立成分なので疑似重力のような二重計上にならない。
+            //
+            // **接線成分だけに射影すること。** 相対速度をそのまま使うと、壁は「壁から
+            // 離れていく動き」まで減速する。これは圧力（法線）と二重計上であり、
+            // 実測では壺のリムを越えようとする薄い流出層を壁に貼り付けてしまい、
+            // 液体が溢れ出せなくなった（Phase 7: bv=0.55 で残存 90.5%、bv=0 で 77.4%）。
+            // rij は境界粒子から流体粒子への向きなので、局所法線の近似として使える。
+            float psi = BoundaryVolumes[j - FluidCount];
+            float w = Poly6(r2, h);
+            float3 nb = rij / r;
+            float3 dv = BoundaryVelocities[j - FluidCount] - vi;
+            boundaryDrag += psi * w * (dv - dot(dv, nb) * nb);
+        }
+        else
+        {
+            float w = Poly6(r2, h);
+            xsph += (ParticleMass / max(DensitiesIn[j], 1e-6)) * w * (VelocityIn[j] - vi);
+
+            // Akinci 表面張力。ここは質量の扱いを間違えると即座に発散する:
+            //   cohesion  F = -g m_i m_j C(r) r_hat   ->  加速度は -g m_j C(r) r_hat
+            //   curvature F = -g m_i (n_i - n_j)      ->  加速度は -g (n_i - n_j)
+            // つまり curvature には m_j が付かない。最初の実装は両方を「力」として足してから
+            // 一括で m で割っており、curvature だけが 1/m (= 30000 倍) されて加速度が
+            // 9000 m/s^2 に達し、1 秒で全粒子が NaN になった。
+            float3 dir = rij / r;
+            float kij = 2.0 * RestDensity / (rhoI + max(DensitiesIn[j], 1e-9));
+            tensionAccel -= kij * CohesionStrength * ParticleMass * CohesionKernel(r, h) * dir;
+            tensionAccel -= kij * CurvatureStrength * (ni - NormalsIn[j]);
+        }
+    })
+
+    // 表面張力の加速度に上限を設ける。数値的な暴走をここで止め、下流の位置に NaN を
+    // 伝播させない（NaN は一度出ると全粒子へ伝染して復帰不能になる）。
+    float ta = length(tensionAccel);
+    float taMax = 50.0;
+    if (ta > taMax) tensionAccel *= taMax / ta;
+
+    // 粘性は「周囲の速度へ何%寄せるか」というブレンドなので、そのままだと
+    // **適用回数（サブステップ数）に比例して効きが変わる**。サブステップ数は CFL で
+    // 2〜10 の間を動くため、容器を速く動かすほど中身が粘る、という物理的にあり得ない
+    // 挙動になっていた。さらに 10 サブステップでは壁際の速度が 1 フレームで
+    // 0.45^10 ≒ 0.0003 倍になり、リムを越える流出層（厚み ≒ h）ごと壁に貼り付いて
+    // 液体が溢れ出せなかった（Phase 7 実測: 62°で残存 90%、液面が最低リム点より +0.153m）。
+    //
+    // ブレンド率を dt に比例させ、1 フレームあたりの粘性の総量をサブステップ数から
+    // 独立させる。表面張力が加速度として dt を掛けているのと同じ扱いに揃える。
+    float tscale = DeltaTime / max(ViscosityRefStep, 1e-6);
+    float kVisc = min(ViscosityXSPH * tscale, 0.9);      // 1 を超えると行き過ぎて発散する
+    float kBnd  = min(BoundaryViscosity * tscale, 0.9);
+
+    float3 v = vi + kVisc * xsph + kBnd * boundaryDrag + tensionAccel * DeltaTime;
+
+    if (any(isnan(v)) || any(isinf(v))) v = float3(0, 0, 0);
+    float sp = length(v);
+    if (sp > MaxSpeed) v *= MaxSpeed / sp;
+    Velocities[i] = v;
+}
+
+float PotRadiusAt(float localY)
+{
+    float u = saturate((localY - PotFloorY) / max(1e-5, PotRimY - PotFloorY));
+    float f = u * (float)(PotProfileCount - 1);
+    uint i0 = (uint)floor(f);
+    uint i1 = min(i0 + 1, PotProfileCount - 1);
+    return lerp(PotProfileBuf[i0], PotProfileBuf[i1], saturate(f - (float)i0));
+}
+
+float SlopeHeightAt(float worldZ)
+{
+    float u = saturate((SlopeZStart - worldZ) / max(1e-5, SlopeZStart - SlopeZEnd));
+    float f = u * (float)(SlopeProfileCount - 1);
+    uint i0 = (uint)floor(f);
+    uint i1 = min(i0 + 1, SlopeProfileCount - 1);
+    return lerp(SlopeProfileBuf[i0], SlopeProfileBuf[i1], saturate(f - (float)i0));
+}
+
+// 世界境界（グリッド外周 = 数値的な最終防壁）と、地面、壺内部からの一時貫通の回収。
+// 壺の壁そのものは Boundary Particle が担当する (§10)。ここは例外処理と地面。
+[numthreads(THREADS, 1, 1)]
+void Finalize(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+
+    // --- Retired (§16/§20) ---
+    // 地面に GroundLifetime 以上留まった粒子は「回収不可能」として世界から取り除く。
+    // 領域外の待避先へ移し、速度を 0 にする。CellCoord が領域外になるので近傍探索にも
+    // 入らず、密度場にも寄与しない（＝物理的にも視覚的にも存在しなくなる）。
+    // Mass は消えるのではなく RetiredMass へ移る。収支は常に一定 (§16)。
+    uint state = RetiredFlags[i];
+    if (state == 1u)
+    {
+        // WATERFALL RECYCLE (stage branch addition): 壺版はここで RetiredPark(領域外)へ
+        // 駐め置いて終わりだが、滝は水源が要るので、代わりに滝の上端付近の箱内へ
+        // ランダム再配置して再び流し始める。安価なハッシュで粒子ごと・フレームごとに
+        // 違う場所へ散らす（同じ粒子が毎回同じ点から復活すると縦の筋が見えてしまう）。
+        uint h = i * 2654435761u + FrameSeed * 40503u;
+        h ^= h >> 13; h *= 60493u; h ^= h >> 15;
+        float rx = frac((float)(h & 0xFFFFu) / 65536.0);
+        h = h * 747796405u + 2891336453u;
+        float ry = frac((float)(h & 0xFFFFu) / 65536.0);
+        h = h * 747796405u + 2891336453u;
+        float rz = frac((float)(h & 0xFFFFu) / 65536.0);
+        float3 spawnPos = SpawnBoxMin + float3(rx, ry, rz) * SpawnBoxSize;
+        Positions[i] = spawnPos;
+        Velocities[i] = SpawnVelocity;
+        RetiredFlags[i] = 0u;
+        Ages[i] = 0.0;
+        return;
+    }
+    if (state == 2u)
+    {
+        // 領域外に取り残された水たまり。その場で凍結する。
+        // グリッド外なので近傍探索にも入らず、他の粒子に干渉しない。
+        Velocities[i] = float3(0, 0, 0);
+        // 寿命だけは進める。GroundLifetime を過ぎたら Retired へ移す。
+        if (GroundLifetime > 0.0)
+        {
+            float a2 = Ages[i] + DeltaTime;
+            Ages[i] = a2;
+            if (a2 >= GroundLifetime) RetiredFlags[i] = 1u;
+        }
+        return;
+    }
+
+    float3 p = PredictedPositions[i];
+    float3 v = Velocities[i];
+    if (any(isnan(p)) || any(isinf(p))) { p = clamp(Positions[i], BoundsMin, BoundsMax); v = float3(0, 0, 0); }
+    float3 before = p;
+
+    // 地面 (§9 Collision)。Overflow した液体はここへ落ちる。
+    // stage branch: 平らな1枚の GroundY 平面ではなく、実測した Terrain 断面
+    // (SlopeProfileBuf) に沿って衝突・反射させる。滝が「地形にぶつかりながら
+    // 落ちていく」ように見せるための追加(Player branch の壺システムには無い)。
+    float slopeY = max(GroundY, SlopeHeightAt(p.z));
+    if (p.y < slopeY)
+    {
+        // 有限差分で局所法線を推定 (Y-Z 平面内のみ、X 方向の断面変化は無視する近似)。
+        const float dz = 0.4;
+        float hBack  = SlopeHeightAt(p.z - dz);   // より奥(z がより負) = 高い側
+        float hFront = SlopeHeightAt(p.z + dz);   // より手前 = 低い側
+        float slope = (hBack - hFront) / (2.0 * dz);
+        float3 n = normalize(float3(0.0, 1.0, -slope));
+
+        // WATERFALL FIX: a full hard snap (p.y = slopeY every substep) pins the entire liquid
+        // mass to the exact geometric terrain contour every step, which reads as a rigid shell
+        // painted onto the rock rather than a fluid with its own independent surface motion
+        // (no bulging/splashing/rolling). Softening this to a PARTIAL correction -- and adding a
+        // per-particle jitter to the target height plus real bounce -- lets the PBF pressure/
+        // inertia dominate the visible surface shape instead, while still preventing particles
+        // from tunneling deep into solid rock (the partial correction still converges over the
+        // ~6-20 substeps run per frame).
+        uint jh = i * 2654435761u + FrameSeed * 97531u;
+        jh ^= jh >> 13; jh *= 60493u; jh ^= jh >> 15;
+        float jitter = (frac((float)(jh & 0xFFFFu) / 65536.0) - 0.5) * 0.6; // +-0.3m surface roughness
+        float targetY = slopeY + jitter;
+
+        const float correctionStrength = 0.35; // <1 = allow the fluid to sit proud of / dip into the ideal contour
+        p.y = lerp(p.y, targetY, correctionStrength);
+
+        float vn = dot(v, n);
+        if (vn < 0.0) v -= (1.0 + SlopeRestitution) * vn * n;     // 法線方向はね返り(壺/箱よりずっと弾む設定)
+        v *= (1.0 - SlopeFriction);                                 // 接線方向の減衰は最小限にして、斜面を滑り落ちる勢いを殺さない
+    }
+
+    // 領域の水平端に達した粒子の扱い。
+    // これをしないと、ゴブリンが歩いて領域が動いたとき、粒子が見えない壁に沿って
+    // 引きずられて一緒に付いてくる。
+    //  * 地面にいる液体 → **その場に置いていく (Settled)**。水たまりは残ってほしい。
+    //  * 空中の液体     → 世界の外へ飛んで行ったものとして Retired。
+    if (p.x <= BoundsMin.x || p.x >= BoundsMax.x || p.z <= BoundsMin.z || p.z >= BoundsMax.z)
+    {
+        bool onGround = p.y <= GroundY + GroundBandHeight * 2.0;
+        RetiredFlags[i] = onGround ? 2u : 1u;
+        if (onGround)
+        {
+            Positions[i] = p;
+            Velocities[i] = float3(0, 0, 0);
+            return;      // 境界クランプをかけない（領域の外に残す）
+        }
+    }
+
+    [unroll] for (int a = 0; a < 3; a++)
+    {
+        if (p[a] < BoundsMin[a]) { p[a] = BoundsMin[a]; if (v[a] < 0.0) v[a] = -v[a] * BoundsRestitution; }
+        if (p[a] > BoundsMax[a]) { p[a] = BoundsMax[a]; if (v[a] > 0.0) v[a] = -v[a] * BoundsRestitution; }
+    }
+    if (any(abs(p - before) > 1e-9)) v *= (1.0 - BoundsFriction);
+
+    // --- SafetyCorrection (§10): 壺の壁/床を突き抜けた粒子だけを引き戻す ---
+    // このカーネルは ComputeVelocity より後に走るので、ここでの位置変更は
+    // v = (p' - p) / dt に混入しない。前回のバグ（クランプの位置差が速度に化ける）は
+    // 構造的に再発しない。
+    if (SafetyEnabled != 0)
+    {
+        float3 lp = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
+        bool fixedUp = false;
+
+        if (lp.y < PotFloorY - SafetyMargin && lp.y > PotFloorY - PotMaxRadius)
+        {
+            float r = length(lp.xz);
+            if (r < PotMaxRadius) { lp.y = PotFloorY + SafetyMargin; fixedUp = true; }
+        }
+        // リム付近では絶対に補正しない。ここで補正すると、リムを越えようとしている
+        // 粒子を内側へ引き戻すことになり、SafetyCorrection が「液体を容器に留める堰」
+        // として常態化する（追加修正2 が禁止している状態）。
+        else if (lp.y >= PotFloorY && lp.y <= SafetyTopY)
+        {
+            float r = length(lp.xz);
+            float rIn = PotRadiusAt(lp.y);
+            if (r > rIn + SafetyMargin)
+            {
+                float2 n = r > 1e-6 ? lp.xz / r : float2(1, 0);
+                lp.xz = n * (rIn - SafetyMargin);
+                fixedUp = true;
+            }
+        }
+
+        if (fixedUp)
+        {
+            p = mul(PotToWorldSafety, float4(lp, 1.0)).xyz;
+            uint dummy;
+            InterlockedAdd(SafetyCounters[0], 1, dummy);
+        }
+    }
+
+    // 地面に留まっている時間を数える。地面から離れたらリセットする。
+    // stage branch: 全粒子が同じ GroundLifetime で一斉に Retired/再スポーンすると、
+    // 水源からの湧き出しが同期して「ドバッ、ドバッ」という断続的な脈動に見える。
+    // 粒子スロットごとに寿命を±40%ばらけさせて再スポーンのタイミングを分散させ、
+    // 連続的な流れに見せる。
+    if (GroundLifetime > 0.0)
+    {
+        if (p.y <= GroundY + GroundBandHeight)
+        {
+            uint jh = i * 2654435761u; jh ^= jh >> 15; jh *= 2246822519u; jh ^= jh >> 13;
+            float jitter = 0.6 + 0.8 * frac((float)(jh & 0xFFFFu) / 65536.0); // 0.6x .. 1.4x
+            float age = Ages[i] + DeltaTime;
+            Ages[i] = age;
+            if (age >= GroundLifetime * jitter) RetiredFlags[i] = 1;
+        }
+        else
+        {
+            Ages[i] = 0.0;
+        }
+    }
+
+    Positions[i] = p;
+    Velocities[i] = v;
+}
+
+// ============================================================================
+// 領域分類 / Overflow 判定 (§11, §14, 追加修正1)
+//
+// **このカーネルは観測しかしない。** 書き込むのは RegionFlags と RegionCounters だけで、
+// 位置・速度は SRV (PositionsIn) としてしか渡されていない。したがって RimOpening 判定が
+// 液体を外へ押し出すことはコード上不可能である。液体が壺の外へ出る原因は、
+// World Gravity / 慣性 / PBF 圧力 / 粘性 / 表面張力 / Moving Boundary だけ。
+//
+// Rim Opening を「通過した」粒子だけを正常な Overflow とみなす。壁や底から直接外へ
+// 出た粒子は Boundary Failure として別に数え、Overflow には計上しない。
+// ============================================================================
+#define REGION_INSIDE  0u
+#define REGION_RIM     1u
+#define REGION_AIR     2u
+#define REGION_GROUND  3u
+#define REGION_RETIRED 4u
+#define FLAG_PASSED_RIM 8u
+#define FLAG_EVER_OUT  16u    // 一度でも壺の外へ出た。戻っても消さない（重複計上を防ぐラッチ）
+
+[numthreads(THREADS, 1, 1)]
+void ClassifyRegions(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+
+    // §3 CFL 用の実測最大速さ。次フレームのサブステップ数を決めるのに使う。
+    // ここは既に全粒子を 1 回なめているので、追加のディスパッチは要らない。
+    {
+        uint sp = (uint)(length(VelocitiesIn[i]) * 1000.0);
+        uint old;
+        InterlockedMax(RegionCounters[7], sp, old);
+    }
+
+    float3 p = PositionsIn[i];
+    uint prev = RegionFlags[i];
+    uint prevRegion = prev & 7u;
+    bool passedRim = (prev & FLAG_PASSED_RIM) != 0u;
+    bool everOut   = (prev & FLAG_EVER_OUT) != 0u;
+
+    uint region;
+    uint stateIn = RetiredFlagsIn[i];
+    if (stateIn != 0u)
+    {
+        // 1 = 消滅済み（待避先にいる）/ 2 = 領域外に取り残された水たまり。
+        // 後者は「地面にある回収可能な液体」なので Ground として数える (§16)。
+        uint d2;
+        uint reg = (stateIn == 2u) ? REGION_GROUND : REGION_RETIRED;
+        InterlockedAdd(RegionCounters[reg], 1, d2);
+        RegionFlags[i] = reg | (prev & (FLAG_PASSED_RIM | FLAG_EVER_OUT));
+        return;
+    }
+    if (p.y <= GroundY + GroundBandHeight)
+    {
+        region = REGION_GROUND;
+    }
+    else
+    {
+        float3 lp = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
+        float r = length(lp.xz);
+
+        if (lp.y >= PotFloorY && lp.y <= PotRimY && r <= PotRadiusAt(lp.y) + WallTolerance)
+        {
+            region = REGION_INSIDE;
+            passedRim = false;                     // 中に戻ったら通過履歴はリセット
+        }
+        else if (lp.y > PotRimY && lp.y <= PotRimY + RimOpeningHeight && r <= PotRimR)
+        {
+            region = REGION_RIM;                   // ここが Open Boundary の「出口」
+            passedRim = true;                      // 通過を観測しただけ。押し出してはいない
+        }
+        else
+        {
+            region = REGION_AIR;
+        }
+    }
+
+    uint dummy;
+    InterlockedAdd(RegionCounters[region], 1, dummy);
+
+    // 遷移の判定: Inside から出た瞬間だけを見る。
+    // 液面付近の粒子は Inside と RimOpening を何度も往復するので、遷移をそのまま数えると
+    // 「溢れた量」としては読めない。粒子ごとに FLAG_EVER_OUT でラッチし、
+    // **初めて外へ出たときだけ**数える。
+    //
+    // 正常/貫通の判別は「RimOpening 領域を通ったか」ではなく
+    // **リム面(local y = RimY)を越えたか**で行う。RimOpening は半径 PotRimR の
+    // 細い筒なので、勢いよく縁を越えて外へ広がる粒子は 1 フレームの間に筒の外へ出てしまい、
+    // 正常な Overflow が「貫通」として誤計上されていた（幾何判定では壁抜け 0 個なのに
+    // penetrationEvents が 988 になる、という食い違いが実測で出た）。
+    // 壁を抜けたなら local y は RimY 以下のままのはずなので、この判定で過不足なく分かれる。
+    if (prevRegion == REGION_INSIDE && region != REGION_INSIDE && !everOut)
+    {
+        everOut = true;
+        float3 lpNow = mul(WorldToPotSafety, float4(p, 1.0)).xyz;
+        if (lpNow.y > PotRimY || region == REGION_RIM || passedRim)
+            InterlockedAdd(RegionCounters[5], 1, dummy);   // 正常な Overflow
+        else
+            InterlockedAdd(RegionCounters[6], 1, dummy);   // 壁/床の貫通 = 異常
+    }
+
+    RegionFlags[i] = region | (passedRim ? FLAG_PASSED_RIM : 0u) | (everOut ? FLAG_EVER_OUT : 0u);
+}
