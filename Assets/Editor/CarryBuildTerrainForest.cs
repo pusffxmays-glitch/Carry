@@ -4477,19 +4477,30 @@ public static class CarryBuildTerrainForest
 
     // Solid box collider sitting under the given local top height, independent of the
     // visual mesh shape -- gives predictable CharacterController footing on lumpy rocks.
+    // BUGFIX 2026-08-16 (found while auditing stray colliders): every call site passes
+    // topLocalHeight already pre-multiplied by the object's own scale (e.g. "topLocal * scale",
+    // meant as a WORLD-space offset above the pivot, matching how each caller also positions the
+    // instance's transform.position). But BoxCollider.center is a LOCAL-space value that Unity
+    // multiplies by the transform's lossyScale AGAIN when computing world bounds -- so passing an
+    // already-scaled value here silently squared the scale factor (scale=1 hides this completely,
+    // which is why it went unnoticed for most props; at GiantBoulder's scale~2.2-3.2 it floated the
+    // collider 3.5-6m above the actual mesh top -- see GiantBoulder_7/13 in Footholds). Dividing by
+    // the transform's own lossyScale.y here un-does the caller's premultiplication before it's
+    // stored as a local coordinate, so the world result matches the intended (single) scale.
     static void AddSolidCollider(GameObject target, float topLocalHeight)
     {
         var renderers = target.GetComponentsInChildren<Renderer>();
         Vector3 footprint = new Vector3(1.5f, 1f, 1.5f);
+        var t = target.transform;
         if (renderers.Length > 0)
         {
             var b = renderers[0].bounds;
             for (int i = 1; i < renderers.Length; i++) b.Encapsulate(renderers[i].bounds);
-            var t = target.transform;
             footprint = new Vector3(b.size.x / Mathf.Max(t.lossyScale.x, 0.0001f), 0.8f, b.size.z / Mathf.Max(t.lossyScale.z, 0.0001f));
         }
         var box = target.AddComponent<BoxCollider>();
-        box.center = new Vector3(0f, topLocalHeight - 0.4f, 0f);
+        float scaleY = Mathf.Max(Mathf.Abs(t.lossyScale.y), 0.0001f);
+        box.center = new Vector3(0f, (topLocalHeight - 0.4f) / scaleY, 0f);
         box.size = new Vector3(footprint.x, 0.8f, footprint.z);
     }
 
