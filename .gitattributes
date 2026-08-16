@@ -28,3 +28,6 @@
 
 # 動画
 *.mp4 filter=lfs diff=lfs merge=lfs -text
+
+# バイナリ .asset (Unity TerrainData 等) は eol 変換禁止 (2026-08-16: CRLF 変換で破損したため)
+Assets/Stage/Terrain/ForestTerrainData.asset -text

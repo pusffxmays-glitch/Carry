@@ -1,3 +1,11 @@
+// ============================================================================================
+// 2026-08-16 マージ時に一時無効化 (StagePlay 統合)。
+// このツールは stage ブランチ版 FluidCore の滝エミッタ機能 (spawnBoxMin/spawnBoxSize/
+// spawnVelocity/slopeProfileHeights など) を前提としており、StagePlay 側の進化版 FluidCore
+// にはまだ無い。滝を流体で流したくなったら、エミッタ機能を FluidCore へ移植してから
+// この #if false を外すこと。
+// ============================================================================================
+#if false
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -210,3 +218,5 @@ public static class CarrySetupWaterfallFluid
         log.AppendLine("Carved recess at (" + RecessX + "," + RecessZ + "), surroundingY=" + centerY.ToString("F2") + " deepY=" + targetDeepY.ToString("F2"));
     }
 }
+
+#endif
