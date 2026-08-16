@@ -15580,51 +15580,51 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalScale.y
-      value: 3.2
+      value: 3.6096
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalScale.z
-      value: 3.2
+      value: 3.67328
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalPosition.x
-      value: 2.734692
+      value: 2.35
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalPosition.y
-      value: -0.8437324
+      value: -0.27
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalPosition.z
-      value: 75.108795
+      value: 74.32
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalRotation.w
-      value: -0.93654376
+      value: -0.97571915
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalRotation.x
-      value: -0
+      value: -0.1686097
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalRotation.y
-      value: 0.35055062
+      value: -0.09476464
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalRotation.z
-      value: -0
+      value: 0.10277473
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalEulerAnglesHint.x
-      value: 0
+      value: 20.396
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalEulerAnglesHint.y
-      value: 0
+      value: 9.226
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_LocalEulerAnglesHint.z
-      value: 0
+      value: -10.363
       objectReference: {fileID: 0}
     - target: {fileID: 919132149155446097, guid: 6bf7908f3d7cf014095062372a5088c3, type: 3}
       propertyPath: m_Name
@@ -25884,7 +25884,7 @@ Material:
     - _ZWrite: 1
     m_Colors:
     - _BaseColor: {r: 0.28, g: 0.22, b: 0.15, a: 1}
-    - _Color: {r: 0.28, g: 0.22, b: 0.15, a: 1}
+    - _Color: {r: 0.27999997, g: 0.21999997, b: 0.14999998, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
     - _SpecColor: {r: 0.19999996, g: 0.19999996, b: 0.19999996, a: 1}
   m_BuildTextureStacks: []
@@ -34372,6 +34372,9 @@ MonoBehaviour:
   slopeZEnd: -45
   slopeRestitution: 0.35
   slopeFriction: 0.03
+  spawnBoxMin: {x: -4, y: 14.8, z: -42.9}
+  spawnBoxSize: {x: 1.6, y: 0.3, z: 0.5}
+  spawnVelocity: {x: 0, y: -2.6, z: 4.2}
   collideWithGroundSurfaces: 1
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
@@ -62105,31 +62108,31 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalPosition.x
-      value: -0.6182276
+      value: -0.6185939
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalPosition.y
-      value: 2.1780329
+      value: 2.2077672
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalPosition.z
-      value: 57
+      value: 57.000072
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalRotation.w
-      value: 0.99132055
+      value: 0.9860848
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalRotation.x
-      value: 0.008679351
+      value: 0.012899499
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalRotation.y
-      value: 0.09297244
+      value: 0.092481405
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalRotation.z
-      value: 0.09254376
+      value: 0.13754119
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalEulerAnglesHint.x
@@ -62137,11 +62140,11 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalEulerAnglesHint.y
-      value: 0
+      value: 10.716
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_LocalEulerAnglesHint.z
-      value: 0
+      value: 15.881
       objectReference: {fileID: 0}
     - target: {fileID: 919132149155446097, guid: f1ba87d8f219b8940aef085fdc27e632, type: 3}
       propertyPath: m_Name
@@ -64786,6 +64789,9 @@ MonoBehaviour:
   slopeZEnd: 0
   slopeRestitution: 0.35
   slopeFriction: 0.03
+  spawnBoxMin: {x: 0, y: 0, z: 0}
+  spawnBoxSize: {x: 0, y: 0, z: 0}
+  spawnVelocity: {x: 0, y: 0, z: 0}
   collideWithGroundSurfaces: 1
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1

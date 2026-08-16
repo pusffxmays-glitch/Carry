@@ -146,6 +146,14 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Range(0f, 1f)] public float slopeRestitution = 0.35f;
     [Range(0f, 1f)] public float slopeFriction = 0.03f;
 
+    [Header("Waterfall Recycle (滝専用。spawnBoxSizeが実質ゼロ(既定)なら従来通りRetiredParkへ待避するだけ、壺の運搬物理には影響しない)")]
+    [Tooltip("Retired粒子の再スポーン範囲の最小コーナー。")]
+    public Vector3 spawnBoxMin;
+    [Tooltip("再スポーン範囲のサイズ。各成分が実質ゼロ(既定値)なら再スポーンせず、従来通りRetiredParkへ待避する。")]
+    public Vector3 spawnBoxSize = Vector3.zero;
+    [Tooltip("再スポーン直後の初速。")]
+    public Vector3 spawnVelocity;
+
     // ADDED 2026-08-15 (バグ報告「ギミックのブロックにこぼれたポーションがつかない。
     // 貫通して地面まで落ちている」): 流体の衝突相手は壺の境界粒子・地面平面 (groundY)・
     // 領域外周だけで、ステージの箱はシミュレーションに存在しなかった。GroundSurface 付きの
@@ -1182,6 +1190,9 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("GroundLifetime", groundLifetime);
         // 待避先は領域の外。CellCoord が領域外になるので近傍探索にも密度場にも入らない。
         fluidCompute.SetVector("RetiredPark", regionCenter + Vector3.down * (regionSize.y * 0.5f + 50f));
+        fluidCompute.SetVector("SpawnBoxMin", spawnBoxMin);
+        fluidCompute.SetVector("SpawnBoxSize", spawnBoxSize);
+        fluidCompute.SetVector("SpawnVelocity", spawnVelocity);
         fluidCompute.SetFloat("WallTolerance", boundary.mode == FluidBoundary.Mode.PotProfile
             ? spacing * 0.5f / Mathf.Max(1e-6f, boundary.ContainerScale) : 0f);
         fluidCompute.SetFloat("FloorTolerance", boundary.mode == FluidBoundary.Mode.PotProfile && boundary.Profile != null

@@ -236,6 +236,15 @@ float SlopeRestitution; // 斜面接触専用の反発係数(GroundのBoundsRest
 float SlopeFriction;    // 斜面接触専用の摩擦(下向きの勢いを殺さないよう弱め)
 uint  FrameSeed;        // 斜面接触点の表面ジッター用(フレームごとに変える、粒子ごとのハッシュ種)
 
+// ---- Waterfall Recycle (滝専用。SpawnBoxSizeが実質ゼロなら従来通りRetiredParkへ待避する
+// だけで、壺の運搬物理には影響しない) ----
+// 壺版はRetired粒子をRetiredPark(領域外)へ駐め置いて終わりだが、滝は水源が要るので、
+// 代わりに水源付近の箱内へランダム再配置して再び流し始め、少ない粒子予算で
+// 「途切れず流れ続ける川」に見せる。
+float3 SpawnBoxMin;
+float3 SpawnBoxSize;    // 各成分が実質0なら無効(既定)。0でなければそのボックス内へ再配置する。
+float3 SpawnVelocity;
+
 // ============================================================================ SPH kernels
 static const float PI = 3.14159265359;
 
@@ -737,6 +746,11 @@ void ApplyViscosityTension(uint3 id : SV_DispatchThreadID)
     Velocities[i] = v;
 }
 
+bool SpawnBoxActive()
+{
+    return SpawnBoxSize.x > 1e-5 || SpawnBoxSize.y > 1e-5 || SpawnBoxSize.z > 1e-5;
+}
+
 float SlopeHeightAt(float worldZ)
 {
     float u = saturate((SlopeZStart - worldZ) / max(1e-5, SlopeZStart - SlopeZEnd));
@@ -852,6 +866,23 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     uint state = RetiredFlags[i];
     if (state == 1u)
     {
+        if (SpawnBoxActive())
+        {
+            // 安価なハッシュで粒子ごと・フレームごとに違う場所へ散らす(同じ粒子が毎回
+            // 同じ点から復活すると縦の筋が見えてしまう)。
+            uint h = i * 2654435761u + FrameSeed * 40503u;
+            h ^= h >> 13; h *= 60493u; h ^= h >> 15;
+            float rx = frac((float)(h & 0xFFFFu) / 65536.0);
+            h = h * 747796405u + 2891336453u;
+            float ry = frac((float)(h & 0xFFFFu) / 65536.0);
+            h = h * 747796405u + 2891336453u;
+            float rz = frac((float)(h & 0xFFFFu) / 65536.0);
+            Positions[i] = SpawnBoxMin + float3(rx, ry, rz) * SpawnBoxSize;
+            Velocities[i] = SpawnVelocity;
+            RetiredFlags[i] = 0u;
+            Ages[i] = 0.0;
+            return;
+        }
         Positions[i] = RetiredPark;
         Velocities[i] = float3(0, 0, 0);
         return;
@@ -1093,9 +1124,19 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     {
         if (p.y <= GroundY + GroundBandHeight)
         {
+            // 滝(SpawnBoxActive)のみ: 全粒子が同じGroundLifetimeで一斉にRetired/再スポーン
+            // すると、水源からの湧き出しが同期して断続的な脈動に見える。粒子スロットごとに
+            // 寿命を±40%ばらけさせて再スポーンのタイミングを分散させる。壺の水たまりの
+            // 消滅タイミングは従来通り厳密にGroundLifetimeとする(挙動を変えないため)。
+            float lifetimeJitter = 1.0;
+            if (SpawnBoxActive())
+            {
+                uint jh = i * 2654435761u; jh ^= jh >> 15; jh *= 2246822519u; jh ^= jh >> 13;
+                lifetimeJitter = 0.6 + 0.8 * frac((float)(jh & 0xFFFFu) / 65536.0); // 0.6x .. 1.4x
+            }
             float age = Ages[i] + DeltaTime;
             Ages[i] = age;
-            if (age >= GroundLifetime) RetiredFlags[i] = 1;
+            if (age >= GroundLifetime * lifetimeJitter) RetiredFlags[i] = 1;
         }
         else
         {
