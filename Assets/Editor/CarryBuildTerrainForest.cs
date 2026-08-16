@@ -3302,6 +3302,9 @@ public static class CarryBuildTerrainForest
         // The sweep carries the goblin at a fixed height along the water's surface; near the
         // lake that surface is the lake's own (flat, fixed) level, matching BuildWater's blend.
         flow.riverSurfaceY = LakeWaterY + 0.25f;
+        // 2026-08-16, per user request: 5x the default sweep speed (4 -> 20) so falling into the
+        // river reads as a genuinely fast, dangerous current, not a slow drift.
+        flow.flowSpeed = 20f;
         // Sweep stops right at the inlet under the bridge -- from there the player is standing
         // in the lake and must swim/walk to the stairs, not teleported back to the bridge.
         flow.upstreamLimitZ = BridgeZ0 - 2f;
