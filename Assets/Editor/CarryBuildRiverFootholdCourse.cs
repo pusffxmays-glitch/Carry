@@ -450,9 +450,19 @@ public static class CarryBuildRiverFootholdCourse
         float topLocal = (float)getTopLocalYM.Invoke(null, new object[] { prefab });
         var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab, parent);
         inst.name = name;
-        inst.transform.localScale = scale;
+        // 一部のPolyHavenアセット(dead_tree_trunk, tree_stump_01/02, root_cluster_01)は
+        // FBXインポート時のスケール係数がprefabルートのtransform.localScaleに100倍として
+        // 焼き込まれている(他のアセットは1倍)。scaleはGetLocalSize(=Renderer.bounds、既に
+        // ネイティブスケール込みの実寸)を基準にした「実寸に対する倍率」なので、その倍率を
+        // ネイティブスケールに直接上書きするとネイティブが100倍のアセットだけ約1/100に
+        // 縮んでしまう(実測: ログが判定・見た目とも0.004m程度の紙のように薄いスライバーに
+        // なり、「浮いている/透過する」不具合の原因になっていた)。ネイティブスケールに
+        // 掛け合わせることで、どちらのインポート倍率のアセットでも正しい実寸になる。
+        Vector3 nativeScale = prefab.transform.localScale;
+        Vector3 finalScale = Vector3.Scale(scale, nativeScale);
+        inst.transform.localScale = finalScale;
         inst.transform.rotation = rot;
-        inst.transform.position = new Vector3(x, targetTopY - topLocal * scale.y, z);
+        inst.transform.position = new Vector3(x, targetTopY - topLocal * finalScale.y, z);
         return inst;
     }
     static GameObject InstantiateWithTop(GameObject prefab, Transform parent, float x, float targetTopY, float z, float uniformScale, Quaternion rot, MethodInfo getTopLocalYM, string name)
