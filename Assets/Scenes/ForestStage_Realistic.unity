@@ -34337,6 +34337,41 @@ MonoBehaviour:
   escapeMarginSpacings: 2
   boundsRestitution: 0.22
   boundsFriction: 0.03
+  slopeProfileHeights:
+  - -5.4646864
+  - -5.4426355
+  - -5.424153
+  - -5.4168606
+  - -5.427013
+  - -5.4502997
+  - -5.479043
+  - -5.5112844
+  - -5.54741
+  - -5.582918
+  - -5.607526
+  - -5.499488
+  - -2.1953773
+  - -0.6738429
+  - 0.13524914
+  - 1.1166201
+  - 2.2132378
+  - 3.3485584
+  - 4.5058193
+  - 5.673236
+  - 6.8543262
+  - 8.058088
+  - 9.285749
+  - 10.531696
+  - 11.119297
+  - 11.273222
+  - 11.532427
+  - 12.302395
+  - 14.006275
+  - 15.98996
+  slopeZStart: -28
+  slopeZEnd: -45
+  slopeRestitution: 0.35
+  slopeFriction: 0.03
   collideWithGroundSurfaces: 1
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
@@ -64746,6 +64781,11 @@ MonoBehaviour:
   escapeMarginSpacings: 3
   boundsRestitution: 0.02
   boundsFriction: 0.15
+  slopeProfileHeights: []
+  slopeZStart: 0
+  slopeZEnd: 0
+  slopeRestitution: 0.35
+  slopeFriction: 0.03
   collideWithGroundSurfaces: 1
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1

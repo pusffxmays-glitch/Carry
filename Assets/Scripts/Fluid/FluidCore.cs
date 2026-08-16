@@ -136,6 +136,16 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Range(0f, 0.5f)] public float boundsRestitution = 0.02f;
     [Range(0f, 1f)] public float boundsFriction = 0.15f;
 
+    [Header("Slope Collision (滝専用。未設定なら従来通りGroundYの平面のみ、壺の運搬物理には影響しない)")]
+    [Tooltip("崖断面の高さサンプル配列(Z方向に等間隔、slopeZStart側→slopeZEnd側)。null/2要素未満なら無効(従来のGroundY平面のみ)。")]
+    public float[] slopeProfileHeights;
+    [Tooltip("slopeProfileHeights[0]に対応するワールドZ(池側、より手前)。")]
+    public float slopeZStart;
+    [Tooltip("slopeProfileHeights[末尾]に対応するワールドZ(水源側、より奥)。")]
+    public float slopeZEnd;
+    [Range(0f, 1f)] public float slopeRestitution = 0.35f;
+    [Range(0f, 1f)] public float slopeFriction = 0.03f;
+
     // ADDED 2026-08-15 (バグ報告「ギミックのブロックにこぼれたポーションがつかない。
     // 貫通して地面まで落ちている」): 流体の衝突相手は壺の境界粒子・地面平面 (groundY)・
     // 領域外周だけで、ステージの箱はシミュレーションに存在しなかった。GroundSurface 付きの
@@ -253,6 +263,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     GraphicsBuffer boundaryLocal, boundaryPositions, boundaryVelocities, boundaryVolumes;
     GraphicsBuffer sortPositions, cellCounts, cellStart, cellCursor, blockSums, sortedIndices;
     GraphicsBuffer potProfile, potOuterProfile, safetyCounters;
+    GraphicsBuffer slopeProfileBuffer;
     GraphicsBuffer solidBoxW2L, solidBoxL2W, solidBoxHalf;
     BoxCollider[] solidBoxCols;
     bool[] solidBoxSettle;
@@ -567,6 +578,18 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             potOuterProfile = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 2, sizeof(float));
             potOuterProfile.SetData(new float[] { 1f, 1f });
         }
+
+        slopeProfileBuffer?.Release();
+        if (slopeProfileHeights != null && slopeProfileHeights.Length >= 2)
+        {
+            slopeProfileBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slopeProfileHeights.Length, sizeof(float));
+            slopeProfileBuffer.SetData(slopeProfileHeights);
+        }
+        else
+        {
+            slopeProfileBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 2, sizeof(float));
+            slopeProfileBuffer.SetData(new float[] { groundY, groundY }); // flat fallback -- behaves exactly like the old single GroundY plane
+        }
     }
 
     // ギミックの箱コライダを集める (collideWithGroundSurfaces のコメントを参照)。
@@ -723,6 +746,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         blockSums?.Release(); blockSums = null;
         potProfile?.Release(); potProfile = null;
         potOuterProfile?.Release(); potOuterProfile = null;
+        slopeProfileBuffer?.Release(); slopeProfileBuffer = null;
         safetyCounters?.Release(); safetyCounters = null;
         solidBoxW2L?.Release(); solidBoxW2L = null;
         solidBoxL2W?.Release(); solidBoxL2W = null;
@@ -1046,6 +1070,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // D3D11 の上限 8 に収まっている。
         Bind(kFinalize, ("PredictedPositions", predicted), ("Positions", positions), ("Velocities", velocities),
                         ("PotProfileBuf", potProfile), ("PotOuterBuf", potOuterProfile),
+                        ("SlopeProfileBuf", slopeProfileBuffer),
                         ("SafetyCounters", safetyCounters),
                         ("Ages", ages), ("RetiredFlags", retiredFlags));
 
@@ -1140,6 +1165,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("RimOpeningHeight", rimOpeningHeight);
         fluidCompute.SetFloat("GroundY", groundY);
         fluidCompute.SetFloat("GroundBandHeight", spacing * 1.5f);
+        bool slopeActive = slopeProfileHeights != null && slopeProfileHeights.Length >= 2;
+        fluidCompute.SetInt("SlopeProfileCount", slopeProfileBuffer != null ? slopeProfileBuffer.count : 2);
+        fluidCompute.SetFloat("SlopeZStart", slopeActive ? slopeZStart : 0f);
+        fluidCompute.SetFloat("SlopeZEnd", slopeActive ? slopeZEnd : -1f);
+        fluidCompute.SetFloat("SlopeRestitution", slopeRestitution);
+        fluidCompute.SetFloat("SlopeFriction", slopeFriction);
+        fluidCompute.SetInt("FrameSeed", Time.frameCount);
         // 開始時の整定中は「ふちを越えたら出て行く」を止める。容器は静止しているので、
         // このとき外へ出るのは種の格子が緩む勢いだけが原因であり、運搬の結果ではない。
         // 止めないと格子の緩みで弾かれた粒子がそのまま地面へ落ち、ゲーム開始の瞬間に

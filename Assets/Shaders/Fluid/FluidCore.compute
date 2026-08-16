@@ -222,6 +222,20 @@ float WallTolerance;
 // 床より下をどこまで「まだ壺の中」とみなすか。着地の衝撃で沈む分の許容。
 float FloorTolerance;
 
+// ---- Terrain-hugging slope collision (滝専用、既定は無効) ----
+// GroundYは平らな1枚の面だが、滝(PotionWaterfallFluid)は崖の傾斜に沿って岩に
+// ぶつかりながら落ちる必要がある。SlopeProfileBufが未設定(要素2、両方GroundYと
+// 同値)のときはSlopeHeightAtが常にGroundYを返すため、下のFinalizeの分岐は
+// 従来の平らなGroundY判定と完全に同じ結果になる(＝壺の運搬物理には無条件で
+// 影響しない、C#側でフラグを別途持つ必要がない)。
+StructuredBuffer<float> SlopeProfileBuf;   // 崖断面の実測高さ(Z方向に等間隔サンプル)
+uint  SlopeProfileCount;
+float SlopeZStart;      // profile[0]に対応するワールドZ(池側、より手前)
+float SlopeZEnd;        // profile[count-1]に対応するワールドZ(水源側、より奥)
+float SlopeRestitution; // 斜面接触専用の反発係数(GroundのBoundsRestitutionより弾む)
+float SlopeFriction;    // 斜面接触専用の摩擦(下向きの勢いを殺さないよう弱め)
+uint  FrameSeed;        // 斜面接触点の表面ジッター用(フレームごとに変える、粒子ごとのハッシュ種)
+
 // ============================================================================ SPH kernels
 static const float PI = 3.14159265359;
 
@@ -723,6 +737,15 @@ void ApplyViscosityTension(uint3 id : SV_DispatchThreadID)
     Velocities[i] = v;
 }
 
+float SlopeHeightAt(float worldZ)
+{
+    float u = saturate((SlopeZStart - worldZ) / max(1e-5, SlopeZStart - SlopeZEnd));
+    float f = u * (float)(SlopeProfileCount - 1);
+    uint i0 = (uint)floor(f);
+    uint i1 = min(i0 + 1, SlopeProfileCount - 1);
+    return lerp(SlopeProfileBuf[i0], SlopeProfileBuf[i1], saturate(f - (float)i0));
+}
+
 float PotRadiusAt(float localY)
 {
     float u = saturate((localY - PotFloorY) / max(1e-5, PotRimY - PotFloorY));
@@ -895,11 +918,45 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     }
 
     // 地面 (§9 Collision)。Overflow した液体はここへ落ちる。
-    if (p.y < GroundY)
+    // 滝専用: 平らな1枚のGroundY面ではなく、実測したTerrain断面(SlopeProfileBuf)に沿って
+    // 衝突・反射させる(崖に沿って流れ落ちる見た目にするため)。SlopeProfileBufが未設定
+    // (要素2、フォールバック)の通常のポーション運搬物理では、下のSlopeProfileCount>2判定が
+    // falseになり、従来のBoundsRestitution/BoundsFrictionによる平らなGroundY判定と完全に
+    // 同じ挙動になる(SlopeRestitution/SlopeFrictionは滝のみでしか使われない)。
+    float slopeY = max(GroundY, SlopeHeightAt(p.z));
+    if (p.y < slopeY)
     {
-        p.y = GroundY;
-        if (v.y < 0.0) v.y = -v.y * BoundsRestitution;
-        v.xz *= (1.0 - BoundsFriction);
+        if (SlopeProfileCount > 2)
+        {
+            // 有限差分で局所法線を推定 (Y-Z 平面内のみ)。
+            const float dz = 0.4;
+            float hBack  = SlopeHeightAt(p.z - dz);   // より奥(z がより負) = 高い側
+            float hFront = SlopeHeightAt(p.z + dz);   // より手前 = 低い側
+            float slope = (hBack - hFront) / (2.0 * dz);
+            // n=(0,1,+slope): h(z)がzの増加とともに下る(池へ向かう)面の外向き法線は+Z側へ傾く。
+            float3 n = normalize(float3(0.0, 1.0, slope));
+
+            // 完全なハードスナップではなく部分補正にし、PBFの圧力/慣性が表面形状を
+            // 支配できるようにする(でないと岩に張り付いた剛体シェルのように見える)。
+            uint jh = i * 2654435761u + FrameSeed * 97531u;
+            jh ^= jh >> 13; jh *= 60493u; jh ^= jh >> 15;
+            float jitter = (frac((float)(jh & 0xFFFFu) / 65536.0) - 0.5) * 0.6;
+            float targetY = slopeY + jitter;
+
+            const float correctionStrength = 0.35;
+            p.y = lerp(p.y, targetY, correctionStrength);
+
+            float vn = dot(v, n);
+            if (vn < 0.0) v -= (1.0 + SlopeRestitution) * vn * n;
+            v *= (1.0 - SlopeFriction);
+        }
+        else
+        {
+            // 既存のポーション運搬物理と完全に同じ、平らなGroundY面での反射。
+            p.y = slopeY;
+            if (v.y < 0.0) v.y = -v.y * BoundsRestitution;
+            v.xz *= (1.0 - BoundsFriction);
+        }
     }
 
     // ギミックの箱との衝突は SolidBoxCollide カーネル (Finalize の後) が担当する。
