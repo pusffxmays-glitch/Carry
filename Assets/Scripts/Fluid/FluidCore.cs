@@ -72,6 +72,25 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 壺外の液滴・水たまりには適用しないので、こぼれがスローモーションにならない。
     [HideInInspector] public float maxSpeedInPot = -1f;
 
+    // ---- 追補 26: パリー回収 & 着地ジョルト ----
+    float recallUntil = -999f, recallStrengthValue;
+    Vector3 joltDeltaV;
+    int joltFrame = -1;
+    /// <summary>パリー成功時: 壺の近くではみ出している粒子を seconds の間、口へ吸い戻す。</summary>
+    public void RecallSpill(float seconds, float strength)
+    {
+        recallUntil = Time.time + seconds;
+        recallStrengthValue = strength;
+    }
+    /// <summary>パリーなし着地: 次のフレームで壺内の粒子に deltaV (m/s、world) を注入する
+    /// (着地の跳ね返り + 前方サージ)。BindAll はサブステップ毎に呼ばれるため、消費フラグ
+    /// ではなくフレーム番号一致で「そのフレームの全サブステップ」に適用する。</summary>
+    public void JoltPot(Vector3 deltaV)
+    {
+        joltDeltaV = deltaV;
+        joltFrame = Time.frameCount + 1;
+    }
+
     [Header("Fill / region")]
     [Tooltip("容器の内容積に対する初期充填率。")]
     // 満タン。0.95 は「リムの直下まで」で、これ以上入れると静止時から溢れる。
@@ -1072,6 +1091,16 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("CurvatureStrength", curvatureStrength);
         fluidCompute.SetFloat("MaxSpeed", maxSpeed);
         fluidCompute.SetFloat("MaxSpeedPot", maxSpeedInPot > 0f ? maxSpeedInPot : maxSpeed);
+        // 追補 26: パリー回収 & 着地ジョルト
+        Vector3 potPos = boundary != null ? boundary.Container.position : Vector3.zero;
+        Vector3 potUp = boundary != null ? boundary.Container.up : Vector3.up;
+        fluidCompute.SetFloat("RecallStrength", Time.time < recallUntil ? recallStrengthValue : 0f);
+        fluidCompute.SetVector("RecallTarget", potPos + potUp * 0.85f);
+        fluidCompute.SetFloat("RecallMinY", potPos.y - 0.6f);
+        // 上+前方に注入する (着地の跳ね返り + 前方サージ)。下向きは圧力ソルバが床境界へ
+        // 吸収し、真上だけの噴水は壺内へ落ち戻るため、どちらも実測ほぼ無効だった。
+        fluidCompute.SetVector("JoltAccel",
+            Time.frameCount == joltFrame ? joltDeltaV / Mathf.Max(Time.deltaTime, 1e-4f) : Vector3.zero);
 
         fluidCompute.SetVector("GridOrigin", gridOrigin);
         fluidCompute.SetFloat("CellSize", cellSize);

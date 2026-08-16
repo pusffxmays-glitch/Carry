@@ -130,6 +130,15 @@ float MaxSpeed;
 // ジャンプ中だけ CPU 側が絞る。壺外 (落下中の液滴・地面の水たまり) は MaxSpeed のままに
 // することで、「こぼれた液体がスローモーションで落ちる」のを防ぐ。
 float MaxSpeedPot;
+// 追補 26: パリー成功の「回収」— 壺の近くではみ出している粒子を口へ引き戻す。
+// RecallStrength > 0 の間だけ有効。RecallTarget は壺の口の少し上 (world)。
+float RecallStrength;
+float3 RecallTarget;
+float RecallMinY;      // これより低い粒子 (地面の水たまり) は回収しない
+// 追補 26: パリーなし着地のジョルト — 壺内の粒子へ 1 フレームかけて速度を注入し、
+// 着地の「ドスン」を流体に伝える (加速度として渡す: dv / frameDt)。
+// 縦成分だけだと噴水が壺内へ落ち戻るので、前方成分を混ぜてリムを越えさせる。
+float3 JoltAccel;
 
 float3 GridOrigin;
 float  CellSize;
@@ -433,6 +442,24 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     if (i >= FluidCount) return;
 
     float3 v = Velocities[i] + Gravity * DeltaTime;
+
+    // 追補 26a: パリー回収。壺の近傍 (2.6m) で、壺の外にいて、地面の水たまりでない
+    // 粒子を口の上へ吸い寄せる。速度を目標方向 7 m/s へ指数追従させる。
+    if (RecallStrength > 0.001)
+    {
+        float3 p = Positions[i];
+        float3 toT = RecallTarget - p;
+        float d = length(toT);
+        if (d < 2.6 && p.y > RecallMinY && !InPotGate(p))
+        {
+            float3 dir = toT / max(d, 0.001);
+            v = lerp(v, dir * 7.0, saturate(RecallStrength * DeltaTime));
+        }
+    }
+    // 追補 26b: パリーなし着地のジョルト (壺内のみ)
+    if (dot(JoltAccel, JoltAccel) > 0.001 && InPotGate(Positions[i]))
+        v += JoltAccel * DeltaTime;
+
     v = ClampSpeed(v, Positions[i]);
 
     Velocities[i] = v;

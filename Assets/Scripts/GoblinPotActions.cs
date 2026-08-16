@@ -117,6 +117,9 @@ public class GoblinPotActions : MonoBehaviour
     public float cushionFailNudge = 0.25f;
     [Tooltip("着地後のジャンプ抑止時間 (秒)。惜しい遅押しの誤ジャンプ防止。")]
     public float cushionJumpSuppress = 0.2f;
+    // 注入は壺内クランプ (MaxSpeed 5 相対) で頭打ちになるため 5 が実効最大 (実測)。
+    [Tooltip("パリーなし着地で壺内に注入する跳ね返り速度 (m/s、上+前方)。通常ジャンプの掛け金。")]
+    public float cushionMissJolt = 5.0f;
     bool cushionPressed;         // この滞空中に Space を押したか
     float cushionPressTime = -999f;
 
@@ -428,6 +431,11 @@ public class GoblinPotActions : MonoBehaviour
             hotCalmUntil = 0f;
             StartCoroutine(EndFluidCalm(0f));
             rampCalmBlockedUntil = Time.time + 0.7f;   // 着地スロッシュが加速 calm で無効化されないように
+            // 追補 26: パリーなし着地は「ドスン」を流体へ注入。静定した液体は着地だけでは
+            // こぼれない (実測) ため、通常ジャンプにも掛け金を作る (ユーザー指定:
+            // 「パリー成功の嬉しさがもっと欲しいため、通常ジャンプはもう少しこぼれていい」)。
+            if (fluid != null)
+                fluid.JoltPot((Vector3.up + transform.forward * 0.8f) * cushionMissJolt);
         }
     }
 
@@ -440,6 +448,8 @@ public class GoblinPotActions : MonoBehaviour
         // 滞空 calm (1.2) よりさらに強く絞って着地衝撃を吸収する
         BeginFluidCalm(just ? cushionJustCalm : cushionCalm);
         hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + (just ? 1.0f : 0.8f));
+        // 追補 26: はみ出して落下中のポーションを口へ吸い戻す (パリーの嬉しさ演出も兼ねる)
+        if (fluid != null) fluid.RecallSpill(just ? 0.7f : 0.5f, just ? 10f : 6f);
         StartCoroutine(GlowPulse(just ? 6.5f : 4.5f, 0.25f));
         // 追補 20: 足元リング衝撃波 (グッド = シアン / ジャスト = 金、HDR で Bloom が滲む)
         ParryRingFX.Spawn(transform.position,
