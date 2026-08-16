@@ -4171,3 +4171,39 @@ gen_stand.py で手製の NoPot_Stand (1f) を作成: 脚は足接地固定の I
 | 走り (定速) | 89% | **100%** (ジャスト) |
 - 「跳んだら 1 割払う / パリーすれば無償 + はみ出しも回収」の構造が完成。
 - 調整: cushionMissJolt (5) / RecallSpill の強度・時間 (DoCushion 内)。
+
+## 追補 27 (2026-08-16): stage ブランチのマージ + ForestStage への運搬システム統合
+
+要望: 「Git Branch 'Stage' から配置されているオブジェクトや機能をすべてインポートして、
+そのステージ上でゴブリンおよびツボ、ポーション物理演算すべて駆動するようにマージして」
+
+### マージ (コミット 845dab8)
+- origin/stage (2811 ファイル: ForestStage_Realistic シーン、Terrain、湖・滝・森アセット、
+  RiverFlowController 等のギミックスクリプト) を StagePlay へマージ。
+- **add/add 衝突 (Fluid 一式・CastleStage・GoblinAnimator など 20 件) は StagePlay 側
+  (進化版) を採用**。stage 側は分岐初期の古いフォークだった。
+- **GUID 分裂**: 両ブランチが独立生成した Fluid スクリプト/シェーダーは GUID が別物。
+  当方 GUID に統一し、stage シーン内の参照を sed で書き換え (2 シーン)。
+- stage 側の追加 (GoblinLocomotion.SnapTo、CarryCameraRig ゲート) は自動マージで共存。
+- Git LFS: 認証はユーザーに `! git lfs pull` を 1 回実行してもらい資格情報を保存 →
+  全量取得。マージ時は GIT_LFS_SKIP_SMUDGE=1 でチェックアウトし後から実体化。
+
+### 統合 (コミット 2112957)
+- ForestStage_Realistic に CastleStage の一式 (ゴブリン+壺+流体+パリー、カメラ、
+  ゲージ UI、PotionGlow Volume) を**一時親にまとめて一括 Instantiate** →
+  クロス参照を保ったまま移植。stage 側の初期構成ゴブリン/カメラは削除。
+- **地形バイナリ破損**: .gitattributes の `*.asset text` により ForestTerrainData.asset
+  (バイナリ) がコミット時の改行正規化で不可逆破損していた (blob 自体が壊れていた)。
+  ビルダー CarryBuildTerrainForest.BuildTerrain をリフレクションで単体実行して再生成し、
+  シーンの Terrain/TerrainCollider に再バインド。`-text` を付けて再発防止。
+  (stage 側での手動地形調整分は喪失 — 復元不能)
+- CarrySetupWaterfallFluid.cs (stage 版 FluidCore の滝エミッタ API 前提) は #if false で
+  一時無効化。**滝を流体で流すには spawnBox 系エミッタの FluidCore への移植が必要 (後続課題)**。
+- 動作確認 (プレイモード): 地形上でスポーン・歩行・地形傾き追従・ジャンプ・パリー判定・
+  壺の流体 (fill 計測)・ゲージ・エラー 0。
+
+### 運用メモ
+- バイナリを `*.asset text` の下でコミットすると blob が破壊される。バイナリ .asset は
+  必ず -text (または LFS) を付けること。
+- クロス参照を持つ複数オブジェクトのシーン間移植は「一時親にまとめて 1 回 Instantiate」
+  が確実 (参照が клローン内で自動リマップされる)。
