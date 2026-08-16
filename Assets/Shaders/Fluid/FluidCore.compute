@@ -708,7 +708,14 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         float hBack  = SlopeHeightAt(p.z - dz);   // より奥(z がより負) = 高い側
         float hFront = SlopeHeightAt(p.z + dz);   // より手前 = 低い側
         float slope = (hBack - hFront) / (2.0 * dz);
-        float3 n = normalize(float3(0.0, 1.0, -slope));
+        // BUGFIX: this normal was sign-flipped in Z (normalize(0,1,-slope)), tilting it
+        // uphill/backward instead of downhill/toward the pool -- the outward normal for a
+        // surface h(z) that DESCENDS as z increases (toward the pool) must tilt toward +Z,
+        // i.e. n=(0,1,+slope) given slope=(hBack-hFront)/(2dz) is positive on a downhill run.
+        // With the flipped sign, every bounce below reflected velocity away from the pool
+        // instead of toward it, which is why the falling stream stalled partway down the
+        // slope and never visually reached the lake.
+        float3 n = normalize(float3(0.0, 1.0, slope));
 
         // WATERFALL FIX: a full hard snap (p.y = slopeY every substep) pins the entire liquid
         // mass to the exact geometric terrain contour every step, which reads as a rigid shell
