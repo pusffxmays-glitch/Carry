@@ -7,6 +7,13 @@
 *.anim text
 *.meta text
 
+# ===== バイナリシリアライズされるUnityアセット =====
+# TerrainDataはForce Text設定下でもバイナリ形式で保存されるため、
+# 上のtext属性による改行コード変換(LF->CRLF)を受けるとヘッダーが破損し
+# "Invalid serialized file header" エラーでUnityが読み込めなくなる。
+*TerrainData*.asset -text
+ProjectSettings/XRSettings.asset -text
+
 # ===== Git LFSで管理するバイナリ資産 =====
 # 3Dモデル
 *.fbx filter=lfs diff=lfs merge=lfs -text
