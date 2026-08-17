@@ -9023,6 +9023,55 @@ Transform:
   m_CorrespondingSourceObject: {fileID: -8679921383154817045, guid: bf48b8ffd0a28cf49b5b9a90e9a52284, type: 3}
   m_PrefabInstance: {fileID: 308153836}
   m_PrefabAsset: {fileID: 0}
+--- !u!1 &311977760
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 311977762}
+  - component: {fileID: 311977761}
+  m_Layer: 0
+  m_Name: PotionRefillZone
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &311977761
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 311977760}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: e6140bd1bbd792147b5073dc52b74086, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PotionRefillZone
+  halfExtents: {x: 4.5, y: 2.2, z: 7.5}
+  stopAtFill: 0.98
+  pourSpeed: 1.5
+  spawnBoxSize: {x: 0.5, y: 0.15, z: 0.5}
+  spawnHeightFraction: 0.75
+--- !u!4 &311977762
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 311977760}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -3.3, y: -3.6, z: -31}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &313338912
 GameObject:
   m_ObjectHideFlags: 0
@@ -21585,7 +21634,7 @@ Material:
     - _ZWrite: 1
     m_Colors:
     - _BaseColor: {r: 0.28, g: 0.22, b: 0.15, a: 1}
-    - _Color: {r: 0.28, g: 0.22, b: 0.15, a: 1}
+    - _Color: {r: 0.27999997, g: 0.21999997, b: 0.14999998, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
     - _SpecColor: {r: 0.19999996, g: 0.19999996, b: 0.19999996, a: 1}
   m_BuildTextureStacks: []
@@ -29448,7 +29497,7 @@ Transform:
   m_GameObject: {fileID: 966228488}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -3.2, y: 2.6, z: 5}
+  m_LocalPosition: {x: -3.2, y: 2.2073908, z: 5}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -34114,6 +34163,8 @@ MonoBehaviour:
   maxSpeedInPot: -1
   fillFraction: 0.03
   initialSettleSeconds: 0.7
+  startupCalmSimSeconds: 1.5
+  startupCalmClamp: 1.2
   simPadding: 0.45
   fallZoneBelow: 1.2
   groundY: -4.3
@@ -39736,6 +39787,12 @@ MonoBehaviour:
   swimSpeed: 2.5
   grabRadius: 1.4
   grabKey: 19
+  potDriftSpeed: 3.5
+  potBobAmplitude: 0.06
+  potBobFrequency: 0.6
+  potRockDeg: 7
+  potFloatDepth: 0.12
+  potSettleMaxDepth: 0.8
 --- !u!1 &1330497909
 GameObject:
   m_ObjectHideFlags: 0
@@ -64371,11 +64428,13 @@ MonoBehaviour:
   maxDeltaPPerSpacing: 0.25
   maxSpeed: 5
   maxSpeedInPot: -1
-  fillFraction: 0.95
+  fillFraction: 0.88
   initialSettleSeconds: 0.7
+  startupCalmSimSeconds: 1.5
+  startupCalmClamp: 1.2
   simPadding: 0.45
   fallZoneBelow: 1.2
-  groundY: 0
+  groundY: -4.3
   lateralSpread: 0.8
   groundMargin: 0.12
   topMargin: 1.2
@@ -66365,3 +66424,4 @@ SceneRoots:
   - {fileID: 2127482139}
   - {fileID: 1745516354}
   - {fileID: 1032535578}
+  - {fileID: 311977762}

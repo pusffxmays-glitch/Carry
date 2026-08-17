@@ -213,10 +213,21 @@ public class FluidSurface : MonoBehaviour
         voxelSize = core.ParticleSpacing / Mathf.Max(1.5f, voxelsPerSpacing);
         splatRadius = core.ParticleSpacing * splatRadiusPerSpacing;
 
+        // FIXED 2026-08-17 (バグ報告「ゲージは100%だがツボの中のポーションが見えない」):
+        // 縦の広さは domainSize.y (固定 4.5m) ではなく SimBounds (地面〜壺上端) から取る。
+        // フィールドの Y 原点は地面 (SimBounds の底) に固定されているため、groundY を
+        // ステージの川底 (-4.3) へ下げた際、固定 4.5m ではフィールドが y≈-4.5〜0 になり、
+        // 橋の上の壺 (y≈3.8〜4.9) が天井からはみ出して中身が描画されなくなっていた
+        // (地面に落ちたこぼれはフィールド内なので見える = まさに報告どおりの症状)。
+        // +1m は登坂ヘッドルーム。SimBounds は regionGrowStep (0.5m) 刻みで伸びるので、
+        // 余裕を持たせて再確保 (LateUpdate のチェック) の頻度を下げる。
+        builtYSpan = core.SimBounds.size.y;
+        float ySpan = builtYSpan + 1.0f;
+
         // Brick の整数倍に切り上げる。中途半端だと端の Brick が半分だけ有効になる。
         voxelDims = new Vector3Int(
             CeilToBrick(domainSize.x / voxelSize),
-            CeilToBrick(domainSize.y / voxelSize),
+            CeilToBrick(ySpan / voxelSize),
             CeilToBrick(domainSize.z / voxelSize));
 
         UpdateFieldOrigin();
@@ -305,9 +316,14 @@ public class FluidSurface : MonoBehaviour
         cs.Dispatch(kResetSlots, groupsX, groupsY, 1);
     }
 
+    float builtYSpan;
+
     void LateUpdate()
     {
         if (!Initialise()) return;
+        // 登坂で SimBounds が伸びてフィールドの縦が足りなくなったら作り直す
+        // (BuildField の注記を参照。ヘッドルーム 1m があるので頻度は低い)。
+        if (core.SimBounds.size.y > builtYSpan + 0.01f) BuildField();
         BuildSurface();
     }
 

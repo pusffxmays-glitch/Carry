@@ -173,6 +173,18 @@ public class GoblinClip
         potPos = GoblinClipData_LandCushionDeep.PotPos, potY = GoblinClipData_LandCushionDeep.PotYDir, potX = GoblinClipData_LandCushionDeep.PotXDir,
     };
 
+    static GoblinClip _drown;
+    // 川に流されている間のおぼれもがき (2026-08-17)。Blender action 'NoPot_Drown'。
+    // 交互の水面叩き + バタ足 + のけぞり首振り。RiverFlowController の sweep 中に
+    // GoblinPotActions.sweptByRiver 経由でループ再生される。
+    public static GoblinClip Drown => _drown ??= new GoblinClip
+    {
+        name = "Drown", frameCount = GoblinClipData_Drown.FrameCount, fps = GoblinClipData_Drown.Fps,
+        loop = true, groundY = GoblinClipData_Drown.GroundY, potReleaseFrame = -1,
+        bones = GoblinClipData_Drown.Bones,
+        pos = GoblinClipData_Drown.Pos, ydir = GoblinClipData_Drown.YDir, xdir = GoblinClipData_Drown.XDir,
+    };
+
     public static GoblinClip RopeWalk => _rope ??= new GoblinClip
     {
         name = "RopeWalk", frameCount = GoblinClipData_RopeWalk.FrameCount, fps = GoblinClipData_RopeWalk.Fps,

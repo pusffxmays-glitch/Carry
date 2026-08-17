@@ -23,11 +23,40 @@ public class RiverFlowController : MonoBehaviour
     public float grabRadius = 1.4f;
     public Key grabKey = Key.E;
 
+    // ADDED 2026-08-17 (要望「川に落下した場合はツボを離して、ツボとゴブリンが別々に
+    // 流されるようにしてほしい」): 落水時に壺を手放し、壺は壺で川面を漂流する。
+    // ゴブリン (flowSpeed) よりずっと遅く流すことで、すぐに二つが離れ離れになる。
+    // 速度を流体の追従能力 (maxSpeed 5 の容器相対クランプ + §21 の姿勢平滑化) の
+    // 範囲に収めてあるので、漂流中も中身のシミュレーションは破綻しない。
+    [Header("Pot drift (落水時の壺の漂流)")]
+    [Tooltip("壺が流される速さ (m/s)。ゴブリンの flowSpeed より遅くして二つを引き離す。")]
+    public float potDriftSpeed = 3.5f;
+    [Tooltip("漂流中の上下の揺れ (m)。")]
+    public float potBobAmplitude = 0.06f;
+    [Tooltip("上下の揺れの周波数 (Hz)。")]
+    public float potBobFrequency = 0.6f;
+    [Tooltip("漂流中の傾きの振幅 (度)。")]
+    public float potRockDeg = 7f;
+    [Tooltip("壺の底が水面からどれだけ沈むか (m)。")]
+    public float potFloatDepth = 0.12f;
+
+    // おぼれもがき (2026-08-17): クリップは足の最低点を root y=0 に正規化して再生される。
+    // 実測 (z≈60 の開けた川面) では root = riverSurfaceY で頭と掻く腕だけが水面上に出て
+    // ちょうど「おぼれ」に見える。見た目の水面はゲームプレイ水面 (riverSurfaceY) と
+    // 完全一致ではなく川に沿って変わるので、深すぎたらここを負に、浮きすぎたら正に。
+    [Tooltip("流されている間、ゴブリンの root を水面からどれだけ沈めるか (m)。")]
+    public float sweepImmersion = 0.15f;
+
     Transform goblin;
     GoblinLocomotion locomotion;
     CharacterController controller;
+    GoblinPotActions potActions;
     bool sweeping;
     Vector3 lastCheckpoint;
+    Transform pot;
+    FluidCore potFluid;
+    bool potDrifting;
+    float potPhase;
 
     void Awake()
     {
@@ -52,12 +81,31 @@ public class RiverFlowController : MonoBehaviour
         controller = cc;
         goblin = goblinTransform;
         locomotion.enabled = false;
+
+        // 壺を担いだまま落ちたら手放し、壺は壺で流す。Find が直接の子を返すのは
+        // まだ手元にあるときだけなので、地面に置いてきた壺を誤って掴むことはない。
+        var actions = goblinTransform.GetComponent<GoblinPotActions>();
+        potActions = actions;
+        if (actions != null) actions.sweptByRiver = true;   // おぼれもがき再生 (2026-08-17)
+        Transform heldPot = goblinTransform.Find("Carry_Pot");
+        if (actions != null && heldPot != null)
+        {
+            potFluid = heldPot.GetComponent<FluidCore>();
+            actions.ReleasePotForSweep();
+            pot = heldPot;
+            potDrifting = true;
+            potPhase = 0f;
+        }
     }
 
     void Update()
     {
-        if (!sweeping) return;
+        if (sweeping) UpdateGoblinSweep();
+        if (potDrifting) UpdatePotDrift();
+    }
 
+    void UpdateGoblinSweep()
+    {
         var kb = Keyboard.current;
         float steer = 0f;
         if (kb != null)
@@ -70,7 +118,7 @@ public class RiverFlowController : MonoBehaviour
         Vector3 desired = current;
         desired.x = Mathf.Clamp(current.x + steer * swimSpeed * Time.deltaTime, -riverHalfWidth, riverHalfWidth);
         desired.z -= flowSpeed * Time.deltaTime;
-        desired.y = riverSurfaceY;
+        desired.y = riverSurfaceY - sweepImmersion;
         controller.Move(desired - current);
 
         if (kb != null && kb[grabKey].wasPressedThisFrame)
@@ -92,6 +140,57 @@ public class RiverFlowController : MonoBehaviour
         }
     }
 
+    // 壺の漂流。ゴブリンの sweep とは独立に進み、ゴブリンが先に復帰しても
+    // 壺は湖まで流れ続ける (「別々に流される」)。
+    void UpdatePotDrift()
+    {
+        if (pot == null) { potDrifting = false; return; }
+        potPhase += Time.deltaTime;
+
+        Vector3 p = pot.position;
+        p.z -= potDriftSpeed * Time.deltaTime;
+        p.x = Mathf.Clamp(p.x, -riverHalfWidth, riverHalfWidth);
+        // 落水直後は手の高さから水面まで滑らかに降ろす (瞬間移動は流体が飛ぶ)
+        float targetY = riverSurfaceY - potFloatDepth
+            + potBobAmplitude * Mathf.Sin(potPhase * potBobFrequency * 2f * Mathf.PI);
+        p.y = Mathf.MoveTowards(p.y, targetY, 4f * Time.deltaTime);
+        pot.position = p;
+
+        // ぷかぷかと傾く。周波数を軸ごとに変えて単調な往復に見せない。
+        float rx = potRockDeg * Mathf.Sin(potPhase * potBobFrequency * 0.9f * 2f * Mathf.PI);
+        float rz = potRockDeg * Mathf.Sin(potPhase * potBobFrequency * 0.7f * 2f * Mathf.PI + 1.3f);
+        pot.rotation = Quaternion.Euler(rx, pot.eulerAngles.y, rz);
+
+        if (p.z <= upstreamLimitZ) EndPotDrift();
+    }
+
+    [Tooltip("漂流の終点で、底がこの深さ (水面からの距離 m) より浅ければ着底させる。それより深い場所では水面に浮かせたままにする。")]
+    public float potSettleMaxDepth = 0.8f;
+
+    void EndPotDrift()
+    {
+        potDrifting = false;
+        if (potFluid != null) potFluid.maxSpeedInPot = -1f;
+        if (pot == null) return;
+        // 湖に着いたら直立させる
+        pot.rotation = Quaternion.Euler(0f, pot.eulerAngles.y, 0f);
+        // 浅瀬なら着底させて拾いやすくする。深い場所で底まで沈めると壺が水面下に
+        // 消えてしまい (実測: 湖口の底は水面下 4.4m、y=-8.6 まで沈んで見失った)、
+        // さらにシム領域の底 (groundY) より下へ出て中身が全損する。深ければ浮かせたまま。
+        var hits = Physics.RaycastAll(pot.position + Vector3.up * 0.5f, Vector3.down, 8f,
+                                      Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+        float best = float.MaxValue; float bottomY = pot.position.y;
+        foreach (var h in hits)
+        {
+            if (h.collider.transform == pot || h.collider.transform.IsChildOf(pot)) continue;
+            if (h.distance < best) { best = h.distance; bottomY = h.point.y; }
+        }
+        if (best != float.MaxValue && bottomY >= riverSurfaceY - potSettleMaxDepth)
+            pot.position = new Vector3(pot.position.x, bottomY, pot.position.z);
+        else
+            pot.position = new Vector3(pot.position.x, riverSurfaceY - potFloatDepth, pot.position.z);
+    }
+
     RecoveryPoint FindNearbyRecoveryPoint(Vector3 pos)
     {
         RecoveryPoint best = null;
@@ -111,6 +210,7 @@ public class RiverFlowController : MonoBehaviour
     void EndSweep(Vector3 destination)
     {
         sweeping = false;
+        if (potActions != null) potActions.sweptByRiver = false;   // おぼれもがきを終える
         locomotion.SnapTo(destination);
         locomotion.enabled = true;
     }

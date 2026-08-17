@@ -77,6 +77,23 @@ public class GoblinTerrainTilt : MonoBehaviour
     {
         controller = GetComponent<CharacterController>();
         EnsurePivot();
+
+        // ADDED 2026-08-17: 傾きを開始前に足元の法線で初期化する。
+        // 従来は water から始まり (smoothedNormal = up)、開始直後に carryTiltRateDeg で
+        // 実際の法線 (橋のアーチで約 2°) までランプしていた。壺はその間回転し続けるので、
+        // 静定済みで注がれた液面が開始直後に再平衡を強いられ、「何もしていないのに
+        // ポーションが揺れる」初期スロッシュの一因になっていた (実測: 開始 1.6 秒で
+        // 流体がクランプ速度 5 m/s に到達)。最初から正しい傾きで立たせれば、
+        // FluidCore の初期整定 (PreSettle) がその姿勢の液面を作るので、揺れが出ない。
+        Vector3 n = SampleGroundNormal();
+        if (HasGround)
+        {
+            float ang = Vector3.Angle(Vector3.up, n);
+            if (ang > maxTiltDeg && ang > 1e-3f)
+                n = Vector3.Slerp(Vector3.up, n, maxTiltDeg / ang);
+            smoothedNormal = Vector3.Slerp(Vector3.up, n, tiltStrength).normalized;
+            Pivot.rotation = Quaternion.FromToRotation(Vector3.up, smoothedNormal) * transform.rotation;
+        }
     }
 
     // 見た目用の子を用意し、壺以外の子（アーマチュアとメッシュ）をその下へ移す。

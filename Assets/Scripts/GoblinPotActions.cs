@@ -551,9 +551,20 @@ public class GoblinPotActions : MonoBehaviour
     // ---- 壺なしロコモーション ----
     GoblinClip jumpClipInUse;   // 離陸時に選んだジャンプクリップ (空中で切り替えない)
 
+    /// <summary>川に流されている間 true (RiverFlowController が設定)。おぼれもがきを再生する。</summary>
+    [HideInInspector] public bool sweptByRiver;
+
     void UpdateNoPotLocomotion()
     {
         if (anim.OneShotActive) return;
+        // 川に流されている間はおぼれもがき (2026-08-17)。接地判定より先に見る
+        // (sweep 中は水面を Move されるので isGrounded が不定なため)。
+        if (sweptByRiver)
+        {
+            jumpClipInUse = null;
+            anim.SetLocomotion(GoblinClip.Drown, 0f);
+            return;
+        }
         // 壺なしで水に入った場合はジャンプポーズ固定を避け、歩きクリップでばたつかせる
         var swm = GetComponent<GoblinSwimmer>();
         if (swm != null && swm.InWater)
@@ -607,6 +618,25 @@ public class GoblinPotActions : MonoBehaviour
             pot.position = new Vector3(pot.position.x, y, pot.position.z);
             yield return null;
         }
+    }
+
+    /// <summary>川に落ちたとき (RiverFlowController.BeginSweep) に呼ばれる。
+    /// 壺を即座に手放して世界へ切り離し、壺なし状態にする。ツボおろしクリップは
+    /// 再生しない (流されている最中なので)。壺の漂流は RiverFlowController が駆動する。</summary>
+    public void ReleasePotForSweep()
+    {
+        if (Current != State.Carrying && Current != State.PuttingDown && Current != State.PickingUp
+            && Current != State.Falling) return;
+        StopAllCoroutines();
+        anim.StopAll();
+        // BeginPickUp の位置合わせ中は cc が一時無効。そのコルーチンを止めた場合に備えて戻す。
+        if (cc != null && !cc.enabled) cc.enabled = true;
+        if (pot != null && pot.parent == transform) pot.SetParent(null, true);
+        if (loco != null) loco.movementLocked = false;   // 移動は sweep 側が locomotion 自体を無効化する
+        // 漂流中の中身の暴れは抑える (漂流終了時に RiverFlowController が -1 へ戻す)
+        if (fluid != null) fluid.maxSpeedInPot = 2.5f;
+        if (rig != null) rig.ResetBalance();
+        Current = State.PotDown;
     }
 
     /// <summary>デバッグワープ用: 壺を即座に手元へ戻して運搬状態にする。</summary>

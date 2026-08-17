@@ -97,6 +97,19 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Range(0.05f, 0.95f)] public float fillFraction = 0.95f;
     [Tooltip("開始時に容器を静止させたまま液面を釣り合わせておく秒数。0 で無効。種の格子が緩む分の初期こぼれを防ぐ。")]
     [Range(0f, 2f)] public float initialSettleSeconds = 0.7f;
+    // ADDED 2026-08-17 (バグ報告「開始直後、何もしていないのにポーションが揺れる」):
+    // PreSettle は静定した液面 (全粒子 < 0.25 m/s) を作るが、実行時ループへの引き継ぎで
+    // わずかな残渣が増幅され、静止した容器の中で数秒〜数十秒の表面の泡立ちに育っていた
+    // (実測: 容器ピーク速度 0.000 のまま流体だけが 5 m/s のクランプまで到達)。
+    // 静定状態そのものは安定 (収束後は静かなまま) なので、シード直後の数シミュ秒だけ
+    // 壺内クランプを絞って残渣を殺し、静定アトラクタへ確実に落とす。
+    [Tooltip("シード直後、このシミュレーション秒数だけ壺内の速度を startupCalmClamp に絞る。ハンドオフの残渣が表面の泡立ちに育つのを防ぐ。0 で無効。")]
+    // 1.5 → 3.0 (2026-08-17): 静定が早いほど CFL のサブステップ数が早く最小 (6) へ落ち、
+    // 起動直後の重さ (高サブステップ期間) も短くなる。一石二鳥なので長めに取る。
+    public float startupCalmSimSeconds = 3.0f;
+    [Tooltip("開始直後の壺内クランプ (m/s)。")]
+    public float startupCalmClamp = 0.8f;
+    float simTimeSinceSeed = 1e9f;
     [Tooltip("シミュレーション領域の余白 (m)。容器の周囲にこれだけ広げる。")]
     public float simPadding = 0.45f;
     [Tooltip("容器の下へ領域を伸ばす量 (m)。Box モードでのみ使う。壺モードでは領域の底は groundY に固定される。")]
@@ -314,7 +327,16 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     const int Threads = 256;
     const int ScanBlock = 256;
-    const int MaxCells = 262144;
+    // ADDED 2026-08-17 (バグ報告「橋の上でスタート直後、何もしなくてもポーションが揺れ続ける」):
+    // ForestStage の開始地点は橋の上 (容器 y≒3.8) で、領域の底は地面 (groundY=0) 固定のため
+    // 領域が縦長になり、旧上限 262144 ではセルが kernelRadius (0.0720) より粗い 0.0756m に
+    // 粗大化していた。セルが核半径を超えた状態ではソルバが静定せず、静止した容器の中で
+    // 液面が沸騰し続ける (対照実験: 同じジョルトを与えても、粗大化なしなら 35 秒で静定、
+    // 粗大化ありでは無限に対流が持続。SafetyCorrection も毎秒 3 万件発動していた)。
+    // 上限を 16 倍に上げて、実用範囲 (壺が y=10 程度まで登っても ~50 万セル) では
+    // 粗大化が起きないようにする。ScanBlockSums は BlockCount を単一スレッドの逐次
+    // ループで走査するので、セル数が増えても正しさは保たれる (バッファも blockCount で確保)。
+    const int MaxCells = 4194304;
 
     void OnEnable() { Initialise(); }
     void OnDisable() { Release(); }
@@ -667,6 +689,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     void BuildGrid()
     {
+        // 毎回 kernelRadius から求め直す。前回の (粗くした) cellSize を起点にすると、
+        // 登坂での領域拡張のたびに BuildGrid が呼ばれてセルが複利で粗くなっていく
+        // (実測: 0.0756 → 0.0773)。
+        cellSize = kernelRadius;
         Vector3 span = regionSize + Vector3.one * (cellSize * 6f);
 
         gridSize = new Vector3Int(
@@ -729,6 +755,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         predicted.SetData(pos);
         velocities.SetData(vel);
         boundary.ResyncMotion();
+        simTimeSinceSeed = 0f;   // 開始直後の壺内クランプ (startupCalmSimSeconds) の起点
     }
 
     void Release()
@@ -774,7 +801,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     {
         Initialise();
         if (!IsReady || dt <= 0f) return;
-        dt = Mathf.Min(dt, 1f / 20f);
+        // 2026-08-17: 上限 1/20 → 1/30。サブステップ数は dt に比例するため、フレームが
+        // 重いときに dt を大きく取ると「重い → dt 増 → サブステップ増 → さらに重い」の
+        // 悪循環になる (実測: 非フォーカス 9fps で壺ソルバだけで ~48ms/frame)。
+        // 上限を下げると重いときの流体はその分スローモーションになるが、
+        // フレームあたりのソルバ費用が下がって悪循環が弱まる。60fps では影響なし。
+        dt = Mathf.Min(dt, 1f / 30f);
 
         boundary.SampleMotion(dt);
         UpdateSolidBoxes();   // 揺れる橋が動くので毎フレーム更新
@@ -871,6 +903,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
         LastSubStepCount = sub;
 
+        simTimeSinceSeed += dt;
         float sdt = dt / sub;
         for (int s = 0; s < sub; s++) SubStep(sdt, (s + 1) / (float)sub);
 
@@ -1115,7 +1148,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("ArtificialPressure", artificialPressure);
         fluidCompute.SetFloat("ArtificialPressureQ", artificialPressureQ);
         fluidCompute.SetFloat("MaxDeltaP", spacing * maxDeltaPPerSpacing);
-        fluidCompute.SetFloat("ViscosityXSPH", viscosity);
+        // ADDED 2026-08-17: XSPH のサブステップあたりブレンド率 kVisc = 係数 * sdt / 基準刻み
+        // が大きすぎると、粘性が減衰源から**加振源**に反転する。シェーダ側の保険クランプは
+        // 0.9 だが、その値ではフレームレートが低い (dt が 1/20 に張り付く) とき静止した壺の
+        // 表面が泡立ち続ける自励振動になっていた (実測: kVisc 0.9 で持続、0.5 以下で急速に
+        // 静定)。ここで係数そのものを絞り、どのフレームレートでも kVisc <= 0.55 を保証する。
+        // 60fps の通常プレイでは kVisc ≒ 0.45 なので、このキャップは介入しない (挙動不変)。
+        float refStep = Mathf.Max(viscosityRefStep, 1e-6f);
+        float viscEff = Mathf.Min(viscosity, 0.55f * refStep / Mathf.Max(dt, 1e-6f));
+        fluidCompute.SetFloat("ViscosityXSPH", viscEff);
         fluidCompute.SetFloat("BoundaryViscosity", boundaryViscosity);
         // 粘性のブレンド率をサブステップ数から独立させるための基準時間刻み。
         // 係数はこの dt のときの 1 ステップ分の効きを表す。
@@ -1123,7 +1164,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("CohesionStrength", cohesionStrength);
         fluidCompute.SetFloat("CurvatureStrength", curvatureStrength);
         fluidCompute.SetFloat("MaxSpeed", maxSpeed);
-        fluidCompute.SetFloat("MaxSpeedPot", maxSpeedInPot > 0f ? maxSpeedInPot : maxSpeed);
+        float potClamp = maxSpeedInPot > 0f ? maxSpeedInPot : maxSpeed;
+        if (simTimeSinceSeed < startupCalmSimSeconds)   // 開始直後の残渣つぶし (宣言部の注記)
+            potClamp = Mathf.Min(potClamp, startupCalmClamp);
+        fluidCompute.SetFloat("MaxSpeedPot", potClamp);
         // 追補 26: パリー回収 & 着地ジョルト
         Vector3 potPos = boundary != null ? boundary.Container.position : Vector3.zero;
         Vector3 potUp = boundary != null ? boundary.Container.up : Vector3.up;
