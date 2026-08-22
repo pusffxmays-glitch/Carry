@@ -39,6 +39,16 @@ public class RiverFlowController : MonoBehaviour
     public float potRockDeg = 7f;
     [Tooltip("壺の底が水面からどれだけ沈むか (m)。")]
     public float potFloatDepth = 0.12f;
+    // 2026-08-22: 落水しても壺は直立のまま流れていたので中身が 70% も残っていた。
+    // 「水に落としたらポーションは失う」がゲーム性として正しいので、漂流に入ったら
+    // 壺を転覆させて中身を川へ流し出す。粒子を消すのではなく実際に注ぎ出す。
+    // ここで持つ理由: 漂流中の姿勢は UpdatePotDrift が毎フレーム上書きするため、
+    // GoblinPotActions 側で傾けても打ち消される。
+    [Tooltip("漂流に入ったとき壺が転覆する角度 (度)。90 を超えると口が下を向く。0 で転覆しない。")]
+    public float potCapsizeDeg = 125f;
+    [Tooltip("転覆しきるまでの時間 (s)。短くしすぎると壺の移動がテレポート扱いになり中身が飛ぶ。")]
+    public float potCapsizeSeconds = 0.8f;
+    float potBaseYaw;
 
     // おぼれもがき (2026-08-17): クリップは足の最低点を root y=0 に正規化して再生される。
     // 実測 (z≈60 の開けた川面) では root = riverSurfaceY で頭と掻く腕だけが水面上に出て
@@ -95,6 +105,7 @@ public class RiverFlowController : MonoBehaviour
             pot = heldPot;
             potDrifting = true;
             potPhase = 0f;
+            potBaseYaw = heldPot.eulerAngles.y;   // 転覆を足しても向きが自己参照で暴れないよう固定
         }
     }
 
@@ -159,7 +170,12 @@ public class RiverFlowController : MonoBehaviour
         // ぷかぷかと傾く。周波数を軸ごとに変えて単調な往復に見せない。
         float rx = potRockDeg * Mathf.Sin(potPhase * potBobFrequency * 0.9f * 2f * Mathf.PI);
         float rz = potRockDeg * Mathf.Sin(potPhase * potBobFrequency * 0.7f * 2f * Mathf.PI + 1.3f);
-        pot.rotation = Quaternion.Euler(rx, pot.eulerAngles.y, rz);
+        // 転覆をぷかぷかの上に重ねる。基準の向きは potBaseYaw に固定しておくこと
+        // (pot.eulerAngles.y を読み直すと、足した転覆が次のフレームの入力になって暴れる)。
+        Quaternion bob = Quaternion.Euler(rx, potBaseYaw, rz);
+        float capsize = potCapsizeDeg <= 0f ? 0f
+            : potCapsizeDeg * Mathf.SmoothStep(0f, 1f, potPhase / Mathf.Max(0.05f, potCapsizeSeconds));
+        pot.rotation = capsize > 0f ? Quaternion.AngleAxis(capsize, Vector3.right) * bob : bob;
 
         if (p.z <= upstreamLimitZ) EndPotDrift();
     }

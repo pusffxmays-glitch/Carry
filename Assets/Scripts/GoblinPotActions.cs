@@ -26,8 +26,24 @@ public class GoblinPotActions : MonoBehaviour
     [Header("Pickup")]
     [Tooltip("拾えるようになる壺までの水平距離 (m)。")]
     public float pickupRange = 1.6f;
+    // 2026-08-22: 水平距離しか見ていなかったため、崖下や川へ落とした壺が真下にあるだけで
+    // 拾えてしまった。斜面や段差の許容は要るので、垂直方向にも別枠で上限を設ける。
+    [Tooltip("拾えるようになる壺との垂直距離 (m)。落として下へ転がった壺を離れた場所から拾えないようにする。")]
+    public float pickupHeightRange = 1.2f;
     [Tooltip("拾い上げ時の壺正面への位置合わせ距離。ツボおろしクリップが壺を root 前方に置く距離と一致させること (2026-08-16 の経路改訂で 1.00m)。")]
     public float pickupStandDistance = 1.00f;
+
+    [Header("Spill")]
+    // 2026-08-22: 転倒しても壺が直立のまま着地する (実測 potTilt 0.0 度) ため、
+    // 中身が 56% も残っていた。ゲーム性としては「転んだら / 水に落ちたら失う」が正しいので、
+    // 手放したあとに壺そのものを倒して、流体を物理的に流し出す。粒子を消すのではなく
+    // 実際に注ぎ出すので、見た目もこぼれた液体の量も一致する。
+    [Tooltip("転倒・落水で手放したとき壺を倒す角度 (度)。90 を超えると口が下を向く。0 で無効。")]
+    public float spillTipAngle = 125f;
+    [Tooltip("倒れきるまでの時間 (s)。短くしすぎると壺の移動がテレポート扱いになり中身が飛ぶ。")]
+    public float spillTipSeconds = 0.55f;
+    [Tooltip("倒すときに壺を持ち上げる量 (m)。横倒しで胴が地面へめり込むのを防ぐ。")]
+    public float spillTipLift = 0.45f;
 
     [Header("Fall")]
     [Tooltip("よろけ強度が最大のままこの秒数経過したら転倒する。")]
@@ -389,6 +405,7 @@ public class GoblinPotActions : MonoBehaviour
     {
         if (pot == null) return false;
         Vector3 d = pot.position - transform.position;
+        if (Mathf.Abs(d.y) > pickupHeightRange) return false;   // 落とした壺を上/下から拾わせない
         d.y = 0f;
         return d.magnitude < pickupRange;
     }
@@ -584,7 +601,7 @@ public class GoblinPotActions : MonoBehaviour
             {
                 Current = State.PotDown;   // 壺は横の地面。拾い直すところから
                 if (loco != null) loco.movementLocked = false;
-                StartCoroutine(SettlePotToGround());
+                StartCoroutine(SettleThenSpill());
             },
             speed: 1f, easeOutFrames: 0f, mirror: mirror);
     }
@@ -684,6 +701,34 @@ public class GoblinPotActions : MonoBehaviour
         }
     }
 
+    IEnumerator SettleThenSpill()
+    {
+        yield return SettlePotToGround();
+        yield return TipPotForSpill();
+    }
+
+    /// <summary>転倒で手放した壺を倒して中身を流し出す。宣言部の "Spill" を参照。</summary>
+    IEnumerator TipPotForSpill()
+    {
+        if (pot == null || spillTipAngle <= 0f) yield break;
+        // 倒す向きは転倒した側へ。ミラー再生 (左へ倒れる) のときは逆。
+        Vector3 axis = transform.forward * (fallMirror ? -1f : 1f);
+        Quaternion from = pot.rotation;
+        Quaternion to = Quaternion.AngleAxis(spillTipAngle, axis) * from;
+        Vector3 p0 = pot.position;
+        Vector3 p1 = p0 + Vector3.up * spillTipLift;
+        float dur = Mathf.Max(0.05f, spillTipSeconds);
+        for (float t = 0f; t < dur; t += Time.deltaTime)
+        {
+            if (pot == null) yield break;
+            float u = Mathf.SmoothStep(0f, 1f, t / dur);
+            pot.SetPositionAndRotation(Vector3.Lerp(p0, p1, u), Quaternion.Slerp(from, to, u));
+            yield return null;
+        }
+        if (pot == null) yield break;
+        pot.SetPositionAndRotation(p1, to);
+    }
+
     /// <summary>川に落ちたとき (RiverFlowController.BeginSweep) に呼ばれる。
     /// 壺を即座に手放して世界へ切り離し、壺なし状態にする。ツボおろしクリップは
     /// 再生しない (流されている最中なので)。壺の漂流は RiverFlowController が駆動する。</summary>
@@ -701,6 +746,8 @@ public class GoblinPotActions : MonoBehaviour
         if (fluid != null) fluid.maxSpeedInPot = 2.5f;
         if (rig != null) rig.ResetBalance();
         Current = State.PotDown;
+        // 落水時に中身をぶちまけるのは RiverFlowController 側 (potCapsizeDeg)。
+        // 漂流中の姿勢は UpdatePotDrift が毎フレーム上書きするので、ここで傾けても消える。
     }
 
     /// <summary>デバッグワープ用: 壺を即座に手元へ戻して運搬状態にする。</summary>
