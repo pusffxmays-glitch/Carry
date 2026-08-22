@@ -36144,6 +36144,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::FluidCore
   particleCount: 2400
+  ballisticMode: 1
   solverIterations: 4
   minSubSteps: 6
   stableSubstepDt: 0.0111
@@ -67789,6 +67790,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::FluidCore
   particleCount: 16384
+  ballisticMode: 0
   solverIterations: 3
   minSubSteps: 9
   stableSubstepDt: 0.0037

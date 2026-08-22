@@ -17,6 +17,16 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 {
     [Header("Simulation")]
     public int particleCount = 16384;
+    // 案A (2026-08-23): 滝のような「落ちて散るだけ」の流体は、非圧縮性 (PBF) を解く必要がない。
+    // 弾道モードでは近傍グリッド構築 (6 ディスパッチ) とソルバ反復 (3xN)、法線・粘性・表面張力を
+    // すべて省き、1 サブステップを **IntegrateAndBoundary + Finalize の 2 ディスパッチ** にする。
+    // 位置は Finalize が PredictedPositions から確定し、速度は IntegrateAndBoundary が
+    // 重力積分したものをそのまま使うので、この 2 つだけで閉じている (どのカーネルも
+    // 近傍探索を使っていないことを確認済み)。安定性の制約も消えるのでサブステップは
+    // CFL だけで決まる。**描画は FluidSurface のまま**なので、色や質感はポーションと同じ。
+    // 壺には使わないこと (中身が非圧縮でなくなり、容器の中で潰れる)。
+    [Tooltip("弾道モード。近傍相互作用を解かず、重力と地形衝突だけで落とす。滝など「落ちるだけ」の流体用。壺には使わない。")]
+    public bool ballisticMode = false;
     [Tooltip("PBF の密度投影反復数 (§7)。")]
     [Range(1, 10)] public int solverIterations = 4;
     // Phase 12 実測: サブステップ数はソルバーの収束にも効く。適応 CFL だけに任せて
@@ -544,7 +554,9 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         relaxationEps = Mathf.Max(1e-6f, relaxationFraction * refSumGradSq);
         artificialPressure = artificialPressureFraction * (0.1f / Mathf.Max(1e-9f, refSumGradSq));
 
-        // 本番の間隔で境界を作り直す。
+        // 本番の間隔で境界を作り直す。ここは弾道モードでも psi を計算させること:
+        // 使わなくても BuildBoundaryBuffers が Volumes を GPU へ転送するので、
+        // 省くと null 参照で初期化ごと失敗する (2026-08-23 に一度これで滝が消えた)。
         boundary.Build(spacing, kernelRadius);
 
         // ---- シミュレーション領域 ----
@@ -1100,7 +1112,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // 安定性フロア (2026-08-22): sdt = dt/sub が stableSubstepDt を超えないよう
         // サブステップ数を足す。これで dt を実時間のまま進めても静定安定性が保たれる。
         int needStability = Mathf.CeilToInt(dt / sdtCap);
-        int sub = Mathf.Clamp(Mathf.Max(need, needStability), minSubSteps, maxSubSteps);
+        // 弾道モードは近傍相互作用が無いので静定安定性の制約 (needStability) も
+        // 下限 minSubSteps も要らない。移動量 (CFL) だけで決める。
+        int sub = ballisticMode
+            ? Mathf.Clamp(need, 1, maxSubSteps)
+            : Mathf.Clamp(Mathf.Max(need, needStability), minSubSteps, maxSubSteps);
         // GPU 安全装置: 異常に重い状態が続いていたら、実時間性より先に GPU を守る。
         if (WatchdogTripped) sub = Mathf.Min(sub, Mathf.Max(1, watchdogSafeSubSteps));
         LastRequiredSubSteps = need;
@@ -1266,6 +1282,16 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         int totalGroups = Mathf.CeilToInt(totalCount / (float)Threads);
         int boundaryGroups = Mathf.CeilToInt(boundaryCount / (float)Threads);
         int cellGroups = Mathf.CeilToInt(cellTotal / (float)Threads);
+
+        if (ballisticMode)
+        {
+            // 弾道モード: 境界粒子は誰も読まないので流体の範囲だけ回す。
+            fluidCompute.Dispatch(kIntegrateBoundary, fluidGroups, 1, 1);
+            fluidCompute.Dispatch(kFinalize, fluidGroups, 1, 1);
+            if (solidBoxCount > 0)
+                fluidCompute.Dispatch(kSolidBoxCollide, fluidGroups, 1, 1);
+            return;
+        }
 
         // 結合カーネルはスレッド範囲の広い方でディスパッチする (対策③)
         fluidCompute.Dispatch(kIntegrateBoundary, Mathf.Max(fluidGroups, boundaryGroups), 1, 1);
