@@ -596,12 +596,19 @@ public class GoblinPotActions : MonoBehaviour
             {
                 if (pot != null) pot.SetParent(null, true);
                 if (fluid != null) fluid.maxSpeedInPot = -1f;   // 手放したら calm 解除
+                // **手を離した瞬間から倒し始める**。転倒クリップは drivePotToEnd で壺を
+                // 最後まで直立のまま駆動するので、クリップが終わってから倒すと
+                // 「直立で落ちきってから、おもむろに倒れる」二段モーションになる
+                // (2026-08-22 ユーザー報告)。GoblinClipAnimator.PotExtraRotation に
+                // 上乗せすることで、クリップの落下と転倒を同時に見せる。
+                StartCoroutine(TipPotForSpill());
             },
             done: () =>
             {
                 Current = State.PotDown;   // 壺は横の地面。拾い直すところから
                 if (loco != null) loco.movementLocked = false;
-                StartCoroutine(SettleThenSpill());
+                // 倒すのは TipPotForSpill が引き続き担当。ここは高さを地面へ合わせるだけ。
+                StartCoroutine(SettlePotToGround(spillTipLift));
             },
             speed: 1f, easeOutFrames: 0f, mirror: mirror);
     }
@@ -676,7 +683,8 @@ public class GoblinPotActions : MonoBehaviour
     }
 
     // ---- 置いた壺を実際の床の高さへ合わせる (坂や台の上で浮く/めり込むのを防ぐ) ----
-    IEnumerator SettlePotToGround()
+    /// <summary><paramref name="lift"/> は横倒しの壺が地面へめり込まないよう底面から浮かせる量 (m)。</summary>
+    IEnumerator SettlePotToGround(float lift = 0f)
     {
         if (pot == null) yield break;
         Vector3 origin = pot.position + Vector3.up * 0.5f;
@@ -692,6 +700,7 @@ public class GoblinPotActions : MonoBehaviour
             if (h.distance < best) { best = h.distance; targetY = h.point.y; }
         }
         if (best == float.MaxValue) yield break;
+        targetY += lift;
         // 自由落下相当の速度で下ろす (瞬間移動はテレポート扱いで流体が飛ぶ)
         while (Mathf.Abs(pot.position.y - targetY) > 0.005f)
         {
@@ -701,32 +710,53 @@ public class GoblinPotActions : MonoBehaviour
         }
     }
 
-    IEnumerator SettleThenSpill()
-    {
-        yield return SettlePotToGround();
-        yield return TipPotForSpill();
-    }
-
     /// <summary>転倒で手放した壺を倒して中身を流し出す。宣言部の "Spill" を参照。</summary>
     IEnumerator TipPotForSpill()
     {
         if (pot == null || spillTipAngle <= 0f) yield break;
         // 倒す向きは転倒した側へ。ミラー再生 (左へ倒れる) のときは逆。
         Vector3 axis = transform.forward * (fallMirror ? -1f : 1f);
-        Quaternion from = pot.rotation;
-        Quaternion to = Quaternion.AngleAxis(spillTipAngle, axis) * from;
-        Vector3 p0 = pot.position;
-        Vector3 p1 = p0 + Vector3.up * spillTipLift;
         float dur = Mathf.Max(0.05f, spillTipSeconds);
+        // 転倒クリップが壺を駆動している間は PotExtraRotation へ足す (クリップの落下と
+        // 転倒が同時に見える)。クリップが終わったら壺は誰も駆動しないので、そのときの
+        // 姿勢を基準に自分で回し切る。切り替えの瞬間に飛ばないよう、上乗せ分を外した
+        // 姿勢 (= クリップが出していた姿勢) を基準として取り直す。
+        bool direct = false;
+        Quaternion baseRot = pot.rotation;
         for (float t = 0f; t < dur; t += Time.deltaTime)
         {
             if (pot == null) yield break;
-            float u = Mathf.SmoothStep(0f, 1f, t / dur);
-            pot.SetPositionAndRotation(Vector3.Lerp(p0, p1, u), Quaternion.Slerp(from, to, u));
+            float ang = spillTipAngle * Mathf.SmoothStep(0f, 1f, t / dur);
+            var tip = Quaternion.AngleAxis(ang, axis);
+            if (!direct && anim != null && anim.OneShotActive)
+            {
+                anim.PotExtraRotation = tip;
+            }
+            else
+            {
+                if (!direct)
+                {
+                    direct = true;
+                    if (anim != null)
+                    {
+                        baseRot = Quaternion.Inverse(anim.PotExtraRotation) * pot.rotation;
+                        anim.PotExtraRotation = Quaternion.identity;
+                    }
+                    else baseRot = pot.rotation;
+                }
+                pot.rotation = tip * baseRot;
+            }
             yield return null;
         }
         if (pot == null) yield break;
-        pot.SetPositionAndRotation(p1, to);
+        var final = Quaternion.AngleAxis(spillTipAngle, axis);
+        if (!direct && anim != null)
+        {
+            // まだクリップ駆動中に倒し切った。以降もクリップが姿勢を出し続けるので
+            // 上乗せは維持する (クリップ終了時にその姿勢のまま置き去りになる)。
+            anim.PotExtraRotation = final;
+        }
+        else pot.rotation = final * baseRot;
     }
 
     /// <summary>川に落ちたとき (RiverFlowController.BeginSweep) に呼ばれる。

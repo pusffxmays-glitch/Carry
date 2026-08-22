@@ -23,6 +23,13 @@ public class NarrowBeamSensor : MonoBehaviour
     public float edgeDropTolerance = 0.35f;
     [Tooltip("判定のばたつき防止。細道と判定されてからこの秒数は維持する。")]
     public float narrowHoldSeconds = 0.25f;
+    // 2026-08-22: コースの幅を実測すると、渡る丸太 (PathLog / 倒木、4.6m 続く) と
+    // 単発の飛び石 (PathRock / boulder、0.5m 程度) がどちらも 0.2-1.0m 幅で、**幅だけでは
+    // 区別できない**。細道渡りのモーションを出したいのは前者なので、「細い状態が続いた
+    // 時間」で切り分ける。歩き 1.5m/s なら飛び石は 0.3 秒ほどで通過するが、丸太は 3 秒
+    // 掛かるので、0.4 秒ほど連続を要求すれば飛び石ではモーションが出ない。
+    [Tooltip("細いと判定され続けてからモーションを切り替えるまでの時間 (s)。単発の飛び石で切り替わらないようにする。0 で即時。")]
+    public float narrowEngageSeconds = 0.4f;
     [Tooltip("自動判定で細道になったときの速度倍率。NarrowBeamSurface 付きの足場ではそちらの値が優先される。")]
     [Range(0.1f, 1f)] public float autoSpeedMultiplier = 0.55f;
 
@@ -35,6 +42,7 @@ public class NarrowBeamSensor : MonoBehaviour
     public float LastRightSupport { get; private set; }
 
     float narrowUntil;
+    float narrowSince = -1f;   // 細いと判定され続けている開始時刻。-1 = 途切れている
 
     void Update()
     {
@@ -89,8 +97,16 @@ public class NarrowBeamSensor : MonoBehaviour
                 if (rightOK) LastRightSupport = narrow ? half : autoNarrowWidth;
                 else LastLeftSupport = narrow ? half : autoNarrowWidth;
             }
-            if (narrow) narrowUntil = Time.time + narrowHoldSeconds;
+            if (narrow)
+            {
+                if (narrowSince < 0f) narrowSince = Time.time;
+                // 連続して細い時間が narrowEngageSeconds を超えてから発動する
+                if (Time.time - narrowSince >= narrowEngageSeconds)
+                    narrowUntil = Time.time + narrowHoldSeconds;
+            }
+            else narrowSince = -1f;
         }
+        else narrowSince = -1f;   // 空中では計測を切る (ジャンプで繋がって見えないように)
 
         if (Time.time < narrowUntil)
         {

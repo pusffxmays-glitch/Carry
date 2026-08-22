@@ -31406,6 +31406,7 @@ MonoBehaviour:
   autoNarrowWidth: 1.1
   edgeDropTolerance: 0.35
   narrowHoldSeconds: 0.25
+  narrowEngageSeconds: 0.4
   autoSpeedMultiplier: 0.55
 --- !u!114 &966228492
 MonoBehaviour:

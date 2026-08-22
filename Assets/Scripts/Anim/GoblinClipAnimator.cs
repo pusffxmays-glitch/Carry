@@ -63,6 +63,10 @@ public class GoblinClipAnimator : MonoBehaviour
     public float locoSpeed;        // 現在の移動速度 (stride 同期用)。呼び出し側が毎フレーム設定
 
     public bool OneShotActive => oneShot != null;
+    /// <summary>クリップが焼いた壺の姿勢に上乗せするワールド回転。既定は無回転。
+    /// 転倒でこぼす演出のように、**クリップが壺を駆動している最中に**姿勢を足したいときに使う
+    /// (2026-08-22)。ワンショットを開始するたび無回転へ戻すので、他のクリップへ漏れない。</summary>
+    public Quaternion PotExtraRotation { get; set; } = Quaternion.identity;
     public bool IsDrivingBody => oneShot != null || locoClip != null;
     /// <summary>再生中のワンショットクリップ (無ければ null)。種別判定用。</summary>
     public GoblinClip CurrentOneShot => oneShot;
@@ -126,6 +130,7 @@ public class GoblinClipAnimator : MonoBehaviour
         oneShotEaseOutFrames = easeOutFrames;
         oneShotElapsed = 0f;
         oneShotDrivePotToEnd = drivePotToEnd;
+        PotExtraRotation = Quaternion.identity;
         potEventFired = false;
         onPotEvent = potEvent;
         onOneShotDone = done;
@@ -283,7 +288,7 @@ public class GoblinClipAnimator : MonoBehaviour
         oneShot.SamplePotMirrorable(oneShotFrame, oneShotMirror, out Vector3 p, out Quaternion rot);
         p.y -= oneShot.groundY;
         Vector3 tp = root.position + root.rotation * p;
-        Quaternion tr = root.rotation * rot;
+        Quaternion tr = PotExtraRotation * (root.rotation * rot);
         if (masterWeight < 1f)
         {
             tp = Vector3.Lerp(pot.position, tp, masterWeight);
