@@ -126,17 +126,28 @@ public class FluidBoundary : MonoBehaviour
     public float ContainerScale => containerScale;
 
     // ------------------------------------------------------------------------------------
-    public void Build(float spacingWorld, float kernelRadiusWorld)
+    /// <param name="computeVolumes">false なら psi (境界体積) を計算しない。内容積を知るためだけの
+    /// 暫定ビルドで使う。psi は本番ビルドで作り直されるので、暫定分は完全に捨てられていた。
+    /// 2026-08-23 実測: 滝の暫定ビルド (箱 6.5x24x17m を 0.05m 間隔 = 150 万点) の psi 計算だけで
+    /// **6.5 秒** かかっており、プレイ開始が遅い原因の 55% を占めていた。</param>
+    public void Build(float spacingWorld, float kernelRadiusWorld, bool computeVolumes = true)
     {
         containerScale = Mathf.Max(1e-4f, Container.lossyScale.x);
         float shell = kernelRadiusWorld * shellThicknessPerKernel;
         int layers = Mathf.Max(2, Mathf.CeilToInt(shell / spacingWorld));
 
+        // 起動時間の内訳計測 (2026-08-23)
+        var w = System.Diagnostics.Stopwatch.StartNew();
         if (mode == Mode.Box) BuildBox(spacingWorld, layers);
         else BuildPot(spacingWorld, layers, kernelRadiusWorld);
+        double tPoints = w.Elapsed.TotalMilliseconds;
 
-        ComputeVolumes(kernelRadiusWorld);
+        if (computeVolumes) ComputeVolumes(kernelRadiusWorld);
+        double tVolumes = w.Elapsed.TotalMilliseconds;
         ResyncMotion();
+        CarryStartupProfile.AddDuration($"{name}: 境界点の生成 ({mode}, {LocalPositions.Length}点)", tPoints);
+        if (computeVolumes)
+            CarryStartupProfile.AddDuration($"{name}: 境界の体積計算 (psi)", tVolumes - tPoints);
     }
 
     // ------------------------------------------------------------------------------------

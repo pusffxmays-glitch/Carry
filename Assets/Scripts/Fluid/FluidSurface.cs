@@ -323,13 +323,29 @@ public class FluidSurface : MonoBehaviour
 
     float builtYSpan;
 
+    // ---- コスト計測 (2026-08-23)。FluidCore.LastStepMs と同じ考え方で、表面生成だけの実時間を測る。
+    // フレーム時間の内訳を「ソルバ / 表面生成 / 描画」に切り分けるために要る。コンポーネントを
+    // 無効化して測る方法は OnDisable が GPU バッファを解放してしまうので使えない。
+    /// <summary>直近フレームの表面生成に掛かった実時間 (ms)。</summary>
+    public float LastBuildMs { get; private set; }
+    /// <summary>ResetBuildCost からの平均 (ms)。</summary>
+    public float AvgBuildMs => buildMsCount > 0 ? buildMsAcc / buildMsCount : 0f;
+    public int BuildCostSamples => buildMsCount;
+    public void ResetBuildCost() { buildMsAcc = 0f; buildMsCount = 0; }
+    readonly System.Diagnostics.Stopwatch buildWatch = new System.Diagnostics.Stopwatch();
+    float buildMsAcc; int buildMsCount;
+
     void LateUpdate()
     {
         if (!Initialise()) return;
+        buildWatch.Restart();
         // 登坂で SimBounds が伸びてフィールドの縦が足りなくなったら作り直す
         // (BuildField の注記を参照。ヘッドルーム 1m があるので頻度は低い)。
         if (core.SimBounds.size.y > builtYSpan + 0.01f) BuildField();
         BuildSurface();
+        buildWatch.Stop();
+        LastBuildMs = (float)buildWatch.Elapsed.TotalMilliseconds;
+        buildMsAcc += LastBuildMs; buildMsCount++;
     }
 
     /// <summary>計測用。1 回だけ表面生成を走らせる (§36 Phase 12)。</summary>

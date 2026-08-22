@@ -473,6 +473,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     void Initialise()
     {
         if (positions != null) return;
+        var initWatch = System.Diagnostics.Stopwatch.StartNew();   // 起動時間の内訳計測 (2026-08-23)
         if (fluidCompute == null)
         {
             Debug.LogError("FluidCore: fluidCompute (Assets/Shaders/Fluid/FluidCore.compute) が未割り当てです。", this);
@@ -499,12 +500,22 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         kSolidBoxCollide = fluidCompute.FindKernel("SolidBoxCollide");
 
         fluidCount = Mathf.Max(Threads, particleCount);
-        ComputeScales();
-        BuildBoundaryBuffers();
-        AllocateBuffers();
-        GatherSolidBoxes();
-        SeedFluid();
-        BuildGrid();
+        double tKernels = initWatch.Elapsed.TotalMilliseconds;
+        ComputeScales();          double tScales = initWatch.Elapsed.TotalMilliseconds;
+        BuildBoundaryBuffers();   double tBoundary = initWatch.Elapsed.TotalMilliseconds;
+        AllocateBuffers();        double tAlloc = initWatch.Elapsed.TotalMilliseconds;
+        GatherSolidBoxes();       double tBoxes = initWatch.Elapsed.TotalMilliseconds;
+        SeedFluid();              double tSeed = initWatch.Elapsed.TotalMilliseconds;
+        BuildGrid();              double tGrid = initWatch.Elapsed.TotalMilliseconds;
+        // 起動時間の内訳 (2026-08-23)。ComputeScales の中で FluidBoundary.Build が走る。
+        CarryStartupProfile.AddDuration($"{name}: カーネル取得", tKernels);
+        CarryStartupProfile.AddDuration($"{name}: ComputeScales+境界生成", tScales - tKernels);
+        CarryStartupProfile.AddDuration($"{name}: 境界バッファ転送", tBoundary - tScales);
+        CarryStartupProfile.AddDuration($"{name}: GPUバッファ確保", tAlloc - tBoundary);
+        CarryStartupProfile.AddDuration($"{name}: SolidBox収集", tBoxes - tAlloc);
+        CarryStartupProfile.AddDuration($"{name}: 粒子シード", tSeed - tBoxes);
+        CarryStartupProfile.AddDuration($"{name}: グリッド構築", tGrid - tSeed);
+        CarryStartupProfile.AddDuration($"{name}: Initialise 合計", tGrid);
         // 実際の配置は最初の Step まで待つ。
         // OnEnable の時点では容器がまだシリアライズされた位置にあり、
         // ゴブリンのリグが LateUpdate で手の位置へ動かす前なので、
@@ -519,7 +530,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     void ComputeScales()
     {
         // 内容積を知るために、まず暫定間隔でプロファイルだけ作らせる。
-        if (boundary.LocalPositions == null) boundary.Build(0.05f, 0.1f);
+        // **psi は計算させない** (computeVolumes: false)。直後の本番ビルドで作り直されるので
+        // 完全に捨てられる計算だが、滝のように箱が大きいと 0.05m 間隔で 150 万点になり、
+        // その psi 計算だけで 6.5 秒かかっていた (2026-08-23 実測、起動時間の 55%)。
+        if (boundary.LocalPositions == null) boundary.Build(0.05f, 0.1f, computeVolumes: false);
 
         float fluidVolume = boundary.InteriorVolumeWorld * fillFraction;
         particleVolume = fluidVolume / fluidCount;
