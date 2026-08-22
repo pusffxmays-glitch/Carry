@@ -207,6 +207,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public Vector3 spawnBoxSize = Vector3.zero;
     [Tooltip("再スポーン直後の初速。")]
     public Vector3 spawnVelocity;
+    // 2026-08-22: 従来は Retired の在庫を 1 フレームで全部戻していたため、壺の補充が
+    // 「滝に入った瞬間に一気に回復する」挙動になっていた。ここを 1 未満にすると毎フレーム
+    // 抽選で少しずつ戻るので、口から注がれて増えていくように見える。滝の水源は 1 のまま。
+    [Tooltip("1 フレームに再スポーンしてよい Retired 粒子の割合 (0..1)。1 で従来どおり一括。壺の補充では PotionRefillZone が流量に応じて設定する。")]
+    [Range(0f, 1f)] public float spawnChance = 1f;
 
     // ADDED 2026-08-15 (バグ報告「ギミックのブロックにこぼれたポーションがつかない。
     // 貫通して地面まで落ちている」): 流体の衝突相手は壺の境界粒子・地面平面 (groundY)・
@@ -1483,6 +1488,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetVector("SpawnBoxMin", spawnBoxMin);
         fluidCompute.SetVector("SpawnBoxSize", spawnBoxSize);
         fluidCompute.SetVector("SpawnVelocity", spawnVelocity);
+        fluidCompute.SetFloat("SpawnChance", Mathf.Clamp01(spawnChance));
         fluidCompute.SetFloat("WallTolerance", boundary.mode == FluidBoundary.Mode.PotProfile
             ? spacing * 0.5f / Mathf.Max(1e-6f, boundary.ContainerScale) : 0f);
         fluidCompute.SetFloat("FloorTolerance", boundary.mode == FluidBoundary.Mode.PotProfile && boundary.Profile != null

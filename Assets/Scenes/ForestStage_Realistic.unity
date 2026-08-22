@@ -9688,8 +9688,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e6140bd1bbd792147b5073dc52b74086, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PotionRefillZone
-  halfExtents: {x: 4.5, y: 2.2, z: 7.5}
+  halfExtents: {x: 1.4, y: 2, z: 1.4}
   stopAtFill: 0.98
+  refillPerSecond: 0.15
+  centreFalloff: 0.7
+  maxTiltDeg: 55
   pourSpeed: 1.5
   spawnBoxSize: {x: 0.5, y: 0.15, z: 0.5}
   spawnHeightFraction: 0.75
@@ -9702,7 +9705,7 @@ Transform:
   m_GameObject: {fileID: 311977760}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -3.3, y: -3.6, z: -31}
+  m_LocalPosition: {x: -3.8, y: -3, z: -33.6}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -31400,6 +31403,10 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::NarrowBeamSensor
   rayLength: 0.6
+  autoNarrowWidth: 1.1
+  edgeDropTolerance: 0.35
+  narrowHoldSeconds: 0.25
+  autoSpeedMultiplier: 0.55
 --- !u!114 &966228492
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -36218,6 +36225,7 @@ MonoBehaviour:
   spawnBoxMin: {x: -4, y: 14.8, z: -42.9}
   spawnBoxSize: {x: 1.6, y: 0.3, z: 0.5}
   spawnVelocity: {x: 0, y: -2.6, z: 4.2}
+  spawnChance: 1
   collideWithGroundSurfaces: 1
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
@@ -42011,6 +42019,8 @@ MonoBehaviour:
   potBobFrequency: 0.6
   potRockDeg: 7
   potFloatDepth: 0.12
+  potCapsizeDeg: 125
+  potCapsizeSeconds: 0.8
   sweepImmersion: 0.15
   potSettleMaxDepth: 0.8
 --- !u!1 &1330497909
@@ -67830,6 +67840,7 @@ MonoBehaviour:
   spawnBoxMin: {x: 0, y: 0, z: 0}
   spawnBoxSize: {x: 0, y: 0, z: 0}
   spawnVelocity: {x: 0, y: 0, z: 0}
+  spawnChance: 1
   collideWithGroundSurfaces: 1
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
