@@ -31403,7 +31403,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::NarrowBeamSensor
   rayLength: 0.6
-  autoNarrowWidth: 1.1
+  autoNarrowWidth: 0
   edgeDropTolerance: 0.35
   narrowHoldSeconds: 0.25
   narrowEngageSeconds: 0.4

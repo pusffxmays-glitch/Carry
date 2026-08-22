@@ -17,8 +17,11 @@ public class NarrowBeamSensor : MonoBehaviour
     public float rayLength = 0.6f;
 
     [Header("幅の自動判定")]
+    // 2026-08-22: いったん **既定オフ (0)** にしてある。コースの飛び石と渡る丸太が同じ
+    // 幅域にあり、ステージの仕様と合わせて条件を決め直すことになったため。判定ロジック
+    // 自体は残してあるので、値を入れれば (1.1 前後) そのまま復活する。
     [Tooltip("足元の幅がこれ以下なら、NarrowBeamSurface が無くても細道とみなす (m)。0 で自動判定を切る。")]
-    public float autoNarrowWidth = 1.1f;
+    public float autoNarrowWidth = 0f;
     [Tooltip("左右の足場がこれ以上下へ落ちていたら「そこは道の外」とみなす段差の許容 (m)。")]
     public float edgeDropTolerance = 0.35f;
     [Tooltip("判定のばたつき防止。細道と判定されてからこの秒数は維持する。")]

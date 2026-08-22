@@ -714,8 +714,12 @@ public class GoblinPotActions : MonoBehaviour
     IEnumerator TipPotForSpill()
     {
         if (pot == null || spillTipAngle <= 0f) yield break;
-        // 倒す向きは転倒した側へ。ミラー再生 (左へ倒れる) のときは逆。
-        Vector3 axis = transform.forward * (fallMirror ? -1f : 1f);
+        // 倒す向きは **転倒した側と同じ** へ。右へ転んだら壺の口も右へ向く。
+        // 符号に注意 (2026-08-22 に一度逆にして「右に転んだのに口が左」になった):
+        // Unity の AngleAxis は +Z 軸まわりの正回転で +Y (壺の口) を -X (左) へ倒す。
+        // したがって「口を右 (+X) へ倒す」には **-forward** まわりに回す必要がある。
+        // fallMirror = true は左へ倒れるクリップなので、そのときだけ +forward。
+        Vector3 axis = transform.forward * (fallMirror ? 1f : -1f);
         float dur = Mathf.Max(0.05f, spillTipSeconds);
         // 転倒クリップが壺を駆動している間は PotExtraRotation へ足す (クリップの落下と
         // 転倒が同時に見える)。クリップが終わったら壺は誰も駆動しないので、そのときの
