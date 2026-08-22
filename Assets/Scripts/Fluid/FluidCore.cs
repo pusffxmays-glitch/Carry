@@ -231,6 +231,21 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Header("Solid obstacles")]
     [Tooltip("GroundSurface 付きの BoxCollider を流体の衝突対象にする。こぼれた液体がギミックの上に水たまりとして残る。")]
     public bool collideWithGroundSurfaces = true;
+    // 2026-08-23: こぼれた液体がコースのアセット (PathLog / PathRock / Seg_* など) を
+    // すり抜けて下まで落ちていた。原因は衝突対象が「GroundSurface 付き かつ BoxCollider」
+    // だけだったこと。道のアセットはメッシュコライダで GroundSurface も無いので対象外だった。
+    // ここではシーン中のコライダを集め、**メッシュのローカル境界から有向ボックス (OBB)** を
+    // 作って同じカーネルへ渡す。斜めに置かれた丸太でもワールド AABB より遥かに実形状に近い。
+    // 粒子 x 箱の総当たりなので、毎フレーム **シミュレーション領域に近い箱だけ** を
+    // maxSolidBoxes 個まで選んで送る (シーン全体では 296 個ある)。
+    [Tooltip("道を構成するアセットとも衝突させる。こぼれた液体が道をすり抜けて下へ落ちるのを防ぐ。")]
+    public bool collideWithCourseColliders = true;
+    [Tooltip("衝突対象にするレイヤー。")]
+    public LayerMask courseColliderMask = ~0;
+    [Tooltip("1 フレームに GPU へ渡す箱の上限。粒子 x 箱の総当たりなので増やすほど重い。バッファ確保に使うため、変更はプレイ開始時に反映される。")]
+    [Range(4, 128)] public int maxSolidBoxes = 32;
+    [Tooltip("これより大きいコライダは箱で近似すると実形状から離れすぎるので対象外にする (m)。")]
+    public float maxCourseBoxSize = 8f;
 
     [Header("Refs")]
     public ComputeShader fluidCompute;
@@ -414,8 +429,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     GraphicsBuffer potProfile, potOuterProfile, safetyCounters;
     GraphicsBuffer slopeProfileBuffer;
     GraphicsBuffer solidBoxW2L, solidBoxL2W, solidBoxHalf;
-    BoxCollider[] solidBoxCols;
-    bool[] solidBoxSettle;
+    int[] solidActive;   // GPU へ送っている箱が solidCandidates の何番か (デバッグ用)
     Matrix4x4[] solidW2LArr, solidL2WArr;
     Vector4[] solidHalfArr;
     int solidBoxCount;
@@ -768,27 +782,37 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // ギミックの箱コライダを集める (collideWithGroundSurfaces のコメントを参照)。
     // GroundSurface はギミックの床・坂・台に付いているマーカーなので、それを目印にする。
     // Room_Floor は MeshCollider なので自然に対象外になる (地面平面 groundY が担当)。
+    /// <summary>衝突に使う箱の候補。コライダのローカル境界を有向ボックスとして持つ。</summary>
+    struct SolidCandidate
+    {
+        public Transform tr;
+        public Collider col;
+        public Vector3 localCentre;   // コライダのローカル中心
+        public Vector3 localHalf;     // コライダのローカル半径 (スケール前)
+        public bool settle;           // その上で液体を定着させてよいか
+    }
+    readonly List<SolidCandidate> solidCandidates = new List<SolidCandidate>();
+
     void GatherSolidBoxes()
     {
-        var cols = new List<BoxCollider>();
-        var settle = new List<bool>();
+        solidCandidates.Clear();
         if (collideWithGroundSurfaces)
         {
             foreach (var gs in FindObjectsByType<GroundSurface>(FindObjectsSortMode.None))
             {
                 var bc = gs.GetComponent<BoxCollider>();
                 if (bc == null) continue;
-                cols.Add(bc);
                 // 動く床 (揺れる橋) の上で定着させると、凍結した水たまりが床の動きに
                 // 置いて行かれて空中に残る。衝突はするが定着はしない。
-                settle.Add(gs.GetComponentInParent<SwayingBridge>() == null);
+                AddCandidate(bc, bc.center, bc.size * 0.5f,
+                             gs.GetComponentInParent<SwayingBridge>() == null);
             }
         }
-        solidBoxCols = cols.ToArray();
-        solidBoxSettle = settle.ToArray();
-        solidBoxCount = solidBoxCols.Length;
+        if (collideWithCourseColliders) GatherCourseCandidates();
 
-        int n = Mathf.Max(1, solidBoxCount);
+        int n = Mathf.Max(1, Mathf.Min(maxSolidBoxes, Mathf.Max(1, solidCandidates.Count)));
+        solidBoxCount = 0;
+        solidActive = new int[n];
         solidW2LArr = new Matrix4x4[n];
         solidL2WArr = new Matrix4x4[n];
         solidHalfArr = new Vector4[n];
@@ -799,32 +823,87 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         UpdateSolidBoxes();
     }
 
-    // 行列を毎フレーム更新する (揺れる橋が動くため)。~10 箱の SetData なので実測不能なコスト。
+    void AddCandidate(Collider col, Vector3 localCentre, Vector3 localHalf, bool settle)
+    {
+        if (col == null) return;
+        solidCandidates.Add(new SolidCandidate
+        {
+            tr = col.transform, col = col,
+            localCentre = localCentre, localHalf = localHalf, settle = settle
+        });
+    }
+
+    /// <summary>コースを構成するコライダを候補に足す。メッシュコライダはローカル境界を箱に使う。</summary>
+    void GatherCourseCandidates()
+    {
+        var self = boundary != null && boundary.Container != null ? boundary.Container : transform;
+        foreach (var col in FindObjectsByType<Collider>(FindObjectsSortMode.None))
+        {
+            if (col == null || col.isTrigger || !col.enabled) continue;
+            if (col is TerrainCollider) continue;              // 地面は groundY / 斜面プロファイルが担当
+            if (col is CharacterController) continue;          // ゴブリン本体
+            if ((courseColliderMask.value & (1 << col.gameObject.layer)) == 0) continue;
+            var t = col.transform;
+            if (t == self || t.IsChildOf(self) || self.IsChildOf(t)) continue;   // 容器と自分自身
+            if (col.GetComponent<GroundSurface>() != null) continue;             // 上で追加済み
+
+            Vector3 lc, lh;
+            if (col is BoxCollider bc) { lc = bc.center; lh = bc.size * 0.5f; }
+            else if (col is MeshCollider mc && mc.sharedMesh != null)
+            { lc = mc.sharedMesh.bounds.center; lh = mc.sharedMesh.bounds.extents; }
+            else if (col is SphereCollider sc) { lc = sc.center; lh = Vector3.one * sc.radius; }
+            else if (col is CapsuleCollider cc2) { lc = cc2.center; lh = Vector3.one * cc2.radius; lh[cc2.direction] = cc2.height * 0.5f; }
+            else continue;
+
+            // 箱で近似すると実形状から離れすぎるほど大きいものは対象外 (崖の一枚メッシュ等)。
+            Vector3 ls = t.lossyScale;
+            Vector3 worldHalf = new Vector3(lh.x * Mathf.Abs(ls.x), lh.y * Mathf.Abs(ls.y), lh.z * Mathf.Abs(ls.z));
+            if (Mathf.Max(worldHalf.x, Mathf.Max(worldHalf.y, worldHalf.z)) * 2f > maxCourseBoxSize) continue;
+
+            AddCandidate(col, lc, lh, t.GetComponentInParent<SwayingBridge>() == null);
+        }
+    }
+
+    // 毎フレーム、**シミュレーション領域に近い箱だけ** を選んで GPU へ送る。
+    // シーン全体では 296 個あるが、粒子 x 箱の総当たりなので全部は渡せない。
+    // 揺れる橋のように動く床もあるので、行列は毎フレーム作り直す。
     void UpdateSolidBoxes()
     {
-        if (solidBoxW2L == null) return;
-        for (int i = 0; i < solidBoxCount; i++)
+        if (solidBoxW2L == null || solidActive == null) return;
+        int cap = solidActive.Length;
+        Vector3 c = regionCenter;
+        Vector3 ext = regionSize * 0.5f;
+        Vector3 rmin = c - ext, rmax = c + ext;
+
+        solidBoxCount = 0;
+        for (int k = 0; k < solidCandidates.Count && solidBoxCount < cap; k++)
         {
-            var bc = solidBoxCols[i];
-            if (bc == null)
-            {
-                solidHalfArr[i] = Vector4.zero;   // half=0 -> シェーダ側で必ず「接触なし」
-                continue;
-            }
-            var t = bc.transform;
+            var sc = solidCandidates[k];
+            if (sc.col == null) continue;
+            var t = sc.tr;
+            Vector3 ls = t.lossyScale;
+            Vector3 half = new Vector3(sc.localHalf.x * Mathf.Abs(ls.x),
+                                       sc.localHalf.y * Mathf.Abs(ls.y),
+                                       sc.localHalf.z * Mathf.Abs(ls.z));
+            Vector3 centre = t.TransformPoint(sc.localCentre);
+            // 回転を含めた保守的な判定: 中心 ± 対角長で領域と重なるかだけ見る。
+            float r = half.magnitude;
+            if (centre.x + r < rmin.x || centre.x - r > rmax.x) continue;
+            if (centre.y + r < rmin.y || centre.y - r > rmax.y) continue;
+            if (centre.z + r < rmin.z || centre.z - r > rmax.z) continue;
+
             // スケールは half extents に畳み、行列は回転+平行移動だけにする。
             // スケール入りの行列で最小貫通軸を選ぶと、軸ごとに距離の尺度が違って
             // 押し出し方向を誤る。
-            Vector3 centre = t.TransformPoint(bc.center);
             Matrix4x4 l2w = Matrix4x4.TRS(centre, t.rotation, Vector3.one);
-            Vector3 ls = t.lossyScale;
-            Vector3 half = Vector3.Scale(bc.size * 0.5f,
-                               new Vector3(Mathf.Abs(ls.x), Mathf.Abs(ls.y), Mathf.Abs(ls.z)))
-                         + Vector3.one * (spacing * 0.5f);   // 粒子半径ぶんのマージン
+            half += Vector3.one * (spacing * 0.5f);   // 粒子半径ぶんのマージン
+            int i = solidBoxCount++;
+            solidActive[i] = k;
             solidL2WArr[i] = l2w;
             solidW2LArr[i] = l2w.inverse;
-            solidHalfArr[i] = new Vector4(half.x, half.y, half.z, solidBoxSettle[i] ? 1f : 0f);
+            solidHalfArr[i] = new Vector4(half.x, half.y, half.z, sc.settle ? 1f : 0f);
         }
+        for (int i = solidBoxCount; i < cap; i++) solidHalfArr[i] = Vector4.zero;   // half=0 -> 接触なし
         solidBoxW2L.SetData(solidW2LArr);
         solidBoxL2W.SetData(solidL2WArr);
         solidBoxHalf.SetData(solidHalfArr);
