@@ -44,6 +44,44 @@ public class GoblinCarryRig : MonoBehaviour
     public float armInputSpeed = 2.4f;
     [Tooltip("上下キー (前後バランス) の入力速度。旧実測 64.4 deg/s (4.0 x 16.1 度) に合わせて 3.6 x 18 度 = 64.8 deg/s。")]
     public float pitchInputSpeed = 3.6f;
+
+    // 2026-08-21: マウスによる連続バランス操作 (要望「マウスでバランスを取りながら WASD で
+    // 進む」)。マウスの移動量が armBalance / pitchBalance に積算される (矢印キーも併用可)。
+    // 適用側のスルーレート制限 (balanceApplySpeed) はそのままなので、入力がいくら速くても
+    // 壺の実回転速度の上限は変わらない (= こぼれ特性・ゲームバランスは不変)。
+    [Header("Mouse balance (マウスでの連続バランス操作)")]
+    [Tooltip("マウスでのバランス操作を有効にする。右へ動かす = 右へ傾く、奥 (上) へ = 前傾。")]
+    public bool mouseBalance = true;
+    [Tooltip("感度 (バランス値 / ピクセル)。0.006 なら 170px の移動でフルチルト。")]
+    public float mouseSensitivity = 0.006f;   // 2026-08-22 ユーザー要望で 0.003 -> 0.006
+    [Tooltip("マウス操作中はカーソルをロックする (画面端で移動量が死なないように)。Esc で解除、左クリックで再ロック。")]
+    public bool lockCursorWhileCarrying = true;
+    // 2026-08-22 マウス入力の品質対策 (バグ報告「動かしてない方に動く/かくっと動く」):
+    //  * ロック切替の瞬間は OS のカーソル再センタリングで巨大なデルタが 1 フレーム乗る → 数フレーム捨てる
+    //  * ロックが外れている間 (エディタ UI 操作中など) のカーソル移動は壺に流さない
+    //  * デルタに速度上限 (px/s) と軽い平滑化を掛けてスパイクを丸める
+    [Tooltip("マウス入力の最大速度 (px/秒)。これを超える瞬間デルタはスパイクとして頭打ちにする。")]
+    public float mouseMaxSpeed = 4000f;
+    [Tooltip("マウス入力の平滑化の速さ。大きいほど生に近い。20-30 で「かくつき」だけ消える。")]
+    public float mouseSmoothing = 25f;
+    [Tooltip("左右軸を反転する。")]
+    public bool invertMouseX = false;
+    [Tooltip("前後軸を反転する。")]
+    public bool invertMouseY = false;
+    // 2026-08-22: 既定を**絶対位置モード**に変更。相対デルタ方式はエディタのカーソルロックが
+    // 毎フレームの強制リセンタリングをデルタに混ぜることがあり、「動かしてない方に動く/
+    // かくっと動く」ジャンクの原因になっていた。絶対位置ならワープもロックも不要で、
+    // カーソル位置 = バランス値が常に 1:1 対応する (ジョイスティック式)。
+    [Tooltip("絶対位置モード: 画面中心からのカーソル位置がそのままバランス値になる。OFF で従来の移動量積算式。")]
+    public bool mouseAbsolute = true;
+    [Tooltip("絶対位置モードで最大チルトになる画面中心からの距離 (px)。小さいほど敏感。")]
+    public float mouseAbsoluteRangePx = 220f;
+    Vector2 smoothedMouseDelta;
+    bool prevCursorLocked;
+    int mouseSuppressFrames;
+    bool cursorCentredOnce;   // 絶対位置モードの開始時センタリング (2026-08-22)
+
+
     [Tooltip("左右のバランス。右キーで右へ、左キーで左へ傾く。")]
     [Range(-1f, 1f)] public float armBalance = 0f;
     [Tooltip("前後のバランス。上キーで前傾、下キーで後傾。")]
@@ -61,8 +99,13 @@ public class GoblinCarryRig : MonoBehaviour
     // 制限することで「ゆっくり効く重い操作」になり、対抗チルトが成立する。
     // 追補 23: 0.8 は「動き始めが遅い」(ユーザー) ため 1.8 (約 32°/s) へ。代償の
     // スロッシュは操作中の自動 calm (GoblinPotActions が BalanceMoving を見る) で吸収。
-    [Tooltip("バランスの適用速度 (units/s)。壺の回転速度 ≒ これ × 18°。1.8 で約 32°/s。")]
-    public float balanceApplySpeed = 1.8f;
+    // 追補 37 (2026-08-22 バグ報告「マウスに対するツボの応答が遅い」): 1.8 (32°/s) では
+    // マウスを動かしてから壺が追いつくまで最大 0.55 秒かかり、操作が効いていないように
+    // 感じる。実際に人が抱えた壺を傾けられる速さ (100°/s 前後) まで上げる。
+    // 「操作自体でこぼれる」対策はスルーレートではなく calm 側 (balanceCalmClamp) の担当で、
+    // そちらは速く振ったときだけ外れる (balanceInertiaRate) ので慣性も残る。
+    [Tooltip("バランスの適用速度 (units/s)。壺の回転速度 ≒ これ × 18°。6.0 で約 108°/s。")]
+    public float balanceApplySpeed = 6f;
     float appliedArmBalance, appliedPitchBalance;
     /// <summary>適用中のバランスが動いているか (追補 23: 操作中 calm のトリガー)。</summary>
     public bool BalanceMoving { get; private set; }
@@ -157,6 +200,7 @@ public class GoblinCarryRig : MonoBehaviour
     float staggerPhase, staggerIntensity;
     bool staggerLeanRight;
     float walkPhase, walkIntensity;
+    bool cursorLockedOnce;   // マウスバランス用の初回カーソルロック (2026-08-21)
 
     // REDESIGNED 2026-08-10 per explicit request: the pot is no longer placed at a fixed
     // Head-relative offset. Its bottom face (see potBottomOffsetLocal below) is now anchored at
@@ -170,6 +214,18 @@ public class GoblinCarryRig : MonoBehaviour
     // vs. the live Blender pot, times Blender's own 1.3 object scale) was reported as too big;
     // scaled down another 0.7x per direct feedback.
     public Vector3 potScale = new Vector3(2.366f, 2.366f, 2.366f);
+
+    // ---- 追補 30: 壺追従の低域通過 (root 相対)。詳細は配置コードのコメント参照。
+    [Tooltip("壺の位置追従レート (1/s)。小さいほど滑らか。歩容の高周波揺すりを消すのが目的。")]
+    public float potFollowRate = 15f;
+    // 追補 37: 25 だと 40ms の遅れが乗り、マウス応答の鈍さに上乗せされていた。
+    // 暴れていたのは位置 (歩容ボブ) だけで回転は実測 0.08 rad/s と静かなので、
+    // 回転はほぼ素通し (60 = 17ms) にしてよい。
+    [Tooltip("壺の回転追従レート (1/s)。マウスバランスの応答を保つため位置より速め。")]
+    public float potFollowRotRate = 60f;
+    Vector3 smoothedPotLocal;
+    Quaternion smoothedPotLocalRot = Quaternion.identity;
+    bool potFollowInit;
 
     // ---- Base pose data: captured 2026-08-10 directly from the live, approved
     // "Carry_Balance_Neutral" pose in Blender (armature.matrix_world @ pose_bone.matrix, per-bone
@@ -344,6 +400,8 @@ public class GoblinCarryRig : MonoBehaviour
         rightUpLegLen = Vector3.Distance(PosOf("LeftUpLeg"), PosOf("LeftLeg"));
         rightLegLen = Vector3.Distance(PosOf("LeftLeg"), PosOf("LeftFoot"));
         rightFootLen = Vector3.Distance(PosOf("LeftFoot"), PosOf("LeftToeBase"));
+
+        prevCursorLocked = Cursor.lockState == CursorLockMode.Locked;
     }
 
     static Vector3 PosOf(string boneName)
@@ -360,8 +418,23 @@ public class GoblinCarryRig : MonoBehaviour
     public void CushionRecenter(float seconds) { recenterUntil = Time.time + seconds; }
 
     // 適用値を入力値へスルーレート制限つきで追従させる (追補 18)。
+    /// <summary>バランス入力を動かしている速さ (バランス値/秒)。追補 37: 速く振ったときは
+    /// GoblinPotActions が calm を外して慣性を残す判断に使う。</summary>
+    public float BalanceRate { get; private set; }
+    float prevArmInput, prevPitchInput;
+
     void ApplyBalanceSlew(float dt)
     {
+        if (dt > 1e-5f)
+        {
+            float rateNow = new Vector2(armBalance - prevArmInput, pitchBalance - prevPitchInput).magnitude / dt;
+            // 1 フレームだけのノイズで慣性判定が暴れないよう軽く均す (立ち上がりは速く)
+            BalanceRate = rateNow > BalanceRate
+                ? rateNow
+                : Mathf.Lerp(BalanceRate, rateNow, 1f - Mathf.Exp(-12f * dt));
+        }
+        prevArmInput = armBalance; prevPitchInput = pitchBalance;
+
         bool recenter = Time.time < recenterUntil;
         if (recenter)
         {
@@ -406,6 +479,67 @@ public class GoblinCarryRig : MonoBehaviour
         if (kb == null) return;
         float dt = Time.deltaTime;
         ApplyBalanceSlew(dt);
+
+        // マウスバランス (2026-08-21 宣言部の注記)。運搬パイプラインが動いている間だけ。
+        var mouse = Mouse.current;
+        if (mouseBalance && mouse != null && mouseAbsolute)
+        {
+            // 絶対位置モード (2026-08-22 宣言部の注記)。ロック由来のデルタジャンクが原理的に無い。
+            if (Cursor.lockState == CursorLockMode.Locked)
+                Cursor.lockState = CursorLockMode.Confined;   // 画面内には留める
+            // 開始時 (と復帰時) はカーソルを中央へ寄せてニュートラルから始める。
+            // これが無いと「カーソルがたまたま端にあった」だけで開幕から壺が傾く。
+            if (!cursorCentredOnce)
+            {
+                mouse.WarpCursorPosition(new Vector2(Screen.width * 0.5f, Screen.height * 0.5f));
+                cursorCentredOnce = true;
+            }
+            Vector2 mp = mouse.position.ReadValue();
+            bool inside = mp.x >= 0f && mp.x <= Screen.width && mp.y >= 0f && mp.y <= Screen.height;
+            if (inside && Application.isFocused)   // ゲームビュー外・非フォーカス中は保持
+            {
+                Vector2 off = (mp - new Vector2(Screen.width * 0.5f, Screen.height * 0.5f))
+                              / Mathf.Max(1f, mouseAbsoluteRangePx);
+                armBalance = Mathf.Clamp(invertMouseX ? -off.x : off.x, -1f, 1f);     // 中心より右 = 右へ傾く
+                pitchBalance = Mathf.Clamp(invertMouseY ? off.y : -off.y, -1f, 1f);   // 中心より上 = 前傾
+            }
+        }
+        else if (mouseBalance && mouse != null)
+        {
+            if (lockCursorWhileCarrying)
+            {
+                // ロックが外れていたら左クリックで再ロック (Esc で外すのは Unity 標準挙動)
+                if (Cursor.lockState != CursorLockMode.Locked && mouse.leftButton.wasPressedThisFrame)
+                    Cursor.lockState = CursorLockMode.Locked;
+                if (!cursorLockedOnce)
+                {
+                    Cursor.lockState = CursorLockMode.Locked;
+                    cursorLockedOnce = true;
+                }
+            }
+
+            // ロック切替の瞬間は再センタリングの巨大デルタが乗るので数フレーム捨てる
+            bool lockedNow = Cursor.lockState == CursorLockMode.Locked;
+            if (lockedNow != prevCursorLocked)
+            {
+                prevCursorLocked = lockedNow;
+                mouseSuppressFrames = 3;
+                smoothedMouseDelta = Vector2.zero;
+            }
+
+            // ロック中だけ壺に流す。ロックが外れている間 (エディタ UI 操作中など) の
+            // カーソル移動が壺を動かすのを防ぐ。
+            if (lockedNow && mouseSuppressFrames <= 0)
+            {
+                Vector2 md = mouse.delta.ReadValue();
+                md = Vector2.ClampMagnitude(md, mouseMaxSpeed * dt);   // スパイク頭打ち
+                smoothedMouseDelta = Vector2.Lerp(smoothedMouseDelta, md,
+                                                  1f - Mathf.Exp(-mouseSmoothing * dt));
+                armBalance += (invertMouseX ? -1f : 1f) * smoothedMouseDelta.x * mouseSensitivity;   // 右 = 右へ傾く
+                pitchBalance -= (invertMouseY ? -1f : 1f) * smoothedMouseDelta.y * mouseSensitivity; // 奥 (上) = 前傾
+            }
+            else if (mouseSuppressFrames > 0) mouseSuppressFrames--;
+        }
         // SWAPPED 2026-08-12 per explicit request ("QキーとEキーの機能を逆にしたい。感覚的に
         //逆のほうがやりやすそう"): E now raises the left arm (lowers right), Q now raises the
         // right arm (lowers left) -- opposite of the original mapping.
@@ -495,10 +629,36 @@ public class GoblinCarryRig : MonoBehaviour
             // 前後バランス (上下キー) は、体の姿勢に対する **ピッチ** として足す。
             // 左右バランスが手の高さ差から出てくるのに対し、こちらは両手が同じだけ動くので
             // 手の位置からは傾きが出ない。壺の回転として明示的に与える必要がある。
-            Quaternion basePose = Posture.rotation * Quaternion.Euler(-appliedPitchBalance * pitchRangeDeg, 0f, 0f);
+            // (加速度フィードフォワード (旧追補 28) は削除済み: 入力の一瞬の途切れや減速で
+            //  壺が最大 18 度「かくっ」と後傾する副作用があり、こぼれ対策としても calm 側で
+            //  十分だったため。2026-08-22)
+            Quaternion basePose = Posture.rotation
+                * Quaternion.Euler(-appliedPitchBalance * pitchRangeDeg, 0f, 0f);
 
-            pot.position = handMid;
-            pot.rotation = Quaternion.AngleAxis(armRoll, fwd) * basePose;
+            // 追補 30 (2026-08-22 QA): 壺の位置追従を **root 相対で低域通過** する。
+            // 歩容の粗いフレームサンプリング (特に低 fps) で手の位置が毎フレーム跳ね、
+            // 走行 3 m/s に対し壺が瞬間 5〜7.3 m/s で振り回されていた (実測)。壁のこの
+            // 高周波の暴れが液体を掬い出すため、流体側の速度クランプ (calm) では
+            // 止められなかった。root 相対で均すので移動・旋回そのものは一切遅延せず、
+            // 揺すりの高周波成分 (±数 cm) だけが消える。手と壺のずれは 1〜2cm 程度。
+            // 回転は実測 0.08 rad/s と暴れておらず、マウスバランスの応答を保つため
+            // 軽め (potFollowRotRate) に留める。
+            Quaternion targetRot = Quaternion.AngleAxis(armRoll, fwd) * basePose;
+            Vector3 localTarget = root.InverseTransformPoint(handMid);
+            Quaternion localTargetRot = Quaternion.Inverse(root.rotation) * targetRot;
+            if (!potFollowInit)
+            {
+                smoothedPotLocal = localTarget;
+                smoothedPotLocalRot = localTargetRot;
+                potFollowInit = true;
+            }
+            float kp = 1f - Mathf.Exp(-potFollowRate * Time.deltaTime);
+            float kr = 1f - Mathf.Exp(-potFollowRotRate * Time.deltaTime);
+            smoothedPotLocal = Vector3.Lerp(smoothedPotLocal, localTarget, kp);
+            smoothedPotLocalRot = Quaternion.Slerp(smoothedPotLocalRot, localTargetRot, kr);
+
+            pot.position = root.TransformPoint(smoothedPotLocal);
+            pot.rotation = root.rotation * smoothedPotLocalRot;
             pot.localScale = potScale;
         }
     }

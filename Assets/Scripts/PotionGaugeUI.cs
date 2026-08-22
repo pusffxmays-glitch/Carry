@@ -128,7 +128,11 @@ public class PotionGaugeUI : MonoBehaviour
         source = potionSourceBehaviour as IPotionVolumeSource;
         if (source == null)
         {
-            var core = FindFirstObjectByType<FluidCore>();
+            // FIXED 2026-08-22: FluidCore が複数 (壺と滝) あるシーンで FindFirst が滝を掴み、
+            // **ゲージが滝の残量を表示していた**。壺 (ゴブリンの子) を優先して取る。
+            var gobLoco = FindFirstObjectByType<GoblinLocomotion>();
+            var core = gobLoco != null ? gobLoco.GetComponentInChildren<FluidCore>() : null;
+            if (core == null) core = FindFirstObjectByType<FluidCore>();
             source = core;
             if (core != null) potionSourceBehaviour = core;
         }

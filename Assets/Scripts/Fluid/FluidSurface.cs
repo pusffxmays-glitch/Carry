@@ -19,6 +19,11 @@ public class FluidSurface : MonoBehaviour
     [Range(1.5f, 6f)] public float voxelsPerSpacing = 3f;
     [Tooltip("密度カーネル半径。粒子間隔の倍数。大きいほど滑らかで太い表面になる。")]
     [Range(0.8f, 3f)] public float splatRadiusPerSpacing = 1.5f;
+    // 追補 36 (2026-08-22 バグ報告「こぼれた見た目の量とゲージの残量が一致しない」)。
+    // 孤立した粒子は 1 個が実体積より大きい球として描かれるため、こぼれた量が
+    // 実際の損失より多く見えていた。壺の中の見え方は変えずに、こぼれた分だけ絞る。
+    [Tooltip("こぼれた液体 (壺の外) の描画半径倍率。1 = 従来。下げるとこぼれた見た目の量が実際の損失量に近づく。")]
+    [Range(0.4f, 1f)] public float escapedSplatScale = 0.75f;
     [Tooltip("等値面のしきい値。下げると液体が太く、上げると細くなる。")]
     [Range(0.02f, 3f)] public float isoValue = 0.45f;
     [Tooltip("密度場の平滑化回数 (§14)。0 で無効。")]
@@ -351,6 +356,7 @@ public class FluidSurface : MonoBehaviour
         cs.SetVector("FieldOrigin", fieldOrigin);
         cs.SetFloat("VoxelSize", voxelSize);
         cs.SetFloat("SplatRadius", splatRadius);
+        cs.SetFloat("EscapedSplatScale", escapedSplatScale);
         cs.SetFloat("DensityScale", densityFixedPointScale);
         cs.SetFloat("IsoValue", isoValue);
         cs.SetFloat("SurfaceNormalEps", normalEpsVoxels);
@@ -388,6 +394,7 @@ public class FluidSurface : MonoBehaviour
         cs.SetBuffer(kSplat, "PoolAccum", poolAccum);
         cs.SetBuffer(kSplat, "BrickSlotIn", brickSlot);
         cs.SetBuffer(kSplat, "Particles", core.PositionsBuffer);
+        cs.SetBuffer(kSplat, "ParticleStates", core.RetiredFlagsBuffer);
         cs.Dispatch(kSplat, Mathf.CeilToInt(core.FluidCount / (float)Threads), 1, 1);
 
         // 6. decode: uint -> float（Atomic 用と Visual 用の分離）

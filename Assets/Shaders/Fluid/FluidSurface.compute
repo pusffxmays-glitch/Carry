@@ -98,6 +98,13 @@ float PotClipRadiusWS;
 RWStructuredBuffer<float> PoolMask;    // MaskSolid が書き換える先（PoolSrc と同じ実体）
 
 float SplatRadius;          // 密度カーネル半径 (m)
+// 追補 36: こぼれた液体 (RetiredFlags != 0) の描画半径倍率。
+// 壺の中では粒子が重なり合うので合計密度で液面が決まるが、こぼれて孤立した粒子は
+// 1 個が半径 0.48*SplatRadius の球として描かれ、実体積 (粒子間隔の立方) より大きく見える。
+// そのため「少ししか減っていないのに大量にこぼれたように見える」= 残量ゲージと不一致になる。
+// ここを絞ると、こぼれた見た目の量が実際の損失量に近づく。
+float EscapedSplatScale;
+StructuredBuffer<uint> ParticleStates;   // 0 = 壺のもの、それ以外 = こぼれた
 float DensityScale;         // 固定小数のスケール
 float IsoValue;
 int3  BlurAxis;
@@ -272,8 +279,10 @@ void SplatDensity(uint3 id : SV_DispatchThreadID)
     if (i >= ParticleCount) return;
 
     float3 p = Particles[i];
+    // 追補 36: こぼれた粒子は実体積に近い大きさで描く (宣言部の注記)。
+    float h = SplatRadius * (ParticleStates[i] != 0u ? EscapedSplatScale : 1.0);
     float3 local = (p - FieldOrigin) / VoxelSize;
-    int rad = (int)ceil(SplatRadius / VoxelSize);
+    int rad = (int)ceil(h / VoxelSize);
 
     int3 c0 = (int3)floor(local) - rad;
     int3 c1 = (int3)floor(local) + rad;
@@ -290,7 +299,7 @@ void SplatDensity(uint3 id : SV_DispatchThreadID)
 
         float3 vc = FieldOrigin + (float3(x, y, z) + 0.5) * VoxelSize;
         float3 d = vc - p;
-        float w = SplatKernel(dot(d, d), SplatRadius);
+        float w = SplatKernel(dot(d, d), h);
         if (w <= 0.0) continue;
         uint add = (uint)(w * DensityScale);
         if (add == 0) continue;

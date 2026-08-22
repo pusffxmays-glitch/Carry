@@ -417,7 +417,12 @@ public class FluidBoundary : MonoBehaviour
 
     // ------------------------------------------------------------------------------------
     // 運動計測。Transform 差分から線速度・角速度を出す。テレポートは弾く。
-    public void SampleMotion(float dt)
+    /// <param name="dt">シミュレーションが今回消費する時間。</param>
+    /// <param name="wallDt">実際に経過した時間。ヒッチで dt が切り詰められたときに
+    /// dt より大きくなる。追補 31: そのフレームは実 Transform への追従も dt/wallDt に
+    /// 比例した割合しか進めない。従来は切り詰め後の短い dt で移動量全体を割っていたため
+    /// 壁速度が実速度の数倍に膨れ、ヒッチのたびに液体が掬い出されていた。</param>
+    public void SampleMotion(float dt, float wallDt = -1f)
     {
         var t = Container;
         TeleportedThisStep = false;
@@ -428,6 +433,7 @@ public class FluidBoundary : MonoBehaviour
             ResyncMotion();
             return;
         }
+        if (wallDt < dt) wallDt = dt;
 
         // 補間の始点は「このフレームの直前に流体が見ていた姿勢」。
         lerpFromPosition = simPosition;
@@ -460,26 +466,37 @@ public class FluidBoundary : MonoBehaviour
             // 加速度制限を入れると、上限に届いていなくても simVelocity が目標速度に
             // 遅れて追従するため、等速移動中ですら位置ずれが残り続ける。
             // それが「ポーションが壺に遅れてついてくる」の原因だったので既定で無効。
-            simPosition = Vector3.MoveTowards(simPosition, t.position, simMaxSpeed * dt);
+            // 追補 34 (2026-08-22 バグ報告「ツボの動きにポーションが追い付いていない」
+            //          「進むとツボの背面に中身が透けて見える」):
+            // 追補 31 はヒッチ時に **追従位置そのもの** を dt/wallDt の割合に縮めていた。
+            // 壁速度の膨張は防げるが、代わりに容器が実 Transform より遅れて残る。
+            // 低 fps では毎フレーム発生するので中身が恒常的に壺の後ろへずれ、
+            // 液面が壺の胴を突き抜けて見える (= 背面に透ける) 状態になっていた。
+            //
+            // 位置は **絶対に遅らせない**。壁が壺の実体からずれること自体が最悪の絵になる。
+            // 速度の膨張は「割る時間」だけの問題なので、そちらを実時間 (wallDt) で割って
+            // 解決する。追従の速度制限も実時間基準にする (実際にその距離を wallDt で
+            // 移動したのだから、実時間で測るのが正しい)。
+            simPosition = Vector3.MoveTowards(simPosition, t.position, simMaxSpeed * wallDt);
             if (simMaxAccel > 0f)
             {
                 // 明示的に有効化されたときだけ、加速度でも頭を押さえる。
-                Vector3 desiredVel = (simPosition - lerpFromPosition) / dt;
-                simVelocity = Vector3.MoveTowards(simVelocity, desiredVel, simMaxAccel * dt);
-                simPosition = lerpFromPosition + simVelocity * dt;
+                Vector3 desiredVel = (simPosition - lerpFromPosition) / wallDt;
+                simVelocity = Vector3.MoveTowards(simVelocity, desiredVel, simMaxAccel * wallDt);
+                simPosition = lerpFromPosition + simVelocity * wallDt;
             }
             else
             {
-                simVelocity = (simPosition - lerpFromPosition) / dt;
+                simVelocity = (simPosition - lerpFromPosition) / wallDt;
             }
-            simRotation = Quaternion.RotateTowards(simRotation, t.rotation, simMaxAngularSpeed * dt);
+            simRotation = Quaternion.RotateTowards(simRotation, t.rotation, simMaxAngularSpeed * wallDt);
 
-            LinearVelocity = (simPosition - lerpFromPosition) / dt;
+            LinearVelocity = (simPosition - lerpFromPosition) / wallDt;
             Quaternion dq = simRotation * Quaternion.Inverse(lerpFromRotation);
             dq.ToAngleAxis(out float angleDeg, out Vector3 axis);
             if (float.IsNaN(axis.x) || axis.sqrMagnitude < 1e-8f) { axis = Vector3.up; angleDeg = 0f; }
             if (angleDeg > 180f) angleDeg -= 360f;
-            AngularVelocity = axis.normalized * (angleDeg * Mathf.Deg2Rad / dt);
+            AngularVelocity = axis.normalized * (angleDeg * Mathf.Deg2Rad / wallDt);
         }
 
         prevMatrix = Matrix4x4.TRS(simPosition, simRotation, t.lossyScale);

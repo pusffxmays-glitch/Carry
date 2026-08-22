@@ -170,15 +170,20 @@ public class GoblinTerrainTilt : MonoBehaviour
 
         float centreDist = 999f;
         sum += Probe(Vector3.zero, ref hits, ref friction, ref got, ref centreDist);
-        float ignored = 1f; bool ignoredGot = false; float ignoredDist = 999f;
-        sum += Probe(f * probeForward, ref hits, ref ignored, ref ignoredGot, ref ignoredDist);
-        sum += Probe(-f * probeForward, ref hits, ref ignored, ref ignoredGot, ref ignoredDist);
-        sum += Probe(r * probeSide, ref hits, ref ignored, ref ignoredGot, ref ignoredDist);
-        sum += Probe(-r * probeSide, ref hits, ref ignored, ref ignoredGot, ref ignoredDist);
+        float ignored = 1f;
+        bool gotF = false, gotB = false, gotR = false, gotL = false;
+        float dF = 999f, dB = 999f, dR = 999f, dL = 999f;
+        sum += Probe(f * probeForward, ref hits, ref ignored, ref gotF, ref dF);
+        sum += Probe(-f * probeForward, ref hits, ref ignored, ref gotB, ref dB);
+        sum += Probe(r * probeSide, ref hits, ref ignored, ref gotR, ref dR);
+        sum += Probe(-r * probeSide, ref hits, ref ignored, ref gotL, ref dL);
 
         GroundFriction = friction;
         HasGround = hits > 0;
-        GroundDistance = centreDist;
+        // 2026-08-22: 足場の縁に立つと中心レイだけが空振りして GroundDistance=999 になり、
+        // 「地面に立っているのに滞空扱い」→偽の生着地ジョルトが出ていた (実測: 道の縁で
+        // 滞空 30 秒判定)。中心が外れたときは 5 点の最小距離へフォールバックする。
+        GroundDistance = Mathf.Min(centreDist, Mathf.Min(Mathf.Min(dF, dB), Mathf.Min(dR, dL)));
 
         if (hits == 0) return Vector3.up;
         Vector3 n = sum.normalized;

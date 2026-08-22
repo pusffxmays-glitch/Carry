@@ -15,20 +15,23 @@
 //  * SafetyCorrection は例外処理であり、その位置差は速度に変換しない (§10)。
 // ============================================================================================
 
-#pragma kernel UpdateBoundary
-#pragma kernel ClearCellCounts
-#pragma kernel BuildSortPositions
+// 2026-08-21 ディスパッチ対策③: 相互依存のない軽量カーネルを結合して
+// サブステップあたりのディスパッチ数 (=GPU バリア数) を減らした。
+//   UpdateBoundary + Integrate        -> IntegrateAndBoundary
+//   ClearCellCounts + BuildSortPositions -> ClearAndBuildSort
+//   ComputeVelocity + ComputeNormals  -> VelocityAndNormals
+// 計算内容は不変 (同じ式を同じ順序依存で実行する)。
+#pragma kernel ClearAndBuildSort
 #pragma kernel CountParticlesPerCell
 #pragma kernel ScanLocal
 #pragma kernel ScanBlockSums
 #pragma kernel ScanAddOffsets
 #pragma kernel ScatterParticles
-#pragma kernel Integrate
+#pragma kernel IntegrateAndBoundary
 #pragma kernel ComputeDensityLambda
 #pragma kernel ComputeDeltaP
 #pragma kernel ApplyDeltaP
-#pragma kernel ComputeVelocity
-#pragma kernel ComputeNormals
+#pragma kernel VelocityAndNormals
 #pragma kernel ApplyViscosityTension
 #pragma kernel Finalize
 #pragma kernel SolidBoxCollide
@@ -130,6 +133,11 @@ float MaxSpeed;
 // ジャンプ中だけ CPU 側が絞る。壺外 (落下中の液滴・地面の水たまり) は MaxSpeed のままに
 // することで、「こぼれた液体がスローモーションで落ちる」のを防ぐ。
 float MaxSpeedPot;
+// 2026-08-22: 壺外専用のクランプ。落下する液滴の終端速度に相当する。MaxSpeed (5) のままだと
+// 高所からのこぼれが不自然に遅く落ちる。地面バンドのトンネリング防止条件
+// (v * sdt < GroundBandHeight) を満たす範囲で上げる。
+float MaxSpeedFalling;
+float EscapedIgnoreCalm;   // 追補 33: 1 = 脱出済み液滴に calm を掛けない
 // 追補 26: パリー成功の「回収」— 壺の近くではみ出している粒子を口へ引き戻す。
 // RecallStrength > 0 の間だけ有効。RecallTarget は壺の口の少し上 (world)。
 float RecallStrength;
@@ -303,34 +311,17 @@ void TeleportFluid(uint3 id : SV_DispatchThreadID)
     Velocities[i] = mul((float3x3)TeleportMatrix, Velocities[i]);
 }
 
-// ============================================================================ moving boundary
-[numthreads(THREADS, 1, 1)]
-void UpdateBoundary(uint3 id : SV_DispatchThreadID)
-{
-    uint i = id.x;
-    if (i >= BoundaryCount) return;
-
-    float3 w = mul(BoundaryToWorld, float4(BoundaryLocal[i], 1.0)).xyz;
-    BoundaryPositionsRW[i] = w;
-    BoundaryVelocitiesRW[i] = ContainerLinearVelocity
-                            + cross(ContainerAngularVelocity, w - ContainerCenter);
-}
-
 // ============================================================================ sorting passes
-[numthreads(THREADS, 1, 1)]
-void ClearCellCounts(uint3 id : SV_DispatchThreadID)
-{
-    if (id.x >= CellTotal) return;
-    CellCounts[id.x] = 0;
-}
-
+// セルカウンタのクリアとソート座標の構築。互いに独立なのでスレッド範囲の分岐で 1 回の
+// ディスパッチにまとめる (2026-08-21 結合)。max(CellTotal, TotalCount) スレッドで呼ぶこと。
 // 流体は予測位置、境界は World 位置を探索座標にする。
 [numthreads(THREADS, 1, 1)]
-void BuildSortPositions(uint3 id : SV_DispatchThreadID)
+void ClearAndBuildSort(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
-    if (i >= TotalCount) return;
-    SortPositions[i] = (i < FluidCount) ? PredictedPositions[i] : BoundaryPositions[i - FluidCount];
+    if (i < CellTotal) CellCounts[i] = 0;
+    if (i < TotalCount)
+        SortPositions[i] = (i < FluidCount) ? PredictedPositions[i] : BoundaryPositions[i - FluidCount];
 }
 
 [numthreads(THREADS, 1, 1)]
@@ -375,20 +366,50 @@ void ScanLocal(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 tid
 [numthreads(1024, 1, 1)]
 void ScanBlockSums(uint3 tid : SV_GroupThreadID)
 {
-    // BlockCount <= 1024 を前提（CellTotal <= 262144）。単一グループで走査する。
+    // ブロック和の排他プレフィックス。旧実装はスレッド 0 の逐次ループ (BlockCount 回転、
+    // セル 44 万で ~1700 回転) で、サブステップ毎に GPU を直列ストールさせていた。
+    // SCAN_BLOCK 要素ずつの並列スキャンに置き換え (2026-08-21)。結果は旧実装と同一。
+    // チャンク合計 (gScan の末尾) は全スレッドがバリア後に同じ値を読むので uniform。
     uint t = tid.x;
-    uint v = (t < BlockCount) ? BlockSums[t] : 0;
+    // ストリップ分割 3 フェーズ。バリアはユニフォームな流れの中に固定 2 回だけ
+    // (動的ループ内バリアはドライバによって壊れることがあるため使わない)。
+    // 逐次の深さ: 旧 BlockCount (~1700) → stripLen (~7) + SCAN_BLOCK (256)。
+    uint stripLen = (BlockCount + SCAN_BLOCK - 1) / SCAN_BLOCK;
+    uint start = t * stripLen;
+
+    // phase 1: 各スレッドが担当ストリップの合計を出す
+    uint sum = 0;
+    for (uint k = 0; k < stripLen; k++)
+    {
+        uint idx = start + k;
+        if (idx < BlockCount) sum += BlockSums[idx];
+    }
+    gScan[t] = sum;
     GroupMemoryBarrierWithGroupSync();
 
-    // 素朴だが確実な逐次排他スキャン（1024 要素、1 スレッドのみ）
+    // phase 2: ストリップ合計の排他スキャン (スレッド 0 の逐次、SCAN_BLOCK 回転のみ)
     if (t == 0)
     {
         uint acc = 0;
-        for (uint k = 0; k < BlockCount; k++)
+        for (uint s = 0; s < SCAN_BLOCK; s++)
         {
-            uint c = BlockSums[k];
-            BlockSums[k] = acc;
+            uint c = gScan[s];
+            gScan[s] = acc;
             acc += c;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // phase 3: 各ストリップ内を排他値で書き戻す
+    uint acc2 = gScan[t];
+    for (uint k2 = 0; k2 < stripLen; k2++)
+    {
+        uint idx2 = start + k2;
+        if (idx2 < BlockCount)
+        {
+            uint c2 = BlockSums[idx2];
+            BlockSums[idx2] = acc2;
+            acc2 += c2;
         }
     }
 }
@@ -443,25 +464,54 @@ float3 SpeedClampRef(float3 worldPos)
     return InPotGate(worldPos) ? ContainerLinearVelocity : float3(0, 0, 0);
 }
 
-float3 ClampSpeed(float3 v, float3 worldPos)
+// 追補 33 (2026-08-22 バグ報告「こぼれたポーションの落ち方がスローモーション」/
+//          「前方に歩いたときの不思議なこぼれ」の真因):
+// InPotGate は壺の外形の **1.5 倍半径・上下にも 1 span 分** という非常に緩い判定なので、
+// リムを越えてこぼれた液滴はしばらくこのゲートの中に残る。従来はそのゲートだけで
+// クランプ先を決めていたため、こぼれた直後の液滴が **calm 中の MaxSpeedPot
+// (歩行 1.0 / 傾斜ランプ 0.5 m/s)** で頭を押さえられていた。
+// 結果、壺の縁から溢れた液体が 1 m/s 前後でゆっくり垂れ下がり (自由落下なら 0.3 秒で
+// 3 m/s)、壺から離れた瞬間に急に加速する。これが「蜜の中を落ちる」「壺の周りに
+// 液体がまとわりつく不思議なこぼれ方」の正体だった。歩行・旋回・走行にも calm を
+// 広げた追補 30 以降はほぼ常時発火していた。
+// 脱出済み (RetiredFlags != 0) の粒子は、位置がどこであろうと世界基準 +
+// MaxSpeedFalling で落とす。calm は「壺の中身を落ち着かせる」ためのものであって、
+// もう壺の外にある液体には掛けてはいけない。
+float3 ClampSpeedFor(float3 v, float3 worldPos, uint retired)
 {
-    // 壺内は容器基準 + MaxSpeedPot、壺外は世界基準 + MaxSpeed。
+    // 壺内は容器基準 + MaxSpeedPot、壺外は世界基準 + MaxSpeedFalling。
     // calm (MaxSpeedPot を絞る) の間も、こぼれた液滴は通常速度で落ちる。
-    bool gated = InPotGate(worldPos);
+    // 2026-08-22: 壺外の上限を MaxSpeed (5) から分離。橋の上 (8m) からのこぼれが
+    // 5 m/s (本来 18 m/s) で落ちて「蜜の中を落ちる」スローモーションに見えていた。
+    bool escapedFree = (retired != 0u) && (EscapedIgnoreCalm > 0.5);
+    bool gated = !escapedFree && InPotGate(worldPos);
     float3 vref = gated ? ContainerLinearVelocity : float3(0, 0, 0);
-    float lim = gated ? MaxSpeedPot : MaxSpeed;
+    float lim = gated ? MaxSpeedPot : MaxSpeedFalling;
     float3 rel = v - vref;
     float sp = length(rel);
     if (sp > lim) rel *= lim / sp;
     return vref + rel;
 }
 
+// 壺の中身専用の呼び出し口 (脱出粒子が混ざらない経路から使う)。
+float3 ClampSpeed(float3 v, float3 worldPos) { return ClampSpeedFor(v, worldPos, 0u); }
+
 // ============================================================================ PBF
 // §2: 外力は World Gravity のみ。
+// 動く境界の更新 (旧 UpdateBoundary) を結合済み (2026-08-21)。境界粒子の配置と流体の
+// 時間積分は互いに独立なので、max(FluidCount, BoundaryCount) スレッドの 1 ディスパッチで
+// 両方を行う。
 [numthreads(THREADS, 1, 1)]
-void Integrate(uint3 id : SV_DispatchThreadID)
+void IntegrateAndBoundary(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
+    if (i < BoundaryCount)
+    {
+        float3 w = mul(BoundaryToWorld, float4(BoundaryLocal[i], 1.0)).xyz;
+        BoundaryPositionsRW[i] = w;
+        BoundaryVelocitiesRW[i] = ContainerLinearVelocity
+                                + cross(ContainerAngularVelocity, w - ContainerCenter);
+    }
     if (i >= FluidCount) return;
 
     float3 v = Velocities[i] + Gravity * DeltaTime;
@@ -483,7 +533,8 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     if (dot(JoltAccel, JoltAccel) > 0.001 && InPotGate(Positions[i]))
         v += JoltAccel * DeltaTime;
 
-    v = ClampSpeed(v, Positions[i]);
+    // 追補 33: 脱出済みの液滴には calm (MaxSpeedPot) を掛けない。
+    v = ClampSpeedFor(v, Positions[i], RetiredFlagsIn[i]);
 
     Velocities[i] = v;
     PredictedPositions[i] = Positions[i] + v * DeltaTime;
@@ -623,24 +674,22 @@ void ApplyDeltaP(uint3 id : SV_DispatchThreadID)
 }
 
 // §10: SafetyCorrection の位置差は速度に変換しない。
+// 速度確定 (旧 ComputeVelocity) と Akinci 表面張力用の法線 (旧 ComputeNormals) を結合
+// (2026-08-21)。法線は速度に依存しない (predicted と密度のみ) ため相互依存が無い。
+// 注: 法線側の位置は PredictedIn ではなく PredictedPositions を読む。同一バッファを
+// 同一カーネルへ UAV (速度式) と SRV の両方で束縛することはできないため。値は同じ。
 [numthreads(THREADS, 1, 1)]
-void ComputeVelocity(uint3 id : SV_DispatchThreadID)
+void VelocityAndNormals(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= FluidCount) return;
     DeltaP[i] = (PredictedPositions[i] - Positions[i] - SafetyCorrection[i]) / max(DeltaTime, 1e-6);
-}
 
-// Akinci 表面張力用の法線。目的は粒子の球体化ではなく表面の平滑化 (§9)。
-[numthreads(THREADS, 1, 1)]
-void ComputeNormals(uint3 id : SV_DispatchThreadID)
-{
-    uint i = id.x;
-    if (i >= FluidCount) return;
+    // Akinci 表面張力用の法線。目的は粒子の球体化ではなく表面の平滑化 (§9)。
     if (RetiredFlagsIn[i] != 0u) { Normals[i] = float3(0, 0, 0); return; }
 
     float h = KernelRadius;
-    float3 pi = PredictedIn[i];
+    float3 pi = PredictedPositions[i];
     float3 n = float3(0, 0, 0);
 
     FOREACH_NEIGHBOUR(pi,
@@ -1054,7 +1103,15 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         // 外形より外にいる粒子は、そもそも壺の実体と重ならないのでこの問題が起きない。
         bool nearOrAboveLip = lpE.y > PotRimY - EscapeMargin;
         bool outsideRadius  = rE > max(rIn + WallTolerance, PotOuterAt(lpE.y)) + EscapeMargin;
-        bool outsidePot = nearOrAboveLip && outsideRadius;
+        // 追補 35 (2026-08-22 バグ報告「こぼれた見た目とゲージの残量が一致しない」):
+        // 「リム付近より上」だけを脱出の入口にしていたため、**リムを越えたあと壺の胴に
+        // 沿って落ちた液体** がリム高さを外れた瞬間に判定対象から抜け、着地して Ground に
+        // 分類されるまで「まだ壺のもの (Recoverable)」として残量に数えられていた。
+        // 見た目には既に壺の外を落ちているのにゲージが減らない状態。
+        // 壺の **底より下** にいて、かつ外形より外にいる粒子は、壺の内側にはあり得ない
+        // (真下は外形の内側なので、底の貫通と取り違える心配もない) ので脱出として拾う。
+        bool belowPotFloor = lpE.y < PotFloorY - EscapeMargin;
+        bool outsidePot = (nearOrAboveLip || belowPotFloor) && outsideRadius;
         if (outsidePot)
         {
             RetiredFlags[i] = 3u;
@@ -1179,6 +1236,13 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
     // 世界基準のままだと、壺ごと自由落下しているだけ (相対運動ほぼ 0) でも
     // 9 m/s と報告され、サブステップ数だけが無駄に跳ね上がる。容器の動き自体が
     // 要求するサブステップ数は FluidCore.cs 側の containerSpeed 項が別途見ている。
+    // 2026-08-21: 逸脱粒子 (RetiredFlags != 0 = Escaped/Settled/Retired) は計測から除外する。
+    // これらは壁とも他の粒子とも相互作用せず (kCount がソートから外す)、地面/斜面は
+    // 解析平面との毎サブステップ判定 (GroundBandHeight がトンネリングを防ぐ) なので、
+    // CFL でカバーする必要が無い。従来は数滴のこぼれの自由落下 (クランプ 5 m/s) が
+    // 計測を占有し、壺内が完全に静止していてもサブステップが 12 に張り付いていた
+    // (= ソルバ費用が常時 2 倍)。
+    if (RetiredFlagsIn[i] == 0u)
     {
         uint sp = (uint)(length(VelocitiesIn[i] - SpeedClampRef(PositionsIn[i])) * 1000.0);
         uint old;

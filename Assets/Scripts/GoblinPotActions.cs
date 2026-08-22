@@ -76,7 +76,12 @@ public class GoblinPotActions : MonoBehaviour
         cc = GetComponent<CharacterController>();
         terrainTilt = GetComponent<GoblinTerrainTilt>();
         pot = transform.Find("Carry_Pot");
-        fluid = FindFirstObjectByType<FluidCore>();
+        // FIXED 2026-08-22: FindFirstObjectByType はシーンに FluidCore が 2 つ (壺と滝) ある
+        // ForestStage で**滝を掴んでいた**。calm・ジョルト・パリー回収など流体メカニクス
+        // 一式が滝に適用され、壺は保護ゼロだった (「歩くだけで大量にこぼれる」の真犯人)。
+        // 壺は自分の子 (Carry_Pot) にあるので、そこから取る。
+        fluid = GetComponentInChildren<FluidCore>();
+        if (fluid == null) fluid = FindFirstObjectByType<FluidCore>();
 
         // 追補 24: 待機画面 (エディットモード) では壺をゴブリンの横の地面に置いて
         // 見せている (頭に壺が埋まるのを避けるため)。実行開始時は **流体の初期化前に**
@@ -117,6 +122,23 @@ public class GoblinPotActions : MonoBehaviour
     public float cushionFailNudge = 0.25f;
     [Tooltip("着地後のジャンプ抑止時間 (秒)。惜しい遅押しの誤ジャンプ防止。")]
     public float cushionJumpSuppress = 0.2f;
+    // 追補 27 (2026-08-21): 道の段差 (15-25cm) を降りるだけで「生着地」となり、通常ジャンプ用の
+    // 掛け金 (cushionMissJolt) が発火して不自然に大量にこぼれていた (実測: 橋→道進入の直線
+    // 歩行だけで 45% 喪失、滞空 0.13-0.24s の生着地が 3-4 回)。実際のジャンプの滞空は 0.6s
+    // 前後なので、このしきい値未満の小落下では掛け金 (ジョルト + calm 解除) を発動しない。
+    [Tooltip("この滞空秒数以上の落下だけを「本物のジャンプ/落下」としてパリーなし着地の掛け金 (ジョルト + calm 解除) を発動する。歩行の段差 (滞空 0.1-0.25s) を除外する。")]
+    public float significantFallAirtime = 0.35f;
+    [Tooltip("加減速中 (歩き出し・停止) の壺内クランプ (m/s)。跳ね上がり v^2/2g がフリーボード (~3cm) を越えない値にする。0.7 で 2.5cm。")]
+    public float rampCalmClamp = 0.5f;   // 0.7 では歩き出しで 11% 溢れた。0.5 で実測ゼロ
+    [Tooltip("歩行中の壺内クランプ (m/s)。歩容の揺すりで液が溢れ続けるのを抑える (追補 29)。1.0 で歩行 14m の保持 97.8% (実測)。")]
+    public float walkCalmClamp = 1.0f;
+    [Tooltip("走行中の壺内クランプ (m/s)。走りは歩きよりスロッシュが激しいため強めに絞る (追補 30)。")]
+    public float runCalmClamp = 0.7f;
+    // ---- 追補 37: バランス操作の慣性 ----
+    [Tooltip("バランスをゆっくり動かしているときの壺内クランプ (m/s)。微調整でこぼれないようにする分。")]
+    public float balanceCalmClamp = 1.3f;
+    [Tooltip("この速さ (バランス値/秒) を超えてバランスを動かしている間は calm を一切掛けない。速く振れば慣性でこぼれる。小さくすると少し動かしただけでこぼれるようになる。")]
+    public float balanceInertiaRate = 1.2f;
     // 注入は壺内クランプ (MaxSpeed 5 相対) で頭打ちになるため 5 が実効最大 (実測)。
     [Tooltip("パリーなし着地で壺内に注入する跳ね返り速度 (m/s、上+前方)。通常ジャンプの掛け金。")]
     public float cushionMissJolt = 5.0f;
@@ -259,11 +281,44 @@ public class GoblinPotActions : MonoBehaviour
                 // 追補 22: 地上での大きな加減速中は自動 calm (歩き出しを速くした代償を吸収)。
                 // 追補 23: バランス操作 (壺の回転) 中も同様に当てる (適用速度 1.8 の代償)。
                 // パリーなし着地直後 (rampCalmBlockedUntil) は当てず、着地の掛け金を守る。
+                // 追補 28 (2026-08-22): 加減速時のクランプを 1.3 → rampCalmClamp (0.7) に強化。
+                // 1.3 では跳ね上がり高さ v^2/2g ≒ 8.6cm がフリーボード (~3cm) を大きく超え、
+                // 歩き出すたびに盛大に溢れていた (「少し歩いただけで大量のこぼれ」の主因)。
+                // 0.7 なら 2.5cm でリムを越えない。バランス操作中は従来の 1.3 のまま
+                // (傾け操作のこぼれはゲーム性なので殺さない)。
+                // 追補 29 (2026-08-22): **歩行中も常時 calm を当てる**。位置ベースの実測で、
+                // 通常歩行だけで液が物理的に 25-43% 壺の外へ溢れていた (ゲージの分類値は
+                // これを大幅に過小報告していた)。クランプ 1.0 で歩行 14m の保持 97.8% を確認。
+                // 着地の掛け金 (rampCalmBlockedUntil) 中は当てないので、ジャンプ着地・
+                // パリー失敗のこぼれはそのまま。傾け操作 (バランス 1.3) やよろけ・川も従来通り。
+                // 追補 30 (2026-08-22 QA): 旋回 (その場含む) と走りが calm の対象外だった。
+                // 実測: その場旋回 2 秒で ~13-30% 流出 / 走り 4 秒で 36% 流出。
+                // 旋回は「移動扱い」に含め、走りは歩きより強いクランプを当てる。
                 bool balanceMoving = rig != null && rig.BalanceMoving;
-                if (loco != null && (loco.RampingHard || balanceMoving) && !airborneNow
+                bool turningNow = loco != null && Mathf.Abs(loco.TurnInputThisFrame) > 0.1f;
+                bool movingOnGround = loco != null && (loco.IsMoving || turningNow);
+
+                // 追補 37 (2026-08-22 バグ報告「マウスを急激に動かしてもポーションが全く
+                // こぼれない。慣性が働いていない」):
+                // バランスを **速く** 動かしている間は calm を一切掛けない。傾け操作中に
+                // 一律クランプを当てていたため、壺を勢いよく振っても中身が容器に貼り付いた
+                // まま動かず、慣性が完全に消えていた。
+                // ゆっくりした微調整 (歩きながらの姿勢制御) には従来どおり calm が要るが、
+                // **意図的に速く振ったらこぼれる** のがこのゲームの操作感なので、そこは殺さない。
+                bool balanceFast = rig != null && rig.BalanceRate > balanceInertiaRate;
+                if (balanceFast)
+                {
+                    // 直前まで掛かっていた calm を即座に解く (残っていると慣性が死ぬ)
+                    if (fluid != null) fluid.maxSpeedInPot = -1f;
+                    hotCalmUntil = 0f;
+                }
+                else if (loco != null && (loco.RampingHard || balanceMoving || movingOnGround) && !airborneNow
                     && Time.time >= rampCalmBlockedUntil)
                 {
-                    BeginFluidCalm(1.3f);
+                    float clamp = loco.RampingHard ? rampCalmClamp
+                               : balanceMoving ? balanceCalmClamp
+                               : loco.IsRunning ? runCalmClamp : walkCalmClamp;
+                    BeginFluidCalm(clamp);
                     hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + 0.45f);
                 }
 
@@ -426,6 +481,13 @@ public class GoblinPotActions : MonoBehaviour
         // 衝撃をそのまま受ける。従来は calm が着地後 0.6 秒残り、パリーなしでも
         // ほぼこぼれず「パリーの意味がない」状態だった (ユーザー指摘)。
         // 離陸〜滞空の保護 (追補 16) はそのままなので理不尽さは戻らない。
+        // 追補 27: 小さな段差の踏み外し (滞空 < significantFallAirtime) は掛け金の対象外。
+        // ジョルトも calm 解除もせず、通常歩行の連続として扱う (宣言部の注記を参照)。
+        if (!parried && airborneTime < significantFallAirtime)
+        {
+            LogParry($"小落下 (滞空 {airborneTime:F2}s < {significantFallAirtime:F2}) → 掛け金なし");
+            return;
+        }
         if (!parried)
         {
             hotCalmUntil = 0f;
@@ -463,7 +525,9 @@ public class GoblinPotActions : MonoBehaviour
     IEnumerator GlowPulse(float peak, float duration)
     {
         if (glowPulsing) yield break;
-        var fs = FindFirstObjectByType<FluidSurface>();
+        // 壺自身の FluidSurface を光らせる (FindFirst だと滝の表面を掴むことがある)
+        var fs = fluid != null ? fluid.GetComponent<FluidSurface>() : null;
+        if (fs == null) fs = FindFirstObjectByType<FluidSurface>();
         if (fs == null || fs.liquidMaterial == null) yield break;
         var m = fs.liquidMaterial;
         if (emissionBase < 0f) emissionBase = m.GetFloat("_EmissionStrength");

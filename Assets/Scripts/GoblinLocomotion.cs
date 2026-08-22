@@ -75,8 +75,12 @@ public class GoblinLocomotion : MonoBehaviour
     // 実測 (満杯・平地歩き出し、calm なし): accel 3.0 → 残 71% / 2.0 → 95% / 1.5 → 99%。
     // 追補 22: 1.5 は「歩き出しが遅い」(ユーザー) ため 3.5 へ戻し、加速中だけ
     // 壺内 calm を自動適用してこぼれを抑える方式に変更 (RampingHard を参照)。
-    [Tooltip("運搬中の加速上限 (m/s^2)。3.5 で歩行速度まで約 0.4 秒。加速中は自動 calm がこぼれを抑える。")]
-    public float carryAccel = 3.5f;
+    [Tooltip("運搬中の加速上限 (m/s^2)。1.8 で歩行速度まで約 0.8 秒。")]
+    // 2026-08-22: 3.5 → 1.8。加速 3.5 は液面の慣性傾き (atan(a/g)≒20 度) がフリーボードを
+    // 大きく超え、W で歩き出すたびに後方へこぼれていた (実測系列: calm なしで accel 3.0 → 残 71%、
+    // 2.0 → 95%、1.5 → 99%)。クランプ (calm) は fps によって効きが揺れるため、
+    // 加速そのものを物理的にこぼれない水準へ下げるのが確実。
+    public float carryAccel = 1.8f;
     /// <summary>運搬中に大きく加減速している最中か (追補 22: 加速時 calm のトリガー)。</summary>
     public bool RampingHard { get; private set; }
     [Tooltip("運搬中の減速上限 (m/s^2)。5 なら満杯でも停止時の流出は実測ゼロ (減速は短時間で済むため)。")]
@@ -94,6 +98,8 @@ public class GoblinLocomotion : MonoBehaviour
     [Tooltip("壺を担いでいる間だけランプを使う (GoblinPotActions が更新)。壺なしは即応のまま。")]
     [HideInInspector] public bool gentleAccel = true;
     float smoothedSignedSpeed;   // 前後方向の平滑化済み速度 (+前 / -後)
+    /// <summary>前後方向の符号つき平滑化速度 (+前/-後)。加速度フィードフォワード (追補 28) が読む。</summary>
+    public float SignedSpeed => smoothedSignedSpeed;
 
     // 2026-08-15 追加: ツボおろし/拾い上げ/転倒のワンショット再生中は移動入力を受けない
     // (GoblinPotActions が立てる)。重力だけは効かせる。

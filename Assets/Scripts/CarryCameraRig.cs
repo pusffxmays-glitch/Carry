@@ -28,6 +28,14 @@ public class CarryCameraRig : MonoBehaviour
     [Tooltip("How quickly the camera's yaw catches up to the goblin's current facing direction.")]
     public float yawFollowLerp = 6f;
     public float followLerp = 15f;
+    [Tooltip("遮蔽で寄るときの速さ。大きいほど機敏。")]
+    public float pullInLerp = 10f;
+    [Tooltip("遮蔽が消えて戻るときの速さ。ゆっくりめにすると出戻りがバタつかない。")]
+    public float releaseLerp = 3f;
+    float smoothedDistance = -1f;
+    /// <summary>デバッグ: 最後にカメラを遮った物と時刻 (「急に寄る」調査用)。</summary>
+    public string LastBlocker { get; private set; } = "";
+    public float LastBlockTime { get; private set; } = -1f;
 
     // Always true now -- kept as a property (rather than removed outright) because
     // GoblinLocomotion.cs reads it to decide whether to process movement input.
@@ -51,12 +59,37 @@ public class CarryCameraRig : MonoBehaviour
         Vector3 focus = target.position + lookOffset;
         Vector3 desiredPos = focus - rot * Vector3.forward * distance;
 
-        RaycastHit hit;
-        if (Physics.Linecast(focus, desiredPos, out hit))
+        // FIXED 2026-08-22 (バグ報告「橋から道へ移るあたりでカメラがゴブリンに寄る」):
+        // トリガー (Checkpoint_Start など、通過判定用の見えない箱) を遮蔽物として
+        // 拾っていた。遮蔽判定は実体のあるコライダーのみにする。
+        // 2026-08-22 追補: 距離の変化を平滑化する。従来は遮蔽した瞬間に距離が
+        // 1 フレームで飛び「急に寄ってくる」カットになっていた。寄りは速め、
+        // 戻りはゆっくりのドリーにする。木の枝や岩を掠めた 1-2 フレームの誤遮蔽も
+        // これで目立たなくなる。
+        // FIXED 2026-08-22: 自分自身 (ゴブリンの CharacterController) を遮蔽物として拾い、
+        // 歩行中に散発的へ最小距離まで飛び付く「急に寄ってくる」バグがあった (実測で
+        // LastBlocker='Goblin' を確認)。ターゲット配下のコライダーは遮蔽判定から除外する。
+        float targetDist = distance;
+        Vector3 dir = desiredPos - focus;
+        float span = dir.magnitude;
+        var occluders = Physics.RaycastAll(focus, dir / Mathf.Max(span, 1e-5f), span,
+                                           Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+        foreach (var h in occluders)
         {
-            float hitDist = Mathf.Clamp(hit.distance, minDistance, maxDistance);
-            desiredPos = focus - rot * Vector3.forward * hitDist;
+            if (h.collider.transform == target || h.collider.transform.IsChildOf(target)) continue;
+            float d2 = Mathf.Clamp(h.distance, minDistance, maxDistance);
+            if (d2 < targetDist)
+            {
+                targetDist = d2;
+                LastBlocker = h.collider.name;   // デバッグ: 何に遮られて寄ったか
+                LastBlockTime = Time.time;
+            }
         }
+        if (smoothedDistance < 0f) smoothedDistance = targetDist;
+        float distRate = targetDist < smoothedDistance ? pullInLerp : releaseLerp;
+        smoothedDistance = Mathf.Lerp(smoothedDistance, targetDist,
+                                      1f - Mathf.Exp(-distRate * Time.deltaTime));
+        desiredPos = focus - rot * Vector3.forward * smoothedDistance;
 
         transform.position = Vector3.Lerp(transform.position, desiredPos, 1f - Mathf.Exp(-followLerp * Time.deltaTime));
         transform.rotation = rot;

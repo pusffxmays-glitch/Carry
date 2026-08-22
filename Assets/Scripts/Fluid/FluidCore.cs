@@ -24,6 +24,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 悪化した（＝落ち着かない）。下限を 6 に固定すると 10 と同等の品質を保ったまま
     // 静止時の物理コストが 17.1 -> 10.4 ms/frame になる。
     [Range(1, 12)] public int minSubSteps = 6;
+    // 2026-08-22: 静定安定性はサブステップ刻み sdt = dt/sub で決まる (実測: 0.0037 以下で
+    // 安定、0.0074 でシード波が成長)。dt をクランプする代わりにこの刻みを守るよう
+    // サブステップ数を動的に足すことで、低 fps でもシミュ時間を実時間で進められる
+    // (スローモーション解消)。壺 (spacing 0.036) は 0.0037。粒子間隔が大きい滝は
+    // 余裕があるのでシーン側で大きめに設定してよい。
+    [Tooltip("サブステップ刻みの上限 (秒)。静定安定性の要。小さいほど安定だが低 fps 時のサブステップ数が増える。")]
+    public float stableSubstepDt = 0.0037f;
     // 上限が低いと CFL を満たせないフレームが出て、そこで流体が発散する。
     // 実測（急な往復+回転）: 必要 12 に対し上限 10 で、120 フレーム中 118 が CFL 違反、
     // 流体が速度クランプ 8m/s に張り付いて描画が崩れた。
@@ -33,6 +40,25 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Range(1, 32)] public int maxSubSteps = 20;
     [Tooltip("CFL に使う実測最大速度への安全率。実測値は 1 フレーム前のものなので、急加速に備えて余裕を持たせる。")]
     [Range(1f, 4f)] public float cflSpeedMargin = 1.6f;
+    // 追補 38 (近傍グリッドのサブステップ間使い回し) は **撤去した** (2026-08-22 夕方)。
+    // 実測: N=2 で Step avg 31.4/32.6ms -> 32.6/33.3ms と速くならず、MeasuredMaxSpeed が
+    // 0.4 -> 1.2 (3倍) に跳ね、overflow 102 件。**効果ゼロで品質だけが落ちる**。
+    // 1 サブステップの 23 ディスパッチは等価ではなく、効いているのは近傍ループを回す重い
+    // カーネル (ComputeDensityLambda / ComputeDeltaP) だけで、グリッド再構築の 6 ディスパッチ
+    // は測定限界以下だった。一方この最適化は初回実装でフレームをまたいで使い回し、GPU が
+    // 範囲外のセルを読んで **エディタごとクラッシュ (GPU デバイスロスト)** を起こしている。
+    // 「効果なし・危険あり」なので注意書きではなくパラメータごと削除する。
+    // 近傍グリッドは毎サブステップ必ず再構築する (SubStep)。
+    // 追補 32: 容器 (壺そのもの) の移動に許す 1 サブステップあたりの距離。粒子間隔の倍数。
+    // 流体側の 0.4 と違って緩いのは、壺内の液体が容器と共動していて相対速度がほぼ 0 だから
+    // (CFL が守るのは相対運動)。ここを流体と同じ厳しさにすると、走行中の壺の世界速度
+    // (実測 7-12 m/s) だけでシミュ時間が実時間より遅れ、全体がスローモーションになる。
+    [Tooltip("容器の移動に許す 1 サブステップあたりの距離 (粒子間隔の倍数)。小さすぎると走行中に全体がスローモーションになる。")]
+    [Range(0.4f, 6f)] public float containerTravelBudget = 1.5f;
+    [Tooltip("非常用: 1 サブステップでこの距離 (粒子間隔の倍数) を超えて動く場合だけシミュ時間を遅らせる。通常プレイでは発火しない。小さくするとスローモーションが再発する。")]
+    [Range(0.5f, 6f)] public float emergencyTravelSpacing = 1.5f;
+    [Tooltip("追補 33: 壺から出た液滴に calm (壺内の速度制限) を掛けない。OFF にすると、こぼれた液体が壺の近くにいる間だけゆっくり落ちる旧挙動に戻る。")]
+    public bool escapedIgnoreCalm = true;
 
     [Header("Material")]
     [Range(1.5f, 3f)] public float kernelRadiusScale = 2f;
@@ -67,6 +93,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 8 m/s だと 3.3m も噴き上がって「発散」に見える。5 m/s なら 1.3m。
     // 壺の直径が 0.9m なので、この程度が運搬中の跳ねとして妥当。
     public float maxSpeed = 5f;
+    // 2026-08-22: 壺外 (落下中の液滴など) の速度上限を分離。5 のままだと橋の上 (8m) からの
+    // こぼれが本来 18 m/s のところ 5 m/s で落ち、スローモーションに見えていた。
+    // 地面バンド (spacing*1.5 ≒ 5.4cm) のトンネリング防止: 10 m/s × sdt(≦0.0037) = 3.7cm < 5.4cm。
+    [Tooltip("壺の外の液体 (落下中の液滴・水たまり) の速度上限 (m/s)。落下の見かけ速度を決める。")]
+    public float maxSpeedFalling = 14f;   // 2026-08-22: 10 でもまだ遅い (自然落下は 8m で 18m/s)。地面バンド条件 14*0.0037=5.2cm < 5.4cm の上限まで引き上げ
     // 壺内 (容器基準ゲート内) 限定の速度クランプ。負なら maxSpeed と同じ。
     // おろし/拾い/熱い床ジャンプ中に GoblinPotActions が一時的に絞る (calm)。
     // 壺外の液滴・水たまりには適用しないので、こぼれがスローモーションにならない。
@@ -103,13 +134,23 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // (実測: 容器ピーク速度 0.000 のまま流体だけが 5 m/s のクランプまで到達)。
     // 静定状態そのものは安定 (収束後は静かなまま) なので、シード直後の数シミュ秒だけ
     // 壺内クランプを絞って残渣を殺し、静定アトラクタへ確実に落とす。
-    [Tooltip("シード直後、このシミュレーション秒数だけ壺内の速度を startupCalmClamp に絞る。ハンドオフの残渣が表面の泡立ちに育つのを防ぐ。0 で無効。")]
-    // 1.5 → 3.0 (2026-08-17): 静定が早いほど CFL のサブステップ数が早く最小 (6) へ落ち、
-    // 起動直後の重さ (高サブステップ期間) も短くなる。一石二鳥なので長めに取る。
-    public float startupCalmSimSeconds = 3.0f;
-    [Tooltip("開始直後の壺内クランプ (m/s)。")]
-    public float startupCalmClamp = 0.8f;
+    // 2026-08-22 改訂: 固定時間では波の山とタイミングが噛み合わず、解除後に波が育って
+    // 開始しただけで 13-14% 流出していた。**適応型**にする: 実測最大速度が
+    // startupCalmReleaseSpeed を下回る (= 波が本当に死んだ) までクランプを維持し、
+    // startupCalmSimSeconds は保険の上限とする。クランプ 0.6 m/s は跳ね上がり高さ
+    // v^2/2g ≒ 1.8cm < フリーボード ~3cm でリムを越えられない値。
+    [Tooltip("シード後クランプの最大維持時間 (シミュレーション秒)。通常は下の解除条件が先に満ちる。")]
+    public float startupCalmSimSeconds = 30f;
+    [Tooltip("開始直後の壺内クランプ (m/s)。フリーボードを越えない速度にする。")]
+    public float startupCalmClamp = 0.6f;
+    [Tooltip("実測最大速度 (壺の中身) がこの値を下回ったらクランプを解除する。クランプ値より十分小さくすること。")]
+    public float startupCalmReleaseSpeed = 0.45f;
+    [Tooltip("容器 (壺) の速度がこの値 (m/s) を超えたら = プレイヤーが動き出したら、開始クランプを即解除する。歩行 1.5 m/s で確実に超え、静止時の微動では超えない値。")]
+    public float startupCalmReleaseContainerSpeed = 0.8f;
+    [Tooltip("XSPH ブレンド率の上限 (サブステップあたり)。0.9 で自励振動、0.55 では減衰不足で歩行スロッシュが暴れる。0.75 が本来のチューニングに近い。")]
+    [Range(0.3f, 0.85f)] public float xsphBlendCap = 0.75f;
     float simTimeSinceSeed = 1e9f;
+    bool startupCalmDone = true;
     [Tooltip("シミュレーション領域の余白 (m)。容器の周囲にこれだけ広げる。")]
     public float simPadding = 0.45f;
     [Tooltip("容器の下へ領域を伸ばす量 (m)。Box モードでのみ使う。壺モードでは領域の底は groundY に固定される。")]
@@ -181,6 +222,14 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     [Tooltip("テストハーネスが明示的な dt で駆動できるようにするためのスイッチ。")]
     public bool autoStep = true;
+    // 2026-08-22: N フレームに 1 回だけ Step し、間の dt は積算して渡す (シム時間は実時間の
+    // まま)。このシムのコストは粒子数よりディスパッチ固定費が支配的なため、Step 頻度を
+    // 落とすとほぼ比例して軽くなる。遠くの滝など「毎フレーム更新する必要のない」コアを
+    // FluidSimLOD が距離に応じて間引くのに使う。1 = 毎フレーム (従来)。
+    [Tooltip("N フレームに 1 回だけシミュレーションを進める (dt は積算)。遠景の流体の負荷削減用。")]
+    [Range(1, 6)] public int stepEveryNFrames = 1;
+    float pendingDt;
+    int stepFrameCounter;
     // §16 は非同期リードバックを指定しており、実装もしてある（下の false 経路）。
     // ただし **非同期にすると Play 中に FluidCore を無効化→有効化しただけで
     // エディタが固まる**（最小再現で確認）。保留中の読み戻しとバッファ解放の
@@ -190,10 +239,20 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 原因を特定したら既定を false に戻す。OPEN_ISSUES.md の OI-4 を参照。
     [Tooltip("領域カウンタを同期読み戻しする。false にすると CPU が GPU を待たなくなるが、現在は再初期化でエディタが固まる不具合がある (OI-4)。")]
     public bool synchronousReadback = true;
+    // 2026-08-21 ディスパッチ対策②: 分類の同期読み戻しは「それまでに積んだ GPU 仕事全部の
+    // 完了待ち」なので、毎フレーム行うと CPU メインスレッドが GPU と完全直列化する
+    // (実測: Step() の CPU 時間 ≒ 自分の GPU 時間)。観測 (ゲージ/統計) 用途なので間引く。
+    // CFL 用の実測最大速度も古くなるが、cflSpeedMargin (1.6) が数フレームの遅れを見込む。
+    [Tooltip("領域分類 (残量ゲージ・統計の集計) を何フレームに 1 回行うか。1 = 毎フレーム (従来)。増やすとメインスレッドの GPU 完了待ちが減る。")]
+    [Range(1, 10)] public int classifyInterval = 3;
+    int classifyCountdown;
 
     // ---- public state ----
     public bool IsReady => positions != null;
     public GraphicsBuffer PositionsBuffer => positions;
+    /// <summary>粒子の状態 (0=壺のもの / 1=消滅 / 2=地面の水たまり / 3=こぼれて落下中)。
+    /// 追補 36: 描画側がこぼれた液体を実体積に近い大きさで描くのに使う。</summary>
+    public GraphicsBuffer RetiredFlagsBuffer => retiredFlags;
     public GraphicsBuffer VelocitiesBuffer => velocities;
     public GraphicsBuffer DensitiesBuffer => densities;
     public GraphicsBuffer BoundaryPositionsBuffer => boundaryPositions;
@@ -225,6 +284,60 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public float LastBoundaryTravel { get; private set; }
     /// <summary>直近フレームで実測した流体の最大速さ (m/s)。CFL のサブステップ数はこれで決まる。</summary>
     public float MeasuredMaxSpeed { get; private set; }
+    /// <summary>直近フレームの Step() に掛かった実時間 (ms)。この流体単体のコスト。</summary>
+    public float LastStepMs { get; private set; }
+    /// <summary>Step() の平均コスト (ms)。ResetStepCost からの平均。</summary>
+    public float AvgStepMs => stepMsCount > 0 ? stepMsAcc / stepMsCount : 0f;
+    public int StepCostSamples => stepMsCount;
+    public void ResetStepCost() { stepMsAcc = 0f; stepMsCount = 0; }
+    readonly System.Diagnostics.Stopwatch stepWatch = new System.Diagnostics.Stopwatch();
+    float stepMsAcc; int stepMsCount;
+
+    // ---- GPU 安全装置 (2026-08-22 夕方) ----
+    // 2026-08-22 に **同じ日に 2 回** GPU デバイスロストでエディタごと落ちている。
+    // クラッシュのスタックはいずれも
+    //   GfxDeviceD3D12::GetComputeBufferData -> FlushCommandList -> D3D12Fence::Wait
+    //   -> CheckDeviceStatus (device removed)
+    // で、**同期リードバックの GPU 待ち中にドライバがデバイスを落としている**。
+    // 引き金は毎回「1 フレームの GPU 仕事が異常に膨らんだ状態を投げ続けたこと」で、
+    // 直前の Step は 290ms/回 まで悪化していた (通常は 30ms 前後)。
+    // コンソールに "Ran out of Graphics Ring Buffer space" も出ており、ディスパッチ数が
+    // ドライバの提出上限に迫っていることも分かっている。
+    //
+    // したがって **異常な負荷は投げる前に自分で止める**。Step の実測時間が
+    // watchdogStepMs を watchdogFrames 回連続で超えたら、サブステップ数を
+    // watchdogSafeSubSteps に強制的に絞る。絞ると実時間より進みが遅れる (スローモーション)
+    // が、**デバイスロストよりはるかにましな失敗の仕方**であり、こぼれ判定などの
+    // ゲーム挙動は壊れない。一度発動したらそのまま保持する (振動させない)。
+    //
+    // **enabled を落として止める実装にしてはいけない**: OnDisable が全 GPU バッファを
+    // Release するため、プレイ中にトグルするとエディタがフリーズする (既知の不具合 OI-4)。
+    [Header("GPU 安全装置")]
+    [Tooltip("Step の実測時間がこれを超えたフレームが続いたら、サブステップ数を強制的に絞る。0 以下で無効。")]
+    public float watchdogStepMs = 120f;
+    // 5 にしてある理由 (2026-08-22 実測): 走行中に単発で 126ms を記録した。MCP の
+    // execute_code は 1 回 0.1-0.3 秒のヒッチを起こすので、計測中は孤立したスパイクが出る。
+    // 病的な状態 (実測 290ms) は何十フレームも続くため、連続回数を増やしても取り逃がさない。
+    [Tooltip("何フレーム連続で超えたら発動するか。単発のヒッチで誤発動しないよう余裕を持たせる。")]
+    [Range(1, 30)] public int watchdogFrames = 5;
+    [Tooltip("発動後に許すサブステップ数の上限。")]
+    [Range(1, 20)] public int watchdogSafeSubSteps = 4;
+    /// <summary>ウォッチドッグが発動しているか。発動中はサブステップが watchdogSafeSubSteps に制限される。</summary>
+    public bool WatchdogTripped { get; private set; }
+    /// <summary>ウォッチドッグが発動した時点の Step 実測時間 (ms)。</summary>
+    public float WatchdogTripMs { get; private set; }
+    int watchdogHits;
+    /// <summary>ウォッチドッグを解除する。原因を直したうえで呼ぶこと。</summary>
+    public void ResetWatchdog() { WatchdogTripped = false; watchdogHits = 0; WatchdogTripMs = 0f; }
+    /// <summary>直近フレームで **シミュレーションが消費した時間** (s)。</summary>
+    public float LastSimDt { get; private set; }
+    /// <summary>直近フレームの実経過時間 (s)。LastSimDt がこれより小さいフレームは
+    /// シミュレーションが実時間より遅れて進む = 見た目がスローモーションになる。</summary>
+    public float LastWallDt { get; private set; }
+    /// <summary>シミュレーション時間 / 実時間 の累積比 (1 未満 = スローモーション)。</summary>
+    public float SimTimeRatio => accWallDt > 1e-4f ? accSimDt / accWallDt : 1f;
+    float accSimDt, accWallDt;
+    public void ResetSimRatio() { accSimDt = 0f; accWallDt = 0f; }
     /// <summary>SafetyCorrection の発動粒子数（直近の読み取り時点）。常態化していたら壁の扱いが破綻しているサイン (§10)。</summary>
     public int SafetyCorrectionCount { get; private set; }
     public int SafetyConsecutiveFrames { get; private set; }
@@ -321,8 +434,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     float cellSize;
     int cellTotal, blockCount;
 
-    int kUpdateBoundary, kClearCounts, kBuildSortPos, kCount, kScanLocal, kScanBlocks, kScanAdd, kScatter;
-    int kIntegrate, kDensityLambda, kDeltaP, kApplyDeltaP, kVelocity, kNormals, kViscTension, kFinalize, kClassify;
+    // 2026-08-21 ディスパッチ対策③: UpdateBoundary+Integrate / ClearCellCounts+BuildSortPositions /
+    // ComputeVelocity+ComputeNormals をそれぞれ 1 カーネルに結合 (計算内容は不変)。
+    int kIntegrateBoundary, kClearBuildSort, kCount, kScanLocal, kScanBlocks, kScanAdd, kScatter;
+    int kDensityLambda, kDeltaP, kApplyDeltaP, kVelNormals, kViscTension, kFinalize, kClassify;
     int kTeleport, kSolidBoxCollide;
 
     const int Threads = 256;
@@ -361,20 +476,17 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         }
         boundary = GetComponent<FluidBoundary>();
 
-        kUpdateBoundary = fluidCompute.FindKernel("UpdateBoundary");
-        kClearCounts = fluidCompute.FindKernel("ClearCellCounts");
-        kBuildSortPos = fluidCompute.FindKernel("BuildSortPositions");
+        kClearBuildSort = fluidCompute.FindKernel("ClearAndBuildSort");
         kCount = fluidCompute.FindKernel("CountParticlesPerCell");
         kScanLocal = fluidCompute.FindKernel("ScanLocal");
         kScanBlocks = fluidCompute.FindKernel("ScanBlockSums");
         kScanAdd = fluidCompute.FindKernel("ScanAddOffsets");
         kScatter = fluidCompute.FindKernel("ScatterParticles");
-        kIntegrate = fluidCompute.FindKernel("Integrate");
+        kIntegrateBoundary = fluidCompute.FindKernel("IntegrateAndBoundary");
         kDensityLambda = fluidCompute.FindKernel("ComputeDensityLambda");
         kDeltaP = fluidCompute.FindKernel("ComputeDeltaP");
         kApplyDeltaP = fluidCompute.FindKernel("ApplyDeltaP");
-        kVelocity = fluidCompute.FindKernel("ComputeVelocity");
-        kNormals = fluidCompute.FindKernel("ComputeNormals");
+        kVelNormals = fluidCompute.FindKernel("VelocityAndNormals");
         kViscTension = fluidCompute.FindKernel("ApplyViscosityTension");
         kFinalize = fluidCompute.FindKernel("Finalize");
         kClassify = fluidCompute.FindKernel("ClassifyRegions");
@@ -755,7 +867,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         predicted.SetData(pos);
         velocities.SetData(vel);
         boundary.ResyncMotion();
-        simTimeSinceSeed = 0f;   // 開始直後の壺内クランプ (startupCalmSimSeconds) の起点
+        simTimeSinceSeed = 0f;        // 開始直後の壺内クランプの起点
+        startupCalmDone = false;      // 静まる (startupCalmReleaseSpeed) まで維持する
     }
 
     void Release()
@@ -795,20 +908,62 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         retiredFlags?.Release(); retiredFlags = null;
     }
 
-    void LateUpdate() { if (autoStep) Step(Time.deltaTime); }
+    void LateUpdate()
+    {
+        if (!autoStep) return;
+        pendingDt += Time.deltaTime;
+        if (++stepFrameCounter >= Mathf.Max(1, stepEveryNFrames))
+        {
+            stepFrameCounter = 0;
+            // 流体そのもののコストを測る (2026-08-22)。総フレーム時間はエディタの
+            // ノイズが大きすぎて A/B にならないため、Step の実時間を直接記録する。
+            // ディスパッチ発行の CPU 費用と、同期リードバックの GPU 待ちが両方入る。
+            stepWatch.Restart();
+            Step(pendingDt);
+            stepWatch.Stop();
+            LastStepMs = (float)stepWatch.Elapsed.TotalMilliseconds;
+            stepMsAcc += LastStepMs; stepMsCount++;
+            pendingDt = 0f;
+            UpdateWatchdog();
+        }
+    }
+
+    /// <summary>Step が異常に重い状態が続いていないか見張る。宣言部の「GPU 安全装置」を参照。</summary>
+    void UpdateWatchdog()
+    {
+        if (watchdogStepMs <= 0f || WatchdogTripped) return;
+        if (LastStepMs <= watchdogStepMs) { watchdogHits = 0; return; }
+        if (++watchdogHits < Mathf.Max(1, watchdogFrames)) return;
+        WatchdogTripped = true;
+        WatchdogTripMs = LastStepMs;
+        Debug.LogError($"[FluidCore] {name}: Step が {LastStepMs:F0}ms を {watchdogHits} フレーム連続で超えました。" +
+                       $" GPU デバイスロストを避けるため、サブステップを {watchdogSafeSubSteps} に制限します" +
+                       $" (通常は {LastSubStepCount})。原因を直してから ResetWatchdog() で解除してください。", this);
+    }
 
     public void Step(float dt)
     {
         Initialise();
         if (!IsReady || dt <= 0f) return;
-        // 2026-08-17: 上限 1/20 → 1/30。サブステップ数は dt に比例するため、フレームが
-        // 重いときに dt を大きく取ると「重い → dt 増 → サブステップ増 → さらに重い」の
-        // 悪循環になる (実測: 非フォーカス 9fps で壺ソルバだけで ~48ms/frame)。
-        // 上限を下げると重いときの流体はその分スローモーションになるが、
-        // フレームあたりのソルバ費用が下がって悪循環が弱まる。60fps では影響なし。
-        dt = Mathf.Min(dt, 1f / 30f);
+        // 2026-08-22 改訂: dt を固定値 (1/30) でクランプする方式は、低 fps でシミュ時間が
+        // 実時間より遅れて「ポーションがスローモーション」になる (実測: 18fps で進行 61%)。
+        // 安定性が本当に要求するのは **サブステップ刻み sdt ≤ stableSubstepDt** であって
+        // dt そのものではない (1/15 実験の不安定化は sdt 増大が原因だった)。
+        // したがって dt は実時間のまま受け取り、下でサブステップ数を足して sdt を保つ。
+        // dt を削る (=スローモーション) のは maxSubSteps でも sdt を守れない極端な低 fps
+        // (現行値では ~13.5fps 未満) のときだけ。
+        float wallDt = dt;              // 切り詰め前の実経過時間 (SampleMotion の速度補正用)
+        LastWallDt = wallDt;
+        dt = Mathf.Min(dt, 1f / 10f);   // 異常ヒッチの保険
+        float sdtCap = Mathf.Max(1e-4f, stableSubstepDt);
+        if (dt > maxSubSteps * sdtCap) dt = maxSubSteps * sdtCap;
 
-        boundary.SampleMotion(dt);
+        // 追補 31 (2026-08-22 QA): wallDt も渡す。ヒッチ (実測 333ms) で dt が 74ms に
+        // 切り詰められると、従来は「333ms ぶんの壺の移動 ÷ 74ms」で壁速度が実速度の
+        // 4-5 倍 (実測 7.3 m/s、壺の実測最大 5.1 m/s) に膨れ、その 1 フレームで液体が
+        // 大量に掬い出されていた。SampleMotion 側で姿勢の前進も dt/wallDt に比例させ、
+        // 壁速度を実速度に保つ (遅れは後続フレームで実速度のまま回収 or テレポート)。
+        boundary.SampleMotion(dt, wallDt);
         UpdateSolidBoxes();   // 揺れる橋が動くので毎フレーム更新
 
         // 容器の姿勢が確定してから配置する（上の pendingSeed の注記を参照）。
@@ -868,7 +1023,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // maxSubSteps に張り付き、静止状態でも 10 サブステップ回っていた（実測 17ms/frame）。
         // CFL の定義は「1 サブステップで粒子間隔の一定割合以上動かさない」なので、
         // 実測速度を使うのが本来の実装。1 フレーム遅れる分は cflSpeedMargin で見る。
-        float fluidSpeed = Mathf.Min(MeasuredMaxSpeed * cflSpeedMargin, maxSpeed);
+        // 上限は壺内/壺外クランプの大きい方 (壺外の落下は maxSpeedFalling まで出る。2026-08-22)
+        float fluidSpeed = Mathf.Min(MeasuredMaxSpeed * cflSpeedMargin, Mathf.Max(maxSpeed, maxSpeedFalling));
         float worstSpeed = Mathf.Max(fluidSpeed, containerSpeed);
 
         float maxTravel = 0.4f * spacing;
@@ -881,12 +1037,53 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // dt を削れば容器の移動量も減り、両方まとめて CFL を満たせる。
         // 流体だけを見ていたときは、フレーム落ち時に容器側が上限を超えて
         // CFL 不足が残っていた（実測 4 フレーム）。
-        if (worstSpeed * dt > maxTravel * maxSubSteps)
-            dt = maxTravel * maxSubSteps / Mathf.Max(worstSpeed, 1e-6f);
+        // 追補 32 (2026-08-22 バグ報告「ポーションの落下がスローモーション」):
+        // dt を削る条件から **容器速度を実質的に外す**。
+        //
+        // ここが「落下がスローモーション」の真因だった。従来は容器の世界速度
+        // (走行時の実測ピーク 7〜12 m/s) が worstSpeed を占有し、
+        //   dt_cap = 0.4*spacing*maxSubSteps / worstSpeed = 0.288 / 12 ≒ 24ms
+        // つまり **42fps を下回るフレームは常にシミュ時間が実時間より遅れる**。
+        // 実ステージ (30fps 前後) では常時 60-70% 進行 = 全部スローモーション。
+        // しかも落下中の液滴も同じ dt で積分されるので、見かけの重力が 0.6^2 = 0.36 倍に
+        // なり「蜜の中を落ちる」動きになっていた。
+        //
+        // 容器の世界速度は本来 CFL の対象ではない。CFL が守るのは **相対運動** で、
+        // 壺内の流体は容器と一緒に動くため相対速度はほぼ 0 (実測もその値を使っている)。
+        // 容器由来で本当に危ないのは「壁が共動していない液体 (地面の水たまり等) を
+        // 掃く」ケースだけで、これは SafetyCorrection (§10) が受け持つ。
+        // したがって容器には桁の違う緩い予算 (containerTravelBudget) を与え、
+        // 極端なヒッチのときだけ dt を削る。流体側は従来どおり厳密に見る。
+        // さらに追補 32 の本体: **CFL 由来の dt 削りそのものを非常用まで緩める**。
+        // 実測 (実ステージ 13fps・前方歩行) で simRatio 平均 0.61 / 最悪 0.21。
+        // つまりシミュ時間が実時間の 6 割しか進んでおらず、これが「落下がスローモーション」
+        // の正体だった。内訳は容器ではなく **流体側の CFL** で、
+        //   必要サブステップ = 実測スロッシュ 4 m/s x 1.6(margin) x dt / (0.4*spacing) ≒ 33
+        // が上限 20 を超えるため dt が 6 割に削られていた。
+        //
+        // ここで重要なのは、**1 サブステップあたりの移動量はすでに二重に有界**だという点:
+        //   (1) sdt は上の stableSubstepDt で 0.0037s 以下に固定されている
+        //       (dt > maxSubSteps*sdtCap のとき dt を削る処理が上にある)
+        //   (2) 速度は ClampSpeed で壺内 maxSpeed / 壺外 maxSpeedFalling に固定されている
+        // したがって最悪の移動量は maxSpeed*sdtCap = 5*0.0037 = 0.0185m ≒ 0.5 粒子間隔で、
+        // PBF が普通に解ける範囲に収まる。壁の貫通は SafetyCorrection (§10) が別途受け持つ。
+        // よって CFL 由来の dt 削りは冗長で、副作用 (スローモーション) だけが残っていた。
+        // 病的なケースのために「1 サブステップで emergencyTravel 粒子間隔以上動く」ときだけ
+        // 削る非常用の網は残す (通常プレイでは発火しない)。
+        float sdtNow = dt / Mathf.Max(1, Mathf.Min(maxSubSteps,
+                            Mathf.Max(Mathf.CeilToInt(dt / sdtCap), minSubSteps)));
+        float emergencyTravel = emergencyTravelSpacing * spacing;
+        if (worstSpeed * sdtNow > emergencyTravel)
+            dt *= emergencyTravel / Mathf.Max(worstSpeed * sdtNow, 1e-6f);
 
         LastBoundaryTravel = containerSpeed * dt;
         int need = Mathf.CeilToInt(worstSpeed * dt / maxTravel);
-        int sub = Mathf.Clamp(need, minSubSteps, maxSubSteps);
+        // 安定性フロア (2026-08-22): sdt = dt/sub が stableSubstepDt を超えないよう
+        // サブステップ数を足す。これで dt を実時間のまま進めても静定安定性が保たれる。
+        int needStability = Mathf.CeilToInt(dt / sdtCap);
+        int sub = Mathf.Clamp(Mathf.Max(need, needStability), minSubSteps, maxSubSteps);
+        // GPU 安全装置: 異常に重い状態が続いていたら、実時間性より先に GPU を守る。
+        if (WatchdogTripped) sub = Mathf.Min(sub, Mathf.Max(1, watchdogSafeSubSteps));
         LastRequiredSubSteps = need;
 
         // 剛体搬送は**廃止した**。
@@ -902,13 +1099,37 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         if (MeasuredMaxSpeed > PeakFluidSpeed) PeakFluidSpeed = MeasuredMaxSpeed;
 
         LastSubStepCount = sub;
+        LastSimDt = dt;
+        accSimDt += dt; accWallDt += LastWallDt;
 
         simTimeSinceSeed += dt;
         float sdt = dt / sub;
+        BindAll();   // フレームに 1 回。サブステップで変わる分は SubStep 側で設定する
         for (int s = 0; s < sub; s++) SubStep(sdt, (s + 1) / (float)sub);
 
-        // 領域分類はフレームに 1 回。観測のみで、位置・速度には触れない (§14/追加修正1)。
-        ClassifyAndRead();
+        // 領域分類は観測のみで、位置・速度には触れない (§14/追加修正1)。
+        // 同期読み戻しが高くつくため classifyInterval フレームに 1 回に間引く (宣言部の注記)。
+        if (--classifyCountdown <= 0)
+        {
+            classifyCountdown = Mathf.Max(1, classifyInterval);
+            ClassifyAndRead();
+        }
+
+        // 開始クランプの解除判定 (適応型)。実測最大速度がクランプ値より十分下がった =
+        // 波が本当に死んだときに解く。保険として startupCalmSimSeconds で強制解除。
+        //
+        // FIXED 2026-08-22 (バグ報告「ポーションが全くこぼれなくなった」): 「静まったら解除」
+        // だけだと、プレイヤーがすぐ動き出した場合に永遠に静まらず、保護クランプが
+        // かかりっぱなしになっていた。このクランプはあくまで「開始時に静止したままの壺で
+        // シード波が育つのを防ぐ」ためのもの。**容器が動き出したら即解除**する —
+        // 以降のスロッシュはプレイヤー起因なので、通常のこぼれ挙動に戻すのが正しい。
+        // 容器速度での解除は 2 sim 秒だけ待つ: 開始フレームのリグの壺持ち上げ・
+        // エディタヒッチの姿勢キャッチアップが誤発火させるのを防ぐ。
+        if (!startupCalmDone
+            && ((simTimeSinceSeed > 3f && MeasuredMaxSpeed < startupCalmReleaseSpeed)
+                || (simTimeSinceSeed > 2f && containerSpeed > startupCalmReleaseContainerSpeed)
+                || simTimeSinceSeed > startupCalmSimSeconds))
+            startupCalmDone = true;
     }
 
     // 種として置いた格子は PBF の密度拘束を満たしていない。そのままゲームを始めると、
@@ -927,6 +1148,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         float sdt = 0.4f * spacing / Mathf.Max(maxSpeed, 1e-6f);
         int steps = Mathf.Clamp(Mathf.CeilToInt(initialSettleSeconds / sdt), 1, 2000);
         settling = true;
+        BindAll();   // settling フラグ (EscapeEnabled) を反映してから整定を回す
         for (int i = 0; i < steps; i++) SubStep(sdt, 1f);
         settling = false;
         PreSettleSteps = steps;
@@ -1019,23 +1241,27 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     void SubStep(float dt, float lerpT)
     {
-        BindAll(dt, lerpT);
+        BindPerSubstep(dt, lerpT);
 
         int fluidGroups = Mathf.CeilToInt(fluidCount / (float)Threads);
         int totalGroups = Mathf.CeilToInt(totalCount / (float)Threads);
         int boundaryGroups = Mathf.CeilToInt(boundaryCount / (float)Threads);
         int cellGroups = Mathf.CeilToInt(cellTotal / (float)Threads);
 
-        fluidCompute.Dispatch(kUpdateBoundary, boundaryGroups, 1, 1);
-        fluidCompute.Dispatch(kIntegrate, fluidGroups, 1, 1);
+        // 結合カーネルはスレッド範囲の広い方でディスパッチする (対策③)
+        fluidCompute.Dispatch(kIntegrateBoundary, Mathf.Max(fluidGroups, boundaryGroups), 1, 1);
 
-        fluidCompute.Dispatch(kBuildSortPos, totalGroups, 1, 1);
-        fluidCompute.Dispatch(kClearCounts, cellGroups, 1, 1);
-        fluidCompute.Dispatch(kCount, totalGroups, 1, 1);
-        fluidCompute.Dispatch(kScanLocal, blockCount, 1, 1);
-        fluidCompute.Dispatch(kScanBlocks, 1, 1, 1);
-        fluidCompute.Dispatch(kScanAdd, cellGroups, 1, 1);
-        fluidCompute.Dispatch(kScatter, totalGroups, 1, 1);
+        // 近傍グリッドは **毎サブステップ必ず再構築する**。使い回し (追補 38) は撤去済み:
+        // 効果が測定限界以下である一方、取りこぼした近傍がソルバを壊し、さらに実装を誤ると
+        // 範囲外セルを読んで GPU デバイスロストを起こす。宣言部の注記を参照。
+        {
+            fluidCompute.Dispatch(kClearBuildSort, Mathf.Max(cellGroups, totalGroups), 1, 1);
+            fluidCompute.Dispatch(kCount, totalGroups, 1, 1);
+            fluidCompute.Dispatch(kScanLocal, blockCount, 1, 1);
+            fluidCompute.Dispatch(kScanBlocks, 1, 1, 1);
+            fluidCompute.Dispatch(kScanAdd, cellGroups, 1, 1);
+            fluidCompute.Dispatch(kScatter, totalGroups, 1, 1);
+        }
 
         for (int it = 0; it < solverIterations; it++)
         {
@@ -1044,8 +1270,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             fluidCompute.Dispatch(kApplyDeltaP, fluidGroups, 1, 1);
         }
 
-        fluidCompute.Dispatch(kVelocity, fluidGroups, 1, 1);
-        fluidCompute.Dispatch(kNormals, fluidGroups, 1, 1);
+        fluidCompute.Dispatch(kVelNormals, fluidGroups, 1, 1);
         fluidCompute.Dispatch(kViscTension, fluidGroups, 1, 1);
         fluidCompute.Dispatch(kFinalize, fluidGroups, 1, 1);
         if (solidBoxCount > 0)
@@ -1058,17 +1283,52 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             fluidCompute.SetBuffer(kernel, entries[i].name, entries[i].buf);
     }
 
+    // サブステップごとに変わるものだけを設定する (2026-08-21 ディスパッチ対策①)。
+    // 従来は BindAll 全体 (バッファ束縛 ~60 + スカラー ~50 呼び出し) をサブステップ毎に
+    // 繰り返しており、サブステップ 12 のとき毎フレーム ~1300 回のコマンド記録が CPU 側の
+    // 主要コストだった。2 コアの LateUpdate は逐次実行で、各 Step が冒頭で BindAll する
+    // ため、共有 ComputeShader のままでもフレーム内の束縛は壊れない (Dispatch 時点で捕捉)。
+    void BindPerSubstep(float dt, float lerpT)
+    {
+        fluidCompute.SetFloat("DeltaTime", dt);
+        // ADDED 2026-08-17: XSPH のブレンド率 kVisc = 係数 * sdt / 基準刻みが大きすぎると
+        // 粘性が減衰源から**加振源**に反転する (実測: シェーダ保険クランプの 0.9 に張り付いた
+        // 状態で泡立ちが持続)。dt 依存なのでここで毎サブステップ、実効係数を絞る。
+        // 2026-08-22: キャップ 0.55 は過剰で、本来のチューニング (60fps で kVisc ~0.75) より
+        // 減衰が弱くなり歩行スロッシュが暴れていた。0.75 へ緩和 (minSubSteps 9 で sdt が
+        // 安定圏に入ったため、0.75 は PreSettle と同等の安定条件)。
+        float refStep = Mathf.Max(viscosityRefStep, 1e-6f);
+        fluidCompute.SetFloat("ViscosityXSPH", Mathf.Min(viscosity, xsphBlendCap * refStep / Mathf.Max(dt, 1e-6f)));
+
+        // 動く境界: サブステップ間で姿勢を補間する (§3)。補間しないと壁が瞬間移動して
+        // 流体を弾き飛ばし、エネルギーを注入する。
+        Matrix4x4 m = boundary.InterpolatedMatrix(lerpT);
+        fluidCompute.SetMatrix("BoundaryToWorld", m);
+        fluidCompute.SetVector("ContainerCenter", boundary.InterpolatedCenter(lerpT));
+        if (boundary.mode == FluidBoundary.Mode.PotProfile && boundary.Profile != null)
+        {
+            fluidCompute.SetMatrix("WorldToPotSafety", m.inverse);
+            fluidCompute.SetMatrix("PotToWorldSafety", m);
+        }
+    }
+
     // カーネルごとに必要なバッファだけをバインドする。読むだけのバッファは SRV 別名で渡し、
     // 同一カーネルに RW/SRV の両方を渡さない（D3D11 の UAV スロット上限 8 に収めるため）。
-    void BindAll(float dt, float lerpT)
+    // 2026-08-21 ディスパッチ対策①: フレームに 1 回だけ呼ぶ (Step / PreSettle の冒頭)。
+    // サブステップで変わる DeltaTime・実効粘性・容器の補間行列は BindPerSubstep が担当。
+    void BindAll()
     {
-        Bind(kUpdateBoundary, ("BoundaryLocal", boundaryLocal),
-                              ("BoundaryPositionsRW", boundaryPositions),
-                              ("BoundaryVelocitiesRW", boundaryVelocities));
+        Bind(kIntegrateBoundary, ("BoundaryLocal", boundaryLocal),
+                                 ("BoundaryPositionsRW", boundaryPositions),
+                                 ("BoundaryVelocitiesRW", boundaryVelocities),
+                                 ("Positions", positions), ("PredictedPositions", predicted),
+                                 ("Velocities", velocities), ("SafetyCorrection", safety),
+                                 // 追補 33: 脱出済み判定を積分側でも見る (ClampSpeedFor の注記)
+                                 ("RetiredFlagsIn", retiredFlags));
 
-        Bind(kClearCounts, ("CellCounts", cellCounts));
-        Bind(kBuildSortPos, ("SortPositions", sortPositions), ("PredictedPositions", predicted),
-                            ("BoundaryPositions", boundaryPositions));
+        Bind(kClearBuildSort, ("CellCounts", cellCounts),
+                              ("SortPositions", sortPositions), ("PredictedPositions", predicted),
+                              ("BoundaryPositions", boundaryPositions));
         Bind(kCount, ("SortPositions", sortPositions), ("CellCounts", cellCounts),
                      ("RetiredFlagsIn", retiredFlags));
         Bind(kScanLocal, ("CellCounts", cellCounts), ("CellStart", cellStart), ("BlockSums", blockSums));
@@ -1076,9 +1336,6 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         Bind(kScanAdd, ("CellStart", cellStart), ("CellCursor", cellCursor), ("BlockSums", blockSums));
         Bind(kScatter, ("SortPositions", sortPositions), ("CellCursor", cellCursor), ("SortedIndices", sortedIndices),
                        ("RetiredFlagsIn", retiredFlags));
-
-        Bind(kIntegrate, ("Positions", positions), ("PredictedPositions", predicted),
-                         ("Velocities", velocities), ("SafetyCorrection", safety));
 
         Bind(kDensityLambda, ("PredictedPositions", predicted), ("Densities", densities), ("Lambdas", lambdas),
                              ("SortPositionsIn", sortPositions), ("CellStartIn", cellStart),
@@ -1092,13 +1349,14 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
         Bind(kApplyDeltaP, ("PredictedPositions", predicted), ("DeltaP", deltaP));
 
-        Bind(kVelocity, ("PredictedPositions", predicted), ("Positions", positions),
-                        ("SafetyCorrection", safety), ("DeltaP", deltaP));
-
-        Bind(kNormals, ("Normals", normals), ("PredictedIn", predicted), ("DensitiesIn", densities),
-                       ("SortPositionsIn", sortPositions), ("CellStartIn", cellStart),
-                       ("CellCountsIn", cellCounts), ("SortedIndicesIn", sortedIndices),
-                       ("RetiredFlagsIn", retiredFlags));
+        // 結合カーネル: 速度式は PredictedPositions (UAV) を読むため、法線側も同じ束縛を
+        // 使う (PredictedIn との二重束縛は不可。シェーダ側の注記を参照)。
+        Bind(kVelNormals, ("PredictedPositions", predicted), ("Positions", positions),
+                          ("SafetyCorrection", safety), ("DeltaP", deltaP),
+                          ("Normals", normals), ("DensitiesIn", densities),
+                          ("SortPositionsIn", sortPositions), ("CellStartIn", cellStart),
+                          ("CellCountsIn", cellCounts), ("SortedIndicesIn", sortedIndices),
+                          ("RetiredFlagsIn", retiredFlags));
 
         Bind(kViscTension, ("Velocities", velocities), ("PredictedIn", predicted), ("VelocityIn", deltaP),
                            ("NormalsIn", normals), ("DensitiesIn", densities),
@@ -1128,15 +1386,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetInt("BlockCount", blockCount);
         fluidCompute.SetInt("SolidBoxCount", solidBoxCount);
 
-        fluidCompute.SetFloat("DeltaTime", dt);
         fluidCompute.SetVector("Gravity", Physics.gravity);   // §2: これが唯一の外力
-
-        // 動く境界: サブステップ間で姿勢を補間する (§3)。補間しないと壁が瞬間移動して
-        // 流体を弾き飛ばし、エネルギーを注入する。
-        fluidCompute.SetMatrix("BoundaryToWorld", boundary.InterpolatedMatrix(lerpT));
+        // (DeltaTime / BoundaryToWorld / ContainerCenter はサブステップ依存 → BindPerSubstep)
         fluidCompute.SetVector("ContainerLinearVelocity", boundary.LinearVelocity);
         fluidCompute.SetVector("ContainerAngularVelocity", boundary.AngularVelocity);
-        fluidCompute.SetVector("ContainerCenter", boundary.InterpolatedCenter(lerpT));
 
         fluidCompute.SetFloat("KernelRadius", kernelRadius);
         fluidCompute.SetFloat("RestDensity", restDensity);
@@ -1148,15 +1401,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("ArtificialPressure", artificialPressure);
         fluidCompute.SetFloat("ArtificialPressureQ", artificialPressureQ);
         fluidCompute.SetFloat("MaxDeltaP", spacing * maxDeltaPPerSpacing);
-        // ADDED 2026-08-17: XSPH のサブステップあたりブレンド率 kVisc = 係数 * sdt / 基準刻み
-        // が大きすぎると、粘性が減衰源から**加振源**に反転する。シェーダ側の保険クランプは
-        // 0.9 だが、その値ではフレームレートが低い (dt が 1/20 に張り付く) とき静止した壺の
-        // 表面が泡立ち続ける自励振動になっていた (実測: kVisc 0.9 で持続、0.5 以下で急速に
-        // 静定)。ここで係数そのものを絞り、どのフレームレートでも kVisc <= 0.55 を保証する。
-        // 60fps の通常プレイでは kVisc ≒ 0.45 なので、このキャップは介入しない (挙動不変)。
-        float refStep = Mathf.Max(viscosityRefStep, 1e-6f);
-        float viscEff = Mathf.Min(viscosity, 0.55f * refStep / Mathf.Max(dt, 1e-6f));
-        fluidCompute.SetFloat("ViscosityXSPH", viscEff);
+        // (ViscosityXSPH は dt 依存の実効キャップつき → BindPerSubstep で設定)
         fluidCompute.SetFloat("BoundaryViscosity", boundaryViscosity);
         // 粘性のブレンド率をサブステップ数から独立させるための基準時間刻み。
         // 係数はこの dt のときの 1 ステップ分の効きを表す。
@@ -1164,8 +1409,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("CohesionStrength", cohesionStrength);
         fluidCompute.SetFloat("CurvatureStrength", curvatureStrength);
         fluidCompute.SetFloat("MaxSpeed", maxSpeed);
+        fluidCompute.SetFloat("MaxSpeedFalling", Mathf.Max(maxSpeed, maxSpeedFalling));
+        // 追補 33: 脱出済みの液滴に calm (MaxSpeedPot) を掛けない。false にすると旧挙動。
+        fluidCompute.SetFloat("EscapedIgnoreCalm", escapedIgnoreCalm ? 1f : 0f);
         float potClamp = maxSpeedInPot > 0f ? maxSpeedInPot : maxSpeed;
-        if (simTimeSinceSeed < startupCalmSimSeconds)   // 開始直後の残渣つぶし (宣言部の注記)
+        if (!startupCalmDone)   // 開始直後の波つぶし (適応型、宣言部の注記)
             potClamp = Mathf.Min(potClamp, startupCalmClamp);
         fluidCompute.SetFloat("MaxSpeedPot", potClamp);
         // 追補 26: パリー回収 & 着地ジョルト
@@ -1209,9 +1457,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             fluidCompute.SetFloat("SafetyTopY", prof.RimY);
             fluidCompute.SetFloat("PotMaxRadius", prof.MaxRadius);
             fluidCompute.SetFloat("SafetyMargin", spacing / boundary.ContainerScale * 0.25f);
-            Matrix4x4 m = boundary.InterpolatedMatrix(lerpT);
-            fluidCompute.SetMatrix("WorldToPotSafety", m.inverse);
-            fluidCompute.SetMatrix("PotToWorldSafety", m);
+            // (WorldToPotSafety / PotToWorldSafety は補間行列由来 → BindPerSubstep で設定)
             fluidCompute.SetFloat("PotRimR", prof.RimR);
         }
         fluidCompute.SetFloat("RimOpeningHeight", rimOpeningHeight);
