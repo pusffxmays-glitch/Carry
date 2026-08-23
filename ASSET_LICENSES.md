@@ -99,6 +99,13 @@
 - **ゲーム内での使用箇所**: 未配置(格納・マテリアル整備のみ完了、ステージへの配置は別途対応)。
 - **注記**: 他のMeshy生成FBXと同様、インポート時に単位スケール差があり(ルートTransformが100倍スケール、メッシュ自体はネイティブでごく小さい)、配置時は他アセット同様スケール補正が必要。
 
+## 9. Meshy AI 生成モデル ― MossyRockPath(苔むした石畳・岩道コースモジュール、2026-08-23導入)
+
+- **作成方法**: ユーザー自身がMeshyで作成した、コースパーツ5個が一体になった苔むした石畳・岩道モデル。第三者配布物ではなくユーザー自身の生成物のため、外部配布ライセンスの確認対象ではないが、記録として残す。
+- **格納場所**: `Assets/Stage/Forest/Path/MossyRockPath/` 配下。`Source/` にMeshyオリジナル(FBX 約23.1万頂点/46.2万三角形 + BaseColor/Normal/Metallic/Roughness 4枚、元ファイル名のまま無改変で保持)。`Models/Separated/` にBlenderで5分割・軸補正(Y-up)・ピボット調整(各パーツ入口中央)・デシメート軽量化済みの `MossyRockPath_NarrowLink/LongCurve/GentleCurve_A/GentleStraight/WideCurve.fbx`。`Textures/` に整理名のテクスチャコピー(`MossyRockPath_BaseColor/Normal/Metallic/Roughness.png`)+生成した `MossyRockPath_MetallicSmoothness.png`(URP Lit用にMetallic+Roughness→1枚へ合成)。`Materials/MAT_MossyRockPath.mat`。`Prefabs/PF_MossyRockPath_*.prefab` 5種(各Visual+WalkableCollisionの2階層構造)。
+- **ゲーム内での使用箇所**: 通常の森ステージ ― StoneBridgeから先のメインコース歩行面。旧来の岩・丸太を多数組み合わせた足場(`Footholds`)を全撤去し、`CarryBuildMossyRockPathCourse`エディタスクリプトが本モジュール5種を川沿いにチェーン状に自動配置(`MossyRockPath_Course`)。
+- **注記**: 実生成されたFBXの5パーツ形状は、当初のStraight/CurveLeft/CurveRight/SlopeUp/SlopeDownという想定とは異なっていたため、実形状(NarrowLink=広い足場2つを細い首がつなぐ複合形状、LongCurve=長く滑やかな曲線、GentleCurve_A/WideCurve=曲がり量が異なる曲線、GentleStraight=比較的直線)を正として命名・使用している。NarrowLinkの細い接続部(最狭部で幅約1.0〜1.2m)は意図的なゲームプレイ上のアクセントとして保持し、道幅を広げる修正は行っていない。
+
 ## 運用ルール
 
 1. 新しい外部アセットを追加したら、上記と同じ形式でこのファイルに追記する。
