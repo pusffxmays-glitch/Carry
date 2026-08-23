@@ -9689,6 +9689,14 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PotionRefillZone
   halfExtents: {x: 1.4, y: 2, z: 1.4}
+  autoFitToWaterfall: 1
+  waterfall: {fileID: 0}
+  autoFitDelay: 5
+  autoFitInterval: 2
+  autoFitSamples: 8
+  fallingSpeed: 7
+  autoFitCellSize: 0.7
+  autoFitMinPerCell: 5
   stopAtFill: 0.98
   refillPerSecond: 0.15
   centreFalloff: 0.7
