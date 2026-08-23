@@ -218,6 +218,9 @@ RWStructuredBuffer<float> Ages;            // 地面に留まっている時間 
 RWStructuredBuffer<uint>  RetiredFlags;
 StructuredBuffer<uint>    RetiredFlagsIn;  // 読み取り専用エイリアス
 float EscapeMargin;      // リム面からこの高さ(local)を超えたら Escaped
+// 壺の外形からこの距離(local)以上離れたら、姿勢に関係なく Escaped。
+// 壁の貫通 (壁厚の内側) と区別できるだけの余裕を取ること。
+float EscapeFarMargin;
 int   EscapeEnabled;
 float  GroundLifetime;                     // これを超えたら Retired
 float3 RetiredPark;                        // Retired 粒子の待避先（領域外）
@@ -1120,7 +1123,16 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         // 壺の **底より下** にいて、かつ外形より外にいる粒子は、壺の内側にはあり得ない
         // (真下は外形の内側なので、底の貫通と取り違える心配もない) ので脱出として拾う。
         bool belowPotFloor = lpE.y < PotFloorY - EscapeMargin;
-        bool outsidePot = (nearOrAboveLip || belowPotFloor) && outsideRadius;
+        // 2026-08-23 バグ報告「壺が完全に倒れているのに残量が 1 秒 1% ずつしか減らない」。
+        // 上の 2 条件は **壺が立っている前提** で書かれている。壺が横倒しになると、
+        // 口から流れ出た液滴は壺ローカルでは「リムより上」でも「底より下」でもなく
+        // 横へ falling するので、どちらの入口にも掛からず脱出として拾えない。
+        // 結果、地面に着いて Ground になるまで「まだ壺の中身」として残量に数え続け、
+        // ゲージがだらだら減る状態になっていた (実測: air 1673 に対し escaped 0)。
+        // 壺の外形から EscapeFarMargin 以上離れた粒子は、壁厚の内側にいる貫通粒子とは
+        // 明確に区別できるので、姿勢によらず脱出として拾う。
+        bool farOutside = rE > max(rIn + WallTolerance, PotOuterAt(lpE.y)) + EscapeFarMargin;
+        bool outsidePot = ((nearOrAboveLip || belowPotFloor) && outsideRadius) || farOutside;
         if (outsidePot)
         {
             RetiredFlags[i] = 3u;

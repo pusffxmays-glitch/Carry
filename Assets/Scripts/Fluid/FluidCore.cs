@@ -197,6 +197,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public bool escapeAboveRim = true;
     [Tooltip("リム面からこの高さ(粒子間隔の倍数)を超えたら「ふちを越えた」とみなす。液面の盛り上がりを誤検出しない程度に取る。")]
     [Range(0.5f, 8f)] public float escapeMarginSpacings = 2f;
+    // 2026-08-23: 壺が横倒しのとき、口から出た液滴が壺ローカルで「リムより上/底より下」の
+    // どちらにも入らず脱出判定を素通りしていた。外形からこれだけ離れていれば、壁厚の中に
+    // いる貫通粒子とは区別できるので、姿勢によらず脱出とする。
+    [Tooltip("壺の外形からこれだけ (粒子間隔の倍数) 離れたら、壺の姿勢によらずこぼれた扱いにする。")]
+    [Range(2f, 24f)] public float escapeFarSpacings = 8f;
     [Range(0f, 0.5f)] public float boundsRestitution = 0.02f;
     [Range(0f, 1f)] public float boundsFriction = 0.15f;
 
@@ -387,7 +392,20 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     /// Airborne の内数。地面に着けば Ground へ移る。</summary>
     public int EscapedCount { get; private set; }
     /// <summary>まだ壺のものである液体の粒子数。跳ね上がって空中にいるだけの分を含む。</summary>
-    public int RecoverableCount => InsideCount + RimCount + (AirborneCount - EscapedCount);
+    // 2026-08-23 バグ報告「壺が完全に倒れているのに残量が 1 秒 1% ずつしか減らない」。
+    // 空中の液体を「まだ壺のもの」として数えてよいのは、**壺が受け止められる姿勢のとき**だけ。
+    // 倒れた壺の口から流れ出て落ちている液滴まで残量に数えていたため、それが着地して
+    // Ground になるまでゲージがだらだら減り続けていた (実測: 倒れた後 air が 2400-4900 残り、
+    // escaped は 0。倒れきると脱出判定の入口 (リムより上/底より下) にどちらも掛からなくなる)。
+    // 傾きで判定するのは、壺を手放したかどうかを FluidCore が知らないため。倒れていれば
+    // 手放していようが担いでいようが回収できない、という物理的に正しい基準でもある。
+    [Tooltip("空中の液体を残量に数える上限の傾き (度)。これを超えて傾いた壺は空中の液体を回収できないとみなす。")]
+    [Range(10f, 90f)] public float recoverTiltLimitDeg = 60f;
+    /// <summary>壺が空中の液体を受け止められる姿勢か。</summary>
+    public bool CanRecoverAirborne => boundary == null || boundary.Container == null
+        || Vector3.Angle(boundary.Container.up, Vector3.up) <= recoverTiltLimitDeg;
+    public int RecoverableCount => InsideCount + RimCount
+        + (CanRecoverAirborne ? (AirborneCount - EscapedCount) : 0);
 
     // ---- Fluid Mass (§16) ----
     // 粒子は全て同じ質量なので Mass = 個数 x ParticleMass。
@@ -1600,7 +1618,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // 液滴が散らばる（実測 38 粒子）。止めれば SafetyCorrection が内側へ戻す。
         fluidCompute.SetInt("EscapeEnabled", (escapeAboveRim && !settling) ? 1 : 0);
         fluidCompute.SetFloat("EscapeMargin", boundary.mode == FluidBoundary.Mode.PotProfile
-            ? spacing * escapeMarginSpacings / Mathf.Max(1e-6f, boundary.ContainerScale) : 1e9f);
+            ? spacing * escapeMarginSpacings / Mathf.Max(1e-6f, boundary.ContainerScale) : 1e9f);        fluidCompute.SetFloat("EscapeFarMargin", potMode
+            ? spacing * escapeFarSpacings / Mathf.Max(1e-6f, boundary.ContainerScale) : 1e9f);
         fluidCompute.SetFloat("GroundLifetime", groundLifetime);
         // 待避先は領域の外。CellCoord が領域外になるので近傍探索にも密度場にも入らない。
         fluidCompute.SetVector("RetiredPark", regionCenter + Vector3.down * (regionSize.y * 0.5f + 50f));

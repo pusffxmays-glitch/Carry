@@ -31424,9 +31424,9 @@ MonoBehaviour:
   pickupRange: 1.6
   pickupHeightRange: 1.2
   pickupStandDistance: 1
-  spillTipAngle: 125
+  spillTipAngle: 110
   spillTipSeconds: 0.55
-  spillTipLift: 0.45
+  spillTipLift: 0.75
   fallAfterSeconds: 0.9
   fallCooldown: 2
   fallRecoverFrames: 18
@@ -36187,6 +36187,7 @@ MonoBehaviour:
   groundLifetime: 0.5
   escapeAboveRim: 1
   escapeMarginSpacings: 2
+  escapeFarSpacings: 8
   boundsRestitution: 0.22
   boundsFriction: 0.03
   slopeProfileHeights:
@@ -36229,6 +36230,12 @@ MonoBehaviour:
   spawnVelocity: {x: 0, y: -2.6, z: 4.2}
   spawnChance: 1
   collideWithGroundSurfaces: 1
+  collideWithCourseColliders: 1
+  courseColliderMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  maxSolidBoxes: 32
+  maxCourseBoxSize: 8
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
   stepEveryNFrames: 1
@@ -36237,6 +36244,7 @@ MonoBehaviour:
   watchdogStepMs: 120
   watchdogFrames: 5
   watchdogSafeSubSteps: 4
+  recoverTiltLimitDeg: 60
 --- !u!114 &1152967427
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -42016,7 +42024,7 @@ MonoBehaviour:
   swimSpeed: 2.5
   grabRadius: 1.4
   grabKey: 19
-  potDriftSpeed: 3.5
+  potDriftSpeed: 10
   potBobAmplitude: 0.06
   potBobFrequency: 0.6
   potRockDeg: 7
@@ -67833,6 +67841,7 @@ MonoBehaviour:
   groundLifetime: 10
   escapeAboveRim: 1
   escapeMarginSpacings: 3
+  escapeFarSpacings: 8
   boundsRestitution: 0.02
   boundsFriction: 0.15
   slopeProfileHeights: []
@@ -67845,6 +67854,12 @@ MonoBehaviour:
   spawnVelocity: {x: 0, y: 0, z: 0}
   spawnChance: 1
   collideWithGroundSurfaces: 1
+  collideWithCourseColliders: 1
+  courseColliderMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  maxSolidBoxes: 32
+  maxCourseBoxSize: 8
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
   stepEveryNFrames: 1
@@ -67853,6 +67868,7 @@ MonoBehaviour:
   watchdogStepMs: 120
   watchdogFrames: 5
   watchdogSafeSubSteps: 4
+  recoverTiltLimitDeg: 60
 --- !u!114 &2091716080
 MonoBehaviour:
   m_ObjectHideFlags: 0
