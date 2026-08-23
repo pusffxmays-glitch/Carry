@@ -28505,7 +28505,7 @@ MonoBehaviour:
   staggerMoveSpeed: 1
   invertStaggerMoveSide: 1
   walkCycleDuration: 2.5
-  walkStrideRefSpeed: 0.53
+  walkStrideRefSpeed: 0.33
   walkBlendSpeed: 4
   walkArmBobAmplitude: 0.02
   potScale: {x: 2.366, y: 2.366, z: 2.366}
@@ -28524,7 +28524,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1f986500afe31cb42829b151b732505f, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::GoblinLocomotion
-  walkSpeed: 1.8
+  walkSpeed: 0.9
   runSpeed: 5
   backStepSpeedMultiplier: 0.6
   turnSpeed: 110

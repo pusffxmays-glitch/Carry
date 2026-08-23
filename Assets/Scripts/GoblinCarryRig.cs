@@ -182,6 +182,8 @@ public class GoblinCarryRig : MonoBehaviour
     public float walkArmBobAmplitude = 0.02f;
 
     Transform hipsBone, leftUpLegBone, leftLegBone, leftFootBone, leftToeBone;
+    // 2026-08-23: 重量物歩行で上半身も歩行に反応させるため (旧実装は BasePose のまま固定だった)
+    Transform spineBone, spine01Bone, spine02Bone, neckBone, headBone;
     Transform rightUpLegBone, rightLegBone, rightFootBone, rightToeBone;
     float leftUpLegLen, leftLegLen, leftFootLen;
     float rightUpLegLen, rightLegLen, rightFootLen;
@@ -354,6 +356,11 @@ public class GoblinCarryRig : MonoBehaviour
         // and rotation (ApplyWalkCycle/ApplyStagger via these same variables) both land on the same
         // physically-correct bone -- same pattern as the arms just above.
         hipsBone = GoblinBoneUtil.FindDeep(root, "Hips");
+        spineBone = GoblinBoneUtil.FindDeep(root, "Spine");
+        spine01Bone = GoblinBoneUtil.FindDeep(root, "Spine01");
+        spine02Bone = GoblinBoneUtil.FindDeep(root, "Spine02");
+        neckBone = GoblinBoneUtil.FindDeep(root, "neck");
+        headBone = GoblinBoneUtil.FindDeep(root, "Head");
         leftUpLegBone = GoblinBoneUtil.FindDeep(root, "RightUpLeg");
         leftLegBone = GoblinBoneUtil.FindDeep(root, "RightLeg");
         leftFootBone = GoblinBoneUtil.FindDeep(root, "RightFoot");
@@ -780,6 +787,7 @@ public class GoblinCarryRig : MonoBehaviour
         if (walkIntensity <= 0.001f || hipsBone == null) return;
 
         Vector3 hy, hx, luy, lux, lly, llx, ruy, rux, rly, rlx, lfy, lfx, rfy, rfx;
+        bool heavyUpper = false;   // 通常歩行のときだけ上半身も駆動する
         if (swimGaitActive)
         {
             GoblinSwimGait.SampleHips(walkPhase, out hy, out hx);
@@ -819,6 +827,14 @@ public class GoblinCarryRig : MonoBehaviour
             GoblinWalk.SampleRightLeg(walkPhase, out rly, out rlx);
             GoblinWalk.SampleLeftFoot(walkPhase, out lfy, out lfx);
             GoblinWalk.SampleRightFoot(walkPhase, out rfy, out rfx);
+            // 2026-08-23 重量物歩行: **腰の位置がこの歩きの本体**。一歩ごとの沈み込み (荷重) と
+            // 支持脚側への左右移動が入っている。向きだけ適用していた旧実装では腰が完全に固定で、
+            // 「脚だけが小刻みに動き、上半身が乗っているだけ」に見えていた。
+            // SampleHipsPos は接地正規化済みなので GroundOffset は足さない (ロープ歩きと同じ)。
+            Vector3 hpw = GoblinWalk.SampleHipsPos(walkPhase);
+            Vector3 hipsTargetW = Posture.position + Posture.rotation * hpw;
+            hipsBone.position = Vector3.Lerp(hipsBone.position, hipsTargetW, walkIntensity);
+            heavyUpper = true;
         }
 
         BlendAimFull(hipsBone, hy, hx, walkIntensity);
@@ -826,6 +842,20 @@ public class GoblinCarryRig : MonoBehaviour
             luy, lux, lly, llx, lfy, lfx, leftUpLegLen, leftLegLen, leftFootLen, walkIntensity);
         ApplyLegChain(rightUpLegBone, rightLegBone, rightFootBone, rightToeBone,
             ruy, rux, rly, rlx, rfy, rfx, rightUpLegLen, rightLegLen, rightFootLen, walkIntensity);
+        if (heavyUpper) ApplyWalkUpperBody(walkIntensity);
+    }
+
+    // 2026-08-23: 重いツボを担いでいることを上半身でも見せる。後傾・肩線のカウンター傾き・
+    // 骨盤のヨーに対する上半身のカウンター・頭の遅れが、ベイクしたクリップに入っている。
+    // ロープ歩きと泳ぎは専用の姿勢を持つので、通常歩行のときだけ適用する。
+    void ApplyWalkUpperBody(float t)
+    {
+        Vector3 y, x;
+        if (spineBone   != null) { GoblinWalk.SampleSpine(walkPhase, out y, out x);   BlendAimFull(spineBone, y, x, t); }
+        if (spine01Bone != null) { GoblinWalk.SampleSpine01(walkPhase, out y, out x); BlendAimFull(spine01Bone, y, x, t); }
+        if (spine02Bone != null) { GoblinWalk.SampleSpine02(walkPhase, out y, out x); BlendAimFull(spine02Bone, y, x, t); }
+        if (neckBone    != null) { GoblinWalk.SampleNeck(walkPhase, out y, out x);    BlendAimFull(neckBone, y, x, t); }
+        if (headBone    != null) { GoblinWalk.SampleHead(walkPhase, out y, out x);    BlendAimFull(headBone, y, x, t); }
     }
 
     // ADDED 2026-08-10: blends the Hips + 4 leg bones (already placed by ApplyBasePose()/
