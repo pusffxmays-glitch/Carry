@@ -139,6 +139,29 @@ public class GoblinPotActions : MonoBehaviour
     float rampCalmBlockedUntil;
     float airborneTime;   // 連続滞空時間。歩行中の isGrounded ちらつきを除くゲート用
 
+    /// <summary>空中でパリーを押した (Space)。計測用のデバッグフックからも同じ経路を通す。</summary>
+    void PressCushion()
+    {
+        cushionPressed = true;
+        cushionPressTime = Time.time;
+        LogParry($"<color=cyan>空中押し → 予約</color> (滞空 {airborneTime:F2}s 時点)");
+        // 追補 19: 押した瞬間から clamp が入る (パリーの手応え)。
+        // 着地判定で成立なら 0.6/0.5 へ強化、失敗なら即解除される。
+        BeginFluidCalm(1.2f);
+        hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + 1.0f);
+        // 傾いたままのジャンプ対策: 水平化は「空中で」行う。滞空中は壺内が
+        // 実効無重力で、クランプ下の回転には流体がほぼ完全に追従する
+        // (着地後に回すと回転自体がスロッシュ源になる — 実測 42% で悪化した)。
+        if (rig != null) rig.CushionRecenter(0.5f);
+        // 追補 25: 膝で受ける = 残りの落下を軟化して衝撃自体を減らす
+        if (loco != null) loco.SoftenLanding(1.2f);
+    }
+
+    /// <summary>計測用: 次に空中判定になったフレームでパリーを押したことにする。
+    /// ゲームビューが非アクティブだとキー注入が毎フレーム消えるため (実測)、
+    /// A/B を取るにはこの経路が要る。</summary>
+    [HideInInspector] public bool debugParryRequest;
+
     // ---- 着地クッション (追補 15) ----
     // 滞空中に Space を押し、着地に間に合えば膝で衝撃を吸収してこぼれを抑える。
     [Header("Landing cushion (追補 15)")]
@@ -176,6 +199,14 @@ public class GoblinPotActions : MonoBehaviour
     // 注入は壺内クランプ (MaxSpeed 5 相対) で頭打ちになるため 5 が実効最大 (実測)。
     [Tooltip("パリーなし着地で壺内に注入する跳ね返り速度 (m/s、上+前方)。通常ジャンプの掛け金。")]
     public float cushionMissJolt = 5.0f;
+
+    // 戻り際のこぼれ対策 (2026-08-24)。クリップの伸び上がり区間だけを遅く再生する。
+    // 流体は同じ時計で回っているので、これは見た目ではなく実際に壺の速度を落とす。
+    [Tooltip("着地クッションの伸び上がり (折り返し以降) の再生速度。1 = 素材どおり。")]
+    [Range(0.2f, 1f)] public float cushionRiseSpeed = 0.5f;
+
+    [Tooltip("パリー成功時にヒットストップ + スローモーションを入れる。")]
+    public bool cushionSlowMo = true;
     bool cushionPressed;         // この滞空中に Space を押したか
     float cushionPressTime = -999f;
 
@@ -271,21 +302,10 @@ public class GoblinPotActions : MonoBehaviour
                 {
                     airborneTime += Time.deltaTime;
                     // 追補 15: 空中の Space はクッション予約 (地上判定が無いのでジャンプには化けない)
-                    if (kb != null && kb.spaceKey.wasPressedThisFrame)
+                    if ((kb != null && kb.spaceKey.wasPressedThisFrame) || debugParryRequest)
                     {
-                        cushionPressed = true;
-                        cushionPressTime = Time.time;
-                        LogParry($"<color=cyan>空中押し → 予約</color> (滞空 {airborneTime:F2}s 時点)");
-                        // 追補 19: 押した瞬間から clamp が入る (パリーの手応え)。
-                        // 着地判定で成立なら 0.6/0.5 へ強化、失敗なら即解除される。
-                        BeginFluidCalm(1.2f);
-                        hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + 1.0f);
-                        // 傾いたままのジャンプ対策: 水平化は「空中で」行う。滞空中は壺内が
-                        // 実効無重力で、クランプ下の回転には流体がほぼ完全に追従する
-                        // (着地後に回すと回転自体がスロッシュ源になる — 実測 42% で悪化した)。
-                        if (rig != null) rig.CushionRecenter(0.5f);
-                        // 追補 25: 膝で受ける = 残りの落下を軟化して衝撃自体を減らす
-                        if (loco != null) loco.SoftenLanding(1.2f);
+                        debugParryRequest = false;
+                        PressCushion();
                     }
                 }
                 else
@@ -541,7 +561,12 @@ public class GoblinPotActions : MonoBehaviour
         // 走り着地 (水平速度 3 超) は深いスタンスのバリエーション
         var clip = (loco != null && loco.CurrentSpeed > 3f) ? GoblinClip.LandCushionDeep : GoblinClip.LandCushion;
         if (!anim.OneShotActive || anim.CurrentOneShot == GoblinClip.HotJump)
-            anim.PlayOneShot(clip, reverse: false, drivePotToEnd: true, potEvent: null, done: null);
+            // 沈み込みは素材どおりの速さで受け、**伸び上がりだけ** を遅くする。
+            // 等速で再生すると壺が最大 0.33 m/s (深いほうは 0.39 m/s) で持ち上がり、
+            // パリーが成功しているのに戻り際でこぼれていた (ユーザー報告)。
+            // 折り返しは壺の速度が 0 になる点なので、そこで速度を切り替えても段差は出ない。
+            anim.PlayOneShot(clip, reverse: false, drivePotToEnd: true, potEvent: null, done: null,
+                             slowFromFrame: clip.LowestPotFrame, slowSpeed: cushionRiseSpeed);
         // 滞空 calm (1.2) よりさらに強く絞って着地衝撃を吸収する
         BeginFluidCalm(just ? cushionJustCalm : cushionCalm);
         hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + (just ? 1.0f : 0.8f));
@@ -554,6 +579,9 @@ public class GoblinPotActions : MonoBehaviour
         // ゲージの色も同色系でフラッシュ
         if (gaugeUI == null) gaugeUI = FindFirstObjectByType<PotionGaugeUI>();
         if (gaugeUI != null) gaugeUI.FlashParry(just);
+        // 2026-08-24: 成功の瞬間を短く止めてスローにする (ストリートファイター 6 のパリー)。
+        // リングも発光もスケール時間で動くので、まとめてゆっくり見えるようになる。
+        if (cushionSlowMo) ParrySlowMo.Play(just);
     }
 
     // 成功フィードバック: ポーションの発光を一瞬強める (Bloom が滲ませてくれる)

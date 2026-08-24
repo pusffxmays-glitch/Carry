@@ -24,6 +24,28 @@ public class GoblinClip
     public float Duration => frameCount / fps;
     public bool HasPot => potPos != null && potPos.Length > 0;
 
+    // 沈み込みの底 = 焼かれた壺の高さが最低になるフレーム。着地クッションで
+    // 「沈む区間」と「伸び上がる区間」を分けるのに使う。ここは壺の速度が 0 に
+    // なる折り返し点なので、この位置で再生速度を切り替えても段差が見えない。
+    int lowestPot = -2;
+    public int LowestPotFrame
+    {
+        get
+        {
+            if (lowestPot == -2)
+            {
+                lowestPot = -1;
+                if (HasPot)
+                {
+                    lowestPot = 0;
+                    for (int i = 1; i < potPos.Length; i++)
+                        if (potPos[i].y < potPos[lowestPot].y) lowestPot = i;
+                }
+            }
+            return lowestPot;
+        }
+    }
+
     public int BoneIndex(string unityName)
     {
         for (int i = 0; i < bones.Length; i++)

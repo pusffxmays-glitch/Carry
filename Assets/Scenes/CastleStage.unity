@@ -6386,6 +6386,8 @@ MonoBehaviour:
   potScale: {x: 2.366, y: 2.366, z: 2.366}
   potFollowRate: 15
   potFollowRotRate: 60
+  potHandoverSeconds: 0.45
+  potHandoverFollowRate: 3.5
   postureRoot: {fileID: 0}
 --- !u!114 &1578526215
 MonoBehaviour:
@@ -6489,6 +6491,7 @@ MonoBehaviour:
   fallRecoverSpeed: 1.4
   walkStride: 1.202
   runStride: 1.935
+  debugParryRequest: 0
   cushionWindow: 0.35
   cushionJustWindow: 0.12
   cushionCalm: 0.8
@@ -6502,6 +6505,8 @@ MonoBehaviour:
   balanceCalmClamp: 1.3
   balanceInertiaRate: 1.2
   cushionMissJolt: 5
+  cushionRiseSpeed: 0.5
+  cushionSlowMo: 1
   debugParryHud: 1
   putDownSpeed: 2
   pickUpSpeed: 1.8

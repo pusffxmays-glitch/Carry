@@ -450,6 +450,15 @@ public class GoblinCarryRig : MonoBehaviour
     Vector3 smoothedPotLocal;
     Quaternion smoothedPotLocalRot = Quaternion.identity;
     bool potFollowInit;
+    bool clipDrovePot;          // 直前のフレームでクリップが壺を駆動していた
+    float potHandoverUntil;     // この時刻まで壺の追従を緩める (クリップからの復帰)
+
+    // クリップ終端から通常担ぎ姿勢へ壺を戻すのにかける時間。ここを速くすると
+    // パリー成功後の「勢いよく伸び上がる」が戻ってくる。
+    [Tooltip("クリップ終了後、壺を通常の担ぎ位置へ戻すのに緩やかな追従を使う時間 (秒)。")]
+    public float potHandoverSeconds = 0.45f;
+    [Tooltip("その間の追従の速さ。potFollowRate より小さくすること。")]
+    public float potHandoverFollowRate = 3.5f;
 
     // ---- Base pose data: captured 2026-08-10 directly from the live, approved
     // "Carry_Balance_Neutral" pose in Blender (armature.matrix_world @ pose_bone.matrix, per-bone
@@ -795,7 +804,25 @@ public class GoblinCarryRig : MonoBehaviour
         {
             staggerIntensity = 0f;
             walkIntensity = 0f;
+            clipDrovePot = true;
             return;
+        }
+        // クリップが壺を駆動していた直後は、追従フィルタの内部値を **壺の実位置** から
+        // 引き直す。これが無いと、クリップ終端の壺高さ (着地クッションでは 1.41m) と
+        // 通常担ぎの高さ (1.56m) の差 15cm が 1 フレームで埋められ、壺が +2.8 m/s で
+        // 跳ね上がっていた (実測)。パリー成功後に「腕を勢いよく伸ばす」動きの正体で、
+        // その加速で液体が持っていかれてこぼれる。引き直せば、この段差は既存の
+        // 低域通過フィルタ (potFollowRate) が滑らかに吸収する。
+        if (clipDrovePot)
+        {
+            clipDrovePot = false;
+            if (pot != null && root != null)
+            {
+                smoothedPotLocal = root.InverseTransformPoint(pot.position);
+                smoothedPotLocalRot = Quaternion.Inverse(root.rotation) * pot.rotation;
+                potFollowInit = true;
+                potHandoverUntil = Time.time + potHandoverSeconds;
+            }
         }
 
         ApplyBasePose();
@@ -889,7 +916,8 @@ public class GoblinCarryRig : MonoBehaviour
                 smoothedPotLocalRot = localTargetRot;
                 potFollowInit = true;
             }
-            float kp = 1f - Mathf.Exp(-potFollowRate * Time.deltaTime);
+            float rate = Time.time < potHandoverUntil ? potHandoverFollowRate : potFollowRate;
+            float kp = 1f - Mathf.Exp(-rate * Time.deltaTime);
             float kr = 1f - Mathf.Exp(-potFollowRotRate * Time.deltaTime);
             smoothedPotLocal = Vector3.Lerp(smoothedPotLocal, localTarget, kp);
             smoothedPotLocalRot = Quaternion.Slerp(smoothedPotLocalRot, localTargetRot, kr);

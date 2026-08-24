@@ -66,6 +66,10 @@ public static class CarryWalkParamSync
             so.FindProperty("staggerHeavyHipDrop").floatValue = 0.06f;
             so.FindProperty("staggerHeavyLurch").floatValue = 0.15f;
             so.FindProperty("staggerHeavyDriftSpeed").floatValue = 0.45f;
+            // パリー後の壺の戻し (2026-08-25)。クリップ終端と通常担ぎ位置の 15cm 差を
+            // 1 フレームで埋めていたのを、緩やかな追従で吸収する。
+            so.FindProperty("potHandoverSeconds").floatValue = 0.45f;
+            so.FindProperty("potHandoverFollowRate").floatValue = 3.5f;
             so.ApplyModifiedPropertiesWithoutUndo();
             // ジャンプ初速は GoblinLocomotion 側。歩行と同じくシーン直書きなので一緒に配る。
             var loco = rig.GetComponent<GoblinLocomotion>();
@@ -82,6 +86,17 @@ public static class CarryWalkParamSync
                 EditorUtility.SetDirty(loco);
             }
             EditorUtility.SetDirty(rig);
+
+            // パリーの演出 (2026-08-25)。伸び上がりの再生速度とスローモーション。
+            var acts = rig.GetComponent<GoblinPotActions>();
+            if (acts != null)
+            {
+                var aso = new SerializedObject(acts);
+                aso.FindProperty("cushionRiseSpeed").floatValue = 0.5f;
+                aso.FindProperty("cushionSlowMo").boolValue = true;
+                aso.ApplyModifiedPropertiesWithoutUndo();
+                EditorUtility.SetDirty(acts);
+            }
 
             // UI の目盛りも同じ角度に合わせる (危険円 = 秒読み開始、端 = 危険度最大)。
             var gauge = Object.FindFirstObjectByType<PotionGaugeUI>();

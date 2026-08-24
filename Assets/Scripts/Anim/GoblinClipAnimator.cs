@@ -48,6 +48,9 @@ public class GoblinClipAnimator : MonoBehaviour
     bool oneShotReverse;
     bool oneShotDrivePotToEnd;
     float oneShotEaseOutFrames;   // 終端付近で再生速度を落とす幅 (0 = なし)
+    // 折り返し以降だけ再生速度を落とす (着地クッションの伸び上がり)。-1 = なし。
+    float oneShotSlowFromFrame = -1f;
+    float oneShotSlowSpeed = 1f;
     float oneShotElapsed;         // フェードイン用の経過秒
     bool oneShotMirror;           // 左右反転再生 (横転倒の向き)。ボーン L/R 入替 + X 反転
     int[] mirrorIdx;
@@ -120,7 +123,8 @@ public class GoblinClipAnimator : MonoBehaviour
 
     public void PlayOneShot(GoblinClip clip, bool reverse, bool drivePotToEnd,
                             System.Action potEvent, System.Action done, float speed = 1f,
-                            float easeOutFrames = 0f, bool mirror = false)
+                            float easeOutFrames = 0f, bool mirror = false,
+                            float slowFromFrame = -1f, float slowSpeed = 1f)
     {
         oneShot = clip;
         oneShotReverse = reverse;
@@ -128,6 +132,8 @@ public class GoblinClipAnimator : MonoBehaviour
         oneShotFrame = reverse ? clip.frameCount - 1.0001f : 0f;
         oneShotSpeed = speed;
         oneShotEaseOutFrames = easeOutFrames;
+        oneShotSlowFromFrame = slowFromFrame;
+        oneShotSlowSpeed = Mathf.Max(0.05f, slowSpeed);
         oneShotElapsed = 0f;
         oneShotDrivePotToEnd = drivePotToEnd;
         PotExtraRotation = Quaternion.identity;
@@ -173,6 +179,10 @@ public class GoblinClipAnimator : MonoBehaviour
                 float remaining = oneShotReverse ? oneShotFrame : (oneShot.frameCount - 1 - oneShotFrame);
                 speedScale = Mathf.Lerp(0.18f, 1f, Mathf.Clamp01(remaining / oneShotEaseOutFrames));
             }
+            // 折り返し以降の減速。切り替え点は壺の速度が 0 になるフレームを指定するので、
+            // 速度が段で変わっても動きに段差は出ない (GoblinClip.LowestPotFrame)。
+            if (oneShotSlowFromFrame >= 0f && !oneShotReverse && oneShotFrame >= oneShotSlowFromFrame)
+                speedScale *= oneShotSlowSpeed;
             oneShotFrame += (oneShotReverse ? -1f : 1f) * oneShotSpeed * speedScale * oneShot.fps * dt;
             bool finished = oneShotReverse ? oneShotFrame <= 0f : oneShotFrame >= oneShot.frameCount - 1;
             oneShotFrame = Mathf.Clamp(oneShotFrame, 0f, oneShot.frameCount - 1.0001f);
