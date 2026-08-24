@@ -12,10 +12,11 @@ public class DebugStepRecorder : MonoBehaviour
 {
     public static DebugStepRecorder Active;
 
-    struct Row { public float t, gy, gz, py, vy, fill, tilt; }
+    struct Row { public float t, gy, gz, py, vy, fill, tilt, lean; }
     readonly List<Row> rows = new List<Row>(8192);
 
     Transform goblin, pot;
+    GoblinCarryRig rig;
     FluidBoundary boundary;
     FluidCore core;
     public bool recording;
@@ -31,6 +32,7 @@ public class DebugStepRecorder : MonoBehaviour
         if (core == null) core = FindObjectOfType<FluidCore>();
         boundary = core != null ? core.Boundary : FindObjectOfType<FluidBoundary>();
         pot = goblin != null ? goblin.Find("Carry_Pot") : null;
+        rig = goblin != null ? goblin.GetComponent<GoblinCarryRig>() : null;
     }
 
     // MCP の execute_code は呼び出しごとに 0.1-0.3 秒のヒッチを起こし、ジャンプ入力を
@@ -79,6 +81,8 @@ public class DebugStepRecorder : MonoBehaviour
             vy = boundary != null ? boundary.LinearVelocity.y : 0f,
             fill = core != null ? core.FillFraction01 * 100f : 0f,
             tilt = pot != null ? Vector3.Angle(pot.up, Vector3.up) : 0f,
+            // 踏ん張り (よろけ中の逆入力) の強さ。
+            lean = rig != null ? rig.BraceAmount01 : 0f,
         });
     }
 
@@ -96,6 +100,7 @@ public class DebugStepRecorder : MonoBehaviour
             sb.Append(r.t.ToString("F3")).Append(" z=").Append(r.gz.ToString("F2"))
               .Append(" gy=").Append(r.gy.ToString("F3")).Append(" py=").Append(r.py.ToString("F3"))
               .Append(" vy=").Append(r.vy.ToString("F2")).Append(" tilt=").Append(r.tilt.ToString("F1"))
+              .Append(" brace=").Append(r.lean.ToString("F2"))
               .Append(" fill=").Append(r.fill.ToString("F1"))
               .AppendLine();
         }

@@ -116,7 +116,10 @@ public class GoblinCarryRig : MonoBehaviour
     // direction" hack (which dragged the wrist forward/back and side to side too).
     [Tooltip("How far up/down (meters) the palm target moves at armValue=1/0, holding its X/Z (left-right/front-back) fixed.")]
     // 0.15 (壺の傾き実測 10.9 度) -> 0.20 (17.8 度)。2026-08-15 の増量 (pitchRangeDeg の注記を参照)。
-    public float heightRange = 0.20f;
+    // 2026-08-24: 0.20 -> 0.24。「もう少し左右に動かせるように」(ユーザー指示)。
+    // 実測で壺の可動域が中心 +-17 度から **+-23 度** になる (0.30 だと +-35 度で行き過ぎた)。
+    // 広がったぶん、その先に「もう一段強いよろけ」(Stagger C) を置いている。
+    public float heightRange = 0.24f;
 
     [Header("Palm-normal (NEEDS VISUAL CHECK IN PLAY MODE -- see WORKLOG.md)")]
     public float leftPalmSign = -1f;
@@ -139,11 +142,130 @@ public class GoblinCarryRig : MonoBehaviour
     // という逆の挙動になっていた。
     //
     // 平地での効き方は据え置き（armBalance 0.6 のとき実測 5.5 度、0.9 で 16 度）。
+    [Header("Brace (よろけ中に逆入力で踏ん張る)")]
+    // 頭上の荷は **倒立振子**。倒れた方向へ体を差し込んで支点を移すのが正しく、
+    // 反対へ逃げる (カウンターウェイト) のは荷を体の横に持つときの動き。
+    // 逃げる向きで作ったところ「壺が左に傾いているのに右手を伸ばして左脚を突っ張る」
+    // という意味の通らない姿勢になった (2026-08-24 ユーザー指摘)。
+    //
+    // さらに、これを傾きだけで自動発動させると体が勝手にバランスを取ってしまい、
+    // プレイヤーのマウス操作を肩代わりする。**よろけ中に逆入力しているときだけ**出す。
+    // そうすれば「正しく押し返している」ことが画に出るフィードバックになる。
+    [Tooltip("踏ん張りが出るのに必要な壺の傾き (度)。")]
+    public float braceMinTiltDeg = 4f;
+
+    [Tooltip("踏ん張りが出るのに必要な逆入力の大きさ (0-1)。")]
+    public float braceMinInput = 0.15f;
+
+    [Range(0f, 1f)]
+    [Tooltip("踏ん張りの強さ。素材ポーズは 22〜24 度倒れているので、0.8 で約 18 度。")]
+    public float braceWeight = 0.8f;
+
+    [Tooltip("踏ん張りの出入りに掛ける時間 (秒)。")]
+    public float braceBlendTime = 0.18f;
+
+    // 壺は入力に対して速く、逆入力を入れると 0.4 秒ほどで反対側まで振れてしまう (実測)。
+    // 条件が切れた瞬間に消すと、押し返した手応えが画に残らない。少しだけ保持する。
+    [Tooltip("逆入力の条件が切れた後も踏ん張りを保つ時間 (秒)。")]
+    public float braceHold = 0.18f;
+
+    [Range(0f, 1f)]
+    [Tooltip("肩から上を水平に保つ度合い。1 で完全に据え置き。傾けると手の高さ差から壺のロールへ逆流する。")]
+    public float braceShoulderLevel = 0.9f;
+
+    [Header("Stagger C: もう一段強いよろけ")]
+    // 可動域を広げたぶん、その先にもう一段置く。割り込みではなく **同じ変調の続き** なので
+    // モードは増えない。ここまで来ると歩幅がほとんど無くなり (その場で足を掻く)、腰が大きく
+    // 落ち、体ごと傾いた方へ振られ、流される速さも一段上がる。
+    [Tooltip("もう一段強いよろけが始まる壺の傾き (度)。1 段目が振り切る手前から重ねる。")]
+    public float staggerHeavyStartDeg = 16f;
+
+    [Tooltip("もう一段強いよろけが最大になる壺の傾き (度)。")]
+    public float staggerHeavyFullDeg = 24f;
+
+    [Range(0f, 1f)]
+    [Tooltip("最大時に歩幅をさらに縮める量。1 段目と合わせてほぼその場での足掻きになる。")]
+    public float staggerHeavyStrideShrink = 0.4f;
+
+    [Tooltip("最大時に腰をさらに落とす量 (m)。")]
+    public float staggerHeavyHipDrop = 0.06f;
+
+    [Tooltip("最大時に腰が傾いた方へ振られる量 (m)。体ごと持っていかれる表現。")]
+    public float staggerHeavyLurch = 0.15f;
+
+    [Tooltip("最大時に加算される流される速さ (m/s)。1 段目の引っぱりに上乗せする。")]
+    public float staggerHeavyDriftSpeed = 0.45f;
+
+    [Header("Stagger B: 傾いた方向へ引っぱられる")]
+    // 2026-08-24 差し替え。当初は深いよろけを「短い割り込み」にしたが、挙動が読みにくかった
+    // (ユーザー報告)。代わりに **傾いた方向へ進行方向が引っぱられる** 連続的な形にする。
+    // モードが無いので分かりやすく、失う通貨が「位置」になる:
+    //   こぼれ = 残量 / 引っぱられ = 位置 / (転倒 = 時間、いまは停止中)
+    // 崖や川のそばでだけ本当に怖くなるので、ステージ配置がそのまま難易度になる。
+    [Tooltip("引っぱりが始まる壺の傾き (度)。歩容の変調より後から効き始める。")]
+    public float staggerDriftStartDeg = 10f;
+
+    [Tooltip("引っぱりが最大になる壺の傾き (度)。")]
+    public float staggerDriftFullDeg = 22f;
+
+    // 歩行速度は 0.9 m/s。横へ流される速さがこれを超えると「進行方向が引っぱられる」
+    // ではなく「横へ飛ばされる」になる (実測で 1.0〜1.2 m/s 出て強すぎた)。
+    // 1 段目 0.45 + もう一段 0.45 で、最大でも歩行速度と同じ 0.9 m/s に収める。
+    [Tooltip("最大時に傾いた方向へ流される速さ (m/s)。歩行速度 (0.9) を超えないこと。")]
+    public float staggerDriftSpeed = 0.45f;
+
+    // 担ぎ姿勢の左右の偏りを打ち消す量 (度)。入力 0 で両手の高さが 3.7 度ずれており、
+    // そのぶん壺が傾いたままだった。ここで引くと中立で水平になり、左右の可動域が揃う。
+    // 再計測は「立ち止まって armBalance = 0 で 5 秒待ち、両手の高さ差を見る」。
+    // 落ち着く前に測ると値がずれる (実測: 直後 2.2 度 / 静定後 3.7 度)。
+    [Tooltip("担ぎ姿勢の左右の偏りを打ち消す角度 (度)。入力 0 で壺が水平になる値。")]
+    public float potNeutralRollDeg = 3.7f;
+
+    // potNeutralRollDeg で打ち消した後の残り (実測 +1.1 度)。判定の中心をここで合わせると
+    // 左右のよろけ強度が揃う (実測: 入力 -1 で 0.61 / +1 で 0.64)。
+    [Tooltip("よろけ判定から差し引く壺の傾き (度)。potNeutralRollDeg で打ち消しきれない残り。")]
+    public float potTiltBiasDeg = 1.2f;
+
     [Header("Stagger (壺が世界基準でどれだけ傾いたかで判定)")]
+    // 2026-08-24 再設計。よろけと歩行が両立しなかったのは、両方が **腰と脚を絶対値で駆動**
+    // していて同じ骨を奪い合っていたため。ブレンドすると「どちらでもない姿勢」になり、
+    // 片方を優先すると「よろけ姿勢のまま歩く」になる。専用クリップは使わず、
+    // 歩容そのものを **変調** することで解決した。歩行は途切れず、操作も奪わない。
+    //
+    //   1 段目 (5.5〜18 度)  歩幅が詰まり、足幅が広がり、腰が落ち、上体が壺の側へ入る。
+    //   もう一段 (16〜24 度) その上にさらに歩幅短縮・腰落ち・腰の横ずれ・上体の倒れを重ねる。
+    //   流され (10 度〜)     傾いた方向へ進行方向が引っぱられる。歩行中のみ。
+    //
+    // 割り込み (よろけクリップの単発再生) は挙動が読めないため入れていない。
+    [Tooltip("よろけを有効にする。")]
+    public bool staggerEnabled = true;
+
+    [Header("Stagger A: 歩容の変調 (浅い〜中)")]
+    [Range(0f, 1f)]
+    [Tooltip("よろけ最大時に脚の振り幅をどれだけ縮めるか。歩幅が詰まって小刻みになる。")]
+    public float staggerStrideShrink = 0.5f;
+
+    [Tooltip("よろけ最大時の歩調の倍率。歩幅を詰めたぶん回転を上げないと足が滑る。")]
+    public float staggerCadenceBoost = 1.7f;
+
+    [Tooltip("よろけ最大時に足を外へ開く角度 (度)。支持面を広げて耐えている表現。")]
+    public float staggerStanceWidenDeg = 8f;
+
+    [Tooltip("よろけ最大時に腰を落とす量 (m)。膝を曲げて足の位置は保つ。")]
+    public float staggerHipDrop = 0.07f;
+
+    [Range(0f, 1f)]
+    [Tooltip("よろけ最大時に上体を壺の側へ入れる強さ。逆入力の踏ん張りはこれに上乗せされる。")]
+    public float staggerLeanWeight = 0.45f;
+
+    [Header("Stagger B: 割り込み (深い)")]
+
     [Tooltip("世界基準での壺の傾きがこの角度(度)を超えるとよろけ始める。")]
     public float staggerThresholdDeg = 5.5f;
-    [Tooltip("しきい値からこの角度(度)ぶん超えると、よろけが最大になる。")]
-    public float staggerRampDeg = 10.5f;
+    // 2026-08-24: 10.5 -> 18。変調が 16 度で頭打ちになっていたが、傾きの大きさに応じて
+    // 変容量が伸び続けるほうが分かりやすい (ユーザー指示)。23.5 度で最大になる。
+    [Tooltip("しきい値からこの角度(度)ぶん超えると、よろけの変調が最大になる。")]
+    public float staggerRampDeg = 18f;
     // 人は横方向より前後方向にずっと安定している（足が左右に並んでいるので、支持面は
     // 左右に狭く前後に長い）。実際、上り坂を登ってもよろけないが、横に傾いた斜面では
     // すぐバランスを崩す。よろけの判定でも前後成分の重みを下げる。
@@ -164,8 +286,8 @@ public class GoblinCarryRig : MonoBehaviour
     // IsMoving, blended in/out so starting/stopping doesn't pop. Runs BEFORE ApplyStagger() in
     // LateUpdate so a stagger (which reads as more urgent) still wins if both are active at once.
     [Header("Walk cycle (assigns Carry_Balance_Walk to movement)")]
-    [Tooltip("Seconds per full walk cycle at walkStrideRefSpeed (source Blender animation is 60 frames @ 24fps = 2.5s); scales automatically with actual speed.")]
-    public float walkCycleDuration = 2.5f;
+    [Tooltip("歩行 1 周期の秒数 (walkStrideRefSpeed のときの値)。元クリップは 81 フレーム @24fps = 3.375 秒。実速度に応じて自動で伸縮する。")]
+    public float walkCycleDuration = 3.375f;
     // ADDED 2026-08-15 (要望「歩行スピードを速くしたい。ただし歩行アニメと移動量が
     // 乖離しないように」): 従来は位相速度の基準に locomotion.walkSpeed そのものを
     // 使っていた。この方式は「1 サイクルで進む距離 = walkSpeed x walkCycleDuration」に
@@ -175,7 +297,80 @@ public class GoblinCarryRig : MonoBehaviour
     // 変えても「速く歩く = 足も比例して速く回る」が常に成り立つ。
     // 歩行アニメの見え方を調整した当時の速度が 1.0 m/s だったので既定は 1.0。
     [Tooltip("歩行アニメの周期 (walkCycleDuration) を調整した基準速度 (m/s)。歩幅 = これ x walkCycleDuration。locomotion.walkSpeed を変えてもここは変えないこと。")]
-    public float walkStrideRefSpeed = 1.0f;
+    public float walkStrideRefSpeed = 0.4531f;
+
+    [Range(0f, 1f)]
+    [Tooltip("歩行クリップの肩の動きをどれだけ乗せるか。元クリップは腕を下げて振る歩きなので、壺を担いだ姿勢では強すぎることがある。0 で肩を固定。")]
+    public float walkShoulderWeight = 0.35f;
+
+    // 元クリップ (Slow_Orc_Walk) は大柄な重量級の歩きで、上体の前後振りが実測 54 度、
+    // 左右振りが 66 度あった。壺を頭上に担いだ状態でそのまま乗せると壺が 40 度傾き、
+    // 中身がこぼれそうな絵になる。重い物を担ぐ人間は逆に上体を止めて安定させるので、
+    // ここを絞るのは見た目としても正しい。脚と腰は歩容そのものなので絶対値のまま。
+    [Range(0f, 1f)]
+    [Tooltip("歩行クリップの上体 (背骨) の振りをどれだけ乗せるか。1 で元クリップそのまま、0 で担ぎ姿勢のまま固定。")]
+    public float walkUpperBodyWeight = 0.2f;
+
+    // 首と頭を背骨と分けたのは「顔が動きすぎている」という指摘 (2026-08-24) による。
+    // 頭は画面上でいちばん注目される部位なので、体幹より一段強く抑える。
+    [Range(0f, 1f)]
+    [Tooltip("歩行クリップの首・頭の振りをどれだけ乗せるか。顔の揺れが気になるときはここを下げる。")]
+    public float walkHeadWeight = 0.08f;
+
+    [Header("Jump (2026-08-24)")]
+    // ジャンプは「溜め → 踏切 → 滞空 → 着地の吸収 → 復帰」の 5 段。既存は体がそのまま
+    // 上へ跳ね上がるだけで、この 5 段がどれも無かった。姿勢は IGoblinJumpPoses の実装
+    // (GoblinJumpStand / GoblinJumpRun) を、歩行と同じく BasePose の上に乗せる。
+    [Tooltip("静止からのジャンプで沈み込みに掛ける時間 (秒)。")]
+    public float jumpCrouchTime = 0.06f;
+
+    [Tooltip("歩行/走行からのジャンプで沈み込みに掛ける時間 (秒)。走りながら屈む人はいないので短く。")]
+    public float jumpCrouchTimeMoving = 0.04f;
+
+    // 上向きの初速を「伸び上がりのどこで」与えるか。0.8 = 伸びきる少し手前。
+    // 以前は伸び上がりが始まる前に飛ばしていたため、**しゃがんだまま浮き上がり、空中で伸びる**
+    // という逆さまの動きになっていた (実測: 0.15 秒で高さ 0.21m のときまだ沈んだ姿勢、
+    // 伸びきるのは 0.26 秒 = 高さ 0.80m)。人は伸ばしきる過程で地面を離れる。
+    [Range(0.4f, 1f)]
+    [Tooltip("伸び上がりのどこで地面を離れるか。1 に近いほど「伸ばしきってから飛ぶ」= 入力から浮くまでが遅くなる。")]
+    public float jumpLaunchAt = 0.8f;
+
+    float JumpCrouchTime => (locomotion != null && locomotion.IsMoving) ? jumpCrouchTimeMoving : jumpCrouchTime;
+
+    /// <summary>ジャンプ入力から実際に地面を離れるまでの時間。沈み込み + 伸び上がりの途中まで。
+    /// GoblinLocomotion がこれを読んで初速を遅らせる (時間の出どころをリグ側に一本化)。</summary>
+    public float PreLaunchTime(bool moving)
+    {
+        float crouch = moving ? jumpCrouchTimeMoving : jumpCrouchTime;
+        return crouch + jumpTakeoffTime * jumpLaunchAt;
+    }
+
+    // 0.09 → 0.15 (2026-08-24)。0.09 だと伸び上がりで **1 コマに腰が 17cm (毎秒 10m)** 動き、
+    // 壺を強く振ってポーションをこぼす原因になっていた。0.15 で 10cm/コマ まで下がり、
+    // つなぎ目の最大角度変化も歩行そのものより小さくなる (実測)。
+    [Tooltip("踏切 (しゃがみ→伸び上がり) に掛ける時間 (秒)。短くしすぎると壺を振り回してこぼれる。")]
+    public float jumpTakeoffTime = 0.15f;
+
+    [Tooltip("滞空で脚をたたむまでの時間 (秒)。")]
+    public float jumpAirTime = 0.18f;
+
+    [Tooltip("着地の沈み込みに掛ける時間 (秒)。")]
+    public float jumpLandTime = 0.09f;
+
+    [Tooltip("沈み込みから立ち姿勢へ戻る時間 (秒)。長いほど重い荷物に見える。")]
+    public float jumpRecoverTime = 0.26f;
+
+    [Range(0f, 1f)]
+    [Tooltip("ジャンプ姿勢の上体 (背骨) をどれだけ乗せるか。歩行より強めでよい (溜めの前傾・踏切の伸びが出る)。")]
+    public float jumpUpperBodyWeight = 0.45f;
+
+    [Range(0f, 1f)]
+    [Tooltip("ジャンプ姿勢の首・頭をどれだけ乗せるか。")]
+    public float jumpHeadWeight = 0.15f;
+
+    [Tooltip("小さな段差の踏み外しでは着地モーションを出さない滞空時間のしきい値 (秒)。")]
+    public float jumpLandMinAirtime = 0.15f;
+
     [Tooltip("How fast the walk cycle blends in/out as movement starts/stops.")]
     public float walkBlendSpeed = 4f;
     [Tooltip("Extra vertical bob (meters) added to both arm IK targets while walking, so the carried pot visibly sways with each step.")]
@@ -184,6 +379,7 @@ public class GoblinCarryRig : MonoBehaviour
     Transform hipsBone, leftUpLegBone, leftLegBone, leftFootBone, leftToeBone;
     // 2026-08-23: 重量物歩行で上半身も歩行に反応させるため (旧実装は BasePose のまま固定だった)
     Transform spineBone, spine01Bone, spine02Bone, neckBone, headBone;
+    Transform leftShoulderBone, rightShoulderBone;
     Transform rightUpLegBone, rightLegBone, rightFootBone, rightToeBone;
     float leftUpLegLen, leftLegLen, leftFootLen;
     float rightUpLegLen, rightLegLen, rightFootLen;
@@ -197,11 +393,37 @@ public class GoblinCarryRig : MonoBehaviour
     bool swimGaitActive;           // ClampFeetToGround を止めるためのフラグ (足が水中に潜るため)
     /// <summary>よろけ強度 (0..1)。転倒トリガー (GoblinPotActions) が読む。</summary>
     public float StaggerIntensity01 => staggerIntensity;
+    /// <summary>踏ん張りの強さ 0-1 (よろけ中に逆入力しているときだけ立つ)。</summary>
+    public float BraceAmount01 => braceAmt;
     /// <summary>いまのよろけが右側 (root.right = +X) か。転倒の向き (ミラー再生) の判定に使う。</summary>
     public bool StaggerLeanRightNow => staggerLeanRight;
     float staggerPhase, staggerIntensity;
+    float braceAmt;          // 踏ん張りの強さ 0-1 (追従済み)
+    float braceHoldUntil;    // 条件が切れた後の保持期限
+    float braceSign;         // 壺が倒れている向き (+1 = 右)
     bool staggerLeanRight;
     float walkPhase, walkIntensity;
+    // エディタのプレビュー (CarryWalkPreview) 用。true の間は walkPhase / walkIntensity を
+    // 外から与えた値のまま使い、時間による進行と減衰を止める。エディタでは Time.deltaTime が
+    // エディタ側のフレーム間隔 (しばしば数百 ms) になるため、これが無いと指定した位相で
+    // 絵が撮れない (実際、最初のプレビューは全コマとも別位相になっていた)。
+    [System.NonSerialized] public bool previewLock;
+    // ApplyBasePose 直後の上半身の向き (world)。**骨盤を動かす前** に控えるのが要点。
+    // ボーンは Unity の親子階層なので、腰を回すと背骨以降の .rotation も一緒に回ってしまう。
+    // 歩行を乗せた後に読むと「骨盤の振れ込みの姿勢」を素の姿勢と誤認し、重みを 0 にしても
+    // 骨盤の左右の振れがそのまま肩→腕→壺のロールに伝わり続ける (実測: 肩線が 60 度振れた)。
+    Quaternion baseSpine, baseSpine01, baseSpine02, baseNeck, baseHead, baseShoulderL, baseShoulderR;
+
+    // ジャンプ姿勢の進行。u は GoblinJump の姿勢軸 (1 = 最も沈む / UExtend = 伸び上がり)。
+    enum JumpPhase { None, Crouch, Takeoff, Air, Land, Recover }
+    JumpPhase jumpPhase;
+    float jumpPhaseT;       // 現フェーズの経過秒
+    float jumpU;            // 姿勢軸の現在値
+    float jumpU0;           // 現フェーズに入った時点の姿勢軸。ここから補間するので繋ぎ目が飛ばない
+    float jumpWeight;       // 立ち姿勢とのブレンド量
+    float jumpAirborne;     // 連続滞空時間 (小さな踏み外しで着地モーションを出さないため)
+    float lastSeenJumpStart = -999f;
+    IGoblinJumpPoses jumpSet = GoblinJumpStand.I;   // 踏み切った瞬間に決めて、そのジャンプ中は変えない
     bool cursorLockedOnce;   // マウスバランス用の初回カーソルロック (2026-08-21)
 
     // REDESIGNED 2026-08-10 per explicit request: the pot is no longer placed at a fixed
@@ -361,6 +583,8 @@ public class GoblinCarryRig : MonoBehaviour
         spine02Bone = GoblinBoneUtil.FindDeep(root, "Spine02");
         neckBone = GoblinBoneUtil.FindDeep(root, "neck");
         headBone = GoblinBoneUtil.FindDeep(root, "Head");
+        leftShoulderBone = GoblinBoneUtil.FindDeep(root, "RightShoulder");
+        rightShoulderBone = GoblinBoneUtil.FindDeep(root, "LeftShoulder");
         leftUpLegBone = GoblinBoneUtil.FindDeep(root, "RightUpLeg");
         leftLegBone = GoblinBoneUtil.FindDeep(root, "RightLeg");
         leftFootBone = GoblinBoneUtil.FindDeep(root, "RightFoot");
@@ -576,7 +800,9 @@ public class GoblinCarryRig : MonoBehaviour
 
         ApplyBasePose();
         ApplyWalkCycle();
+        ApplyJumpPose();
         ApplyStagger();
+        ApplyBraceUnderPot();
         ClampFeetToGround();
 
         if (bonesFound)
@@ -650,7 +876,11 @@ public class GoblinCarryRig : MonoBehaviour
             // 揺すりの高周波成分 (±数 cm) だけが消える。手と壺のずれは 1〜2cm 程度。
             // 回転は実測 0.08 rad/s と暴れておらず、マウスバランスの応答を保つため
             // 軽め (potFollowRotRate) に留める。
-            Quaternion targetRot = Quaternion.AngleAxis(armRoll, fwd) * basePose;
+            // 担ぎ姿勢そのものが左右非対称で、入力 0 でも両手の高さが 3.7 度ずれている。
+            // そのぶん壺が傾いたままになり、片側だけ傾けられる量が少なくなっていた
+            // (実測: 入力 +1 で +13.4 度に対し -1 で -20.2 度。「右傾きだけ段階を感じない」)。
+            // ここで打ち消すと、中立で壺が水平になり、左右の可動域も揃う。
+            Quaternion targetRot = Quaternion.AngleAxis(armRoll - potNeutralRollDeg, fwd) * basePose;
             Vector3 localTarget = root.InverseTransformPoint(handMid);
             Quaternion localTargetRot = Quaternion.Inverse(root.rotation) * targetRot;
             if (!potFollowInit)
@@ -735,6 +965,14 @@ public class GoblinCarryRig : MonoBehaviour
                 RollAroundY(bone, rollWorld);
             }
         }
+
+        if (spineBone   != null) baseSpine   = spineBone.rotation;
+        if (spine01Bone != null) baseSpine01 = spine01Bone.rotation;
+        if (spine02Bone != null) baseSpine02 = spine02Bone.rotation;
+        if (neckBone    != null) baseNeck    = neckBone.rotation;
+        if (headBone    != null) baseHead    = headBone.rotation;
+        if (leftShoulderBone  != null) baseShoulderL = leftShoulderBone.rotation;
+        if (rightShoulderBone != null) baseShoulderR = rightShoulderBone.rotation;
     }
 
     // ADDED 2026-08-10: plays the Carry_Balance_Walk gait (see GoblinWalk.cs) on the Hips + 4 leg
@@ -753,9 +991,14 @@ public class GoblinCarryRig : MonoBehaviour
         // 位相は下の Max(0.15, speed) によりゆっくり進み、「バランスを取りながらの足踏み」になる。
         bool moving = swimGaitActive || ropeGait || (locomotion != null && locomotion.IsMoving);
         float target = moving ? 1f : 0f;
-        walkIntensity = Mathf.MoveTowards(walkIntensity, target, walkBlendSpeed * Time.deltaTime);
+        if (!previewLock)
+            walkIntensity = Mathf.MoveTowards(walkIntensity, target, walkBlendSpeed * Time.deltaTime);
 
-        if (walkIntensity > 0.001f)
+        if (previewLock)
+        {
+            // 位相はプレビュー側が固定する
+        }
+        else if (walkIntensity > 0.001f)
         {
             float dtw = Time.deltaTime;
             if (swimGaitActive)
@@ -776,7 +1019,10 @@ public class GoblinCarryRig : MonoBehaviour
                 float speedRatio = locomotion != null
                     ? Mathf.Max(0.2f, locomotion.CurrentSpeed / Mathf.Max(0.01f, walkStrideRefSpeed))
                     : 1f;
-                walkPhase = Mathf.Repeat(walkPhase + dtw * speedRatio / Mathf.Max(0.01f, walkCycleDuration), 1f);
+                // 案A: よろけているぶんだけ歩調を上げる。下で脚の振り幅を縮めるので、
+                // ここを上げないと同じ速度に対して足が滑る (歩幅 x 歩調 = 進む距離)。
+                float cadence = Mathf.Lerp(1f, staggerCadenceBoost, StaggerWalkAmount);
+                walkPhase = Mathf.Repeat(walkPhase + dtw * speedRatio * cadence / Mathf.Max(0.01f, walkCycleDuration), 1f);
             }
         }
         else
@@ -787,6 +1033,7 @@ public class GoblinCarryRig : MonoBehaviour
         if (walkIntensity <= 0.001f || hipsBone == null) return;
 
         Vector3 hy, hx, luy, lux, lly, llx, ruy, rux, rly, rlx, lfy, lfx, rfy, rfx;
+        Vector3 lty, ltx, rty, rtx;
         bool heavyUpper = false;   // 通常歩行のときだけ上半身も駆動する
         if (swimGaitActive)
         {
@@ -827,6 +1074,21 @@ public class GoblinCarryRig : MonoBehaviour
             GoblinWalk.SampleRightLeg(walkPhase, out rly, out rlx);
             GoblinWalk.SampleLeftFoot(walkPhase, out lfy, out lfx);
             GoblinWalk.SampleRightFoot(walkPhase, out rfy, out rfx);
+            // 案A: 脚の向きを 1 周期の平均姿勢へ寄せて振り幅 = 歩幅を縮める。
+            // 位相を速めるだけでは歩幅は変わらず足が滑るので、振り幅そのものを縮める。
+            // 1 段目 + もう一段。両方合わせるとほぼその場での足掻きになる。
+            float shrink = Mathf.Clamp01(StaggerWalkAmount * staggerStrideShrink
+                                       + StaggerHeavyAmount * staggerHeavyStrideShrink);
+            if (shrink > 0.001f)
+            {
+                Vector3 my, mx;
+                GoblinWalk.MeanLeftUpLeg(out my, out mx);  GoblinWalk.ShrinkStride(shrink, ref luy, ref lux, my, mx);
+                GoblinWalk.MeanLeftLeg(out my, out mx);    GoblinWalk.ShrinkStride(shrink, ref lly, ref llx, my, mx);
+                GoblinWalk.MeanLeftFoot(out my, out mx);   GoblinWalk.ShrinkStride(shrink, ref lfy, ref lfx, my, mx);
+                GoblinWalk.MeanRightUpLeg(out my, out mx); GoblinWalk.ShrinkStride(shrink, ref ruy, ref rux, my, mx);
+                GoblinWalk.MeanRightLeg(out my, out mx);   GoblinWalk.ShrinkStride(shrink, ref rly, ref rlx, my, mx);
+                GoblinWalk.MeanRightFoot(out my, out mx);  GoblinWalk.ShrinkStride(shrink, ref rfy, ref rfx, my, mx);
+            }
             // 2026-08-23 重量物歩行: **腰の位置がこの歩きの本体**。一歩ごとの沈み込み (荷重) と
             // 支持脚側への左右移動が入っている。向きだけ適用していた旧実装では腰が完全に固定で、
             // 「脚だけが小刻みに動き、上半身が乗っているだけ」に見えていた。
@@ -842,20 +1104,408 @@ public class GoblinCarryRig : MonoBehaviour
             luy, lux, lly, llx, lfy, lfx, leftUpLegLen, leftLegLen, leftFootLen, walkIntensity);
         ApplyLegChain(rightUpLegBone, rightLegBone, rightFootBone, rightToeBone,
             ruy, rux, rly, rlx, rfy, rfx, rightUpLegLen, rightLegLen, rightFootLen, walkIntensity);
-        if (heavyUpper) ApplyWalkUpperBody(walkIntensity);
+        if (heavyUpper)
+        {
+            ApplyStaggerStance();
+            ApplyWalkUpperBody(walkIntensity);
+            // 爪先。蹴り出しと着地の踏み替えはここが動かないと「板の足」に見える。
+            // ApplyLegChain が位置を決めた後なので、向きを足すだけで FK は崩れない。
+            GoblinWalk.SampleLeftToe(walkPhase, out lty, out ltx);
+            GoblinWalk.SampleRightToe(walkPhase, out rty, out rtx);
+            if (leftToeBone  != null) BlendAimFull(leftToeBone, lty, ltx, walkIntensity);
+            if (rightToeBone != null) BlendAimFull(rightToeBone, rty, rtx, walkIntensity);
+        }
     }
 
-    // 2026-08-23: 重いツボを担いでいることを上半身でも見せる。後傾・肩線のカウンター傾き・
-    // 骨盤のヨーに対する上半身のカウンター・頭の遅れが、ベイクしたクリップに入っている。
-    // ロープ歩きと泳ぎは専用の姿勢を持つので、通常歩行のときだけ適用する。
+
+
+    /// <summary>傾き(度)を -1..1 に均す。leanStartDeg まで無反応、leanFullDeg で最大。</summary>
+
+    // 左右と前後のズレを重み付きで重ねて、いまの向きの上に足す。
+
+
+
+
+    // 差分回転を「いまの向き」に重ねる。差分は root ローカルで定義してある。
+
+    // ==== 踏ん張り (よろけ中に逆入力したとき / 2026-08-24) ====
+    //
+    // 頭上の荷は **倒立振子**。倒れた方向へ体を差し込んで支点を移すのが正しい動きで、
+    // 反対へ逃げる (カウンターウェイト) のは荷を体の横に持つときの動き。
+    //
+    // ただし傾きだけで自動発動させると、体が勝手にバランスを取ってプレイヤーのマウス操作を
+    // 肩代わりしてしまう。**よろけ中に逆入力しているときだけ** 出すことで、
+    // 「正しく押し返している」ことが画に出るフィードバックになる (アシストではない)。
+    //
+    // 倒すのは腰寄りの背骨だけで、肩を載せている Spine の向きは戻す。肩まで傾けると
+    // 肩線 → 手の高さ差 → armRoll → 壺のロール、と逆流して自動補正になってしまう
+    // (実測: 戻さないと肩線 35 度・手の高さ差 44 度、戻せば 6 度・7 度)。
+    void ApplyBraceUnderPot()
+    {
+        if (spine01Bone == null || spine02Bone == null) return;
+
+        float target = 0f;
+        if (pot != null && staggerIntensity > 0.05f)
+        {
+            // 壺の左右の倒れ (担ぎ姿勢の偏りを差し引いた値)。正 = ゴブリンの右へ倒れている。
+            float tilt = PotLateralDeg();
+            if (Mathf.Abs(tilt) >= braceMinTiltDeg)
+            {
+                braceSign = Mathf.Sign(tilt);
+                // 案A の一部として、よろけている間は常に少しだけ壺の側へ入る (引っぱられている)。
+                target = Mathf.Clamp01(staggerIntensity * staggerLeanWeight + StaggerHeavyAmount * 0.5f);
+                // 逆入力 = 傾きと反対向きの入力。armBalance は壺の傾きと同符号なので
+                // (実測: armBalance +1 → 壺 +14.8 度)、符号が逆なら押し返している。
+                // 押し返しているときは深く入る = 踏ん張り。
+                float push = -Mathf.Sign(tilt) * armBalance;
+                if (push >= braceMinInput)
+                {
+                    target = Mathf.Max(target, Mathf.Min(staggerIntensity, push));
+                    braceHoldUntil = Time.time + braceHold;
+                }
+            }
+        }
+        // 条件が切れても braceHold の間は落とさない。
+        if (target <= 0f && Time.time < braceHoldUntil) target = braceAmt;
+        braceAmt = Mathf.MoveTowards(braceAmt, target, Time.deltaTime / Mathf.Max(0.02f, braceBlendTime));
+        if (braceAmt <= 0.002f) return;
+
+        // **壺が倒れている側へ** 体を入れる (符号を反転しない = カウンターではない)。
+        float w = braceAmt * braceWeight * braceSign;
+
+        Quaternion spineKeep = spineBone != null ? spineBone.rotation : Quaternion.identity;
+
+        // 親から子の順に (Hips → Spine02 → Spine01 → Spine)。逆順だと親の回転が子を引きずる。
+        BraceBone(spine02Bone, GoblinLean.Spine02SideP, GoblinLean.Spine02SideN, w);
+        BraceBone(spine01Bone, GoblinLean.Spine01SideP, GoblinLean.Spine01SideN, w);
+
+        if (spineBone != null && braceShoulderLevel > 0.001f)
+        {
+            Quaternion keep = Quaternion.Slerp(spineBone.rotation, spineKeep, braceShoulderLevel);
+            Quaternion local = Quaternion.Inverse(Posture.rotation) * keep;
+            BlendAimFull(spineBone, local * Vector3.up, local * Vector3.right, 1f);
+        }
+    }
+
+    void BraceBone(Transform bone, Quaternion sideP, Quaternion sideN, float w)
+    {
+        if (bone == null || Mathf.Abs(w) < 0.001f) return;
+        Quaternion d = Quaternion.Slerp(Quaternion.identity, w > 0f ? sideP : sideN, Mathf.Abs(w));
+        // ズレは root ローカルで定義してあるので、いまの向きも root ローカルへ落として掛ける。
+        Quaternion local = d * (Quaternion.Inverse(Posture.rotation) * bone.rotation);
+        BlendAimFull(bone, local * Vector3.up, local * Vector3.right, 1f);
+    }
+
+    // ==== ツボ担ぎジャンプ (2026-08-24) ====
+    //
+    // 既存は GoblinLocomotion が上向きの初速を与えるだけで、体は歩行/立ちの姿勢のまま
+    // 平行移動していた。「ジャンプ感が無い」の正体はここで、跳躍を跳躍に見せているのは
+    // 上下の移動そのものではなく **溜め・踏切・着地** の 3 つ。
+    //
+    //   溜め    しゃがんで荷重をためる      (この間は飛ばない。Locomotion 側で初速を遅らせている)
+    //   踏切    一気に伸び上がる            (ここで初速が入る)
+    //   滞空    脚をたたんで着地に備える
+    //   着地    沈み込んで衝撃を吸収する
+    //   復帰    立ち姿勢へ戻る
+    //
+    // 姿勢セットは踏み切った瞬間の移動状態で選ぶ (GoblinJumpStand / GoblinJumpRun)。
+    // 静止跳びの素材は「しゃがみ→伸び上がり→着地して沈む」の並びなので、溜めは着地の
+    // 沈み込みポーズを共用し、そこから u を UExtend へ動かす = 素材の逆再生になり、
+    // 「沈んでから伸び上がる」がそのまま得られる。走り跳びの素材は素直な順序。
+    void ApplyJumpPose()
+    {
+        if (hipsBone == null) return;
+        // プレビュー (CarryWalkPreview) では姿勢軸とブレンド量を外から与える。
+        if (previewLock) { if (jumpWeight > 0.001f) ApplyJumpBones(jumpSet, jumpU, jumpWeight); return; }
+        if (locomotion == null) return;
+
+        bool grounded = locomotion.Grounded;
+        jumpAirborne = grounded ? 0f : jumpAirborne + Time.deltaTime;
+
+        // ジャンプ入力の検出。Locomotion は押した時刻を記録するだけで、実際の踏切は
+        // jumpAnticipation 後なので、こちらは押した瞬間から溜めに入れる。
+        if (locomotion.LastJumpStartTime > lastSeenJumpStart + 0.01f)
+        {
+            lastSeenJumpStart = locomotion.LastJumpStartTime;
+            // 静止からと歩行/走行からでは人体の動きが別物 (両足で沈んで真上 / 片足で蹴って
+            // 脚が前後に開く)。踏み切った瞬間の速度でセットを選び、ジャンプ中は切り替えない。
+            // 歩行からのときは、**そのとき接地している足で踏み切る** セットを選ぶ。
+            // 逆の足のセットを使うと、浮いている足で地面を蹴る絵になる。
+            jumpSet = locomotion.IsMoving ? PickRunJumpSet() : GoblinJumpStand.I;
+            jumpPhase = JumpPhase.Crouch;
+            jumpPhaseT = 0f;
+            jumpU0 = jumpU;
+        }
+
+        // 歩いていて崖から落ちた場合も、着地は吸収させたい (溜め・踏切は無い)。
+        if (jumpPhase == JumpPhase.None && !grounded && jumpAirborne > jumpLandMinAirtime)
+        {
+            // 崖から歩いて落ちた場合。踏切は無いので、そのときの移動状態でセットを選ぶ。
+            jumpSet = locomotion.IsMoving ? PickRunJumpSet() : GoblinJumpStand.I;
+            jumpPhase = JumpPhase.Air;
+            jumpPhaseT = jumpAirTime;      // 既に脚をたたんだ状態から始める
+            jumpU0 = jumpSet.UExtend;
+        }
+
+        if (jumpPhase == JumpPhase.None)
+        {
+            jumpWeight = Mathf.MoveTowards(jumpWeight, 0f, Time.deltaTime / Mathf.Max(0.01f, jumpRecoverTime));
+            if (jumpWeight <= 0.001f) return;
+        }
+
+        jumpPhaseT += Time.deltaTime;
+        switch (jumpPhase)
+        {
+            case JumpPhase.Crouch:
+                // 立ち姿勢から沈み込む見せ方にするため、伸びた姿勢から UCrouch へ送る。
+                jumpU = Mathf.Lerp(jumpSet.UExtend, jumpSet.UCrouch,
+                    Ease(jumpPhaseT / Mathf.Max(0.01f, JumpCrouchTime)));
+                // 割り込みは溜めの全体を使って入れる。0.05 秒で入れると歩行姿勢から
+                // しゃがみへ 3 コマで飛び、そこが最大の飛び (36 度) になっていた。
+                jumpWeight = Mathf.MoveTowards(jumpWeight, 1f,
+                    Time.deltaTime / Mathf.Max(0.02f, JumpCrouchTime));
+                // 沈み込みが終わったら伸び上がりへ。初速は伸び上がりの途中 (jumpLaunchAt) で
+                // 入るので、「飛んだかどうか」では溜めを抜けられない。時間の出どころは
+                // このリグ側に一本化してあり、Locomotion は PreLaunchTime を読む。
+                if (jumpPhaseT >= JumpCrouchTime)
+                {
+                    jumpPhase = JumpPhase.Takeoff;
+                    jumpPhaseT = 0f;
+                    jumpU0 = jumpU;
+                }
+                break;
+
+            case JumpPhase.Takeoff:
+                jumpU = Mathf.Lerp(jumpU0, jumpSet.UExtend,
+                    Ease(jumpPhaseT / Mathf.Max(0.01f, jumpTakeoffTime)));
+                jumpWeight = 1f;
+                if (jumpPhaseT >= jumpTakeoffTime)
+                { jumpPhase = JumpPhase.Air; jumpPhaseT = 0f; jumpU0 = jumpU; }
+                break;
+
+            case JumpPhase.Air:
+                // 上昇中は伸びたまま、落下に入ると脚をたたむ。滞空時間は高さで変わるので
+                // 時間ではなく上下速度で送る方が、低い跳躍でも高い跳躍でも破綻しない。
+                float fall = Mathf.Clamp01(-locomotion.VerticalVelocity / 4f);
+                float byTime = Mathf.Clamp01(jumpPhaseT / Mathf.Max(0.01f, jumpAirTime));
+                jumpU = Mathf.Lerp(jumpU0, jumpSet.UAir, Ease(Mathf.Max(fall, byTime)));
+                jumpWeight = 1f;
+                if (grounded && jumpAirborne <= 0f && jumpPhaseT > 0.05f)
+                {
+                    jumpPhase = JumpPhase.Land;
+                    jumpPhaseT = 0f;
+                    jumpU0 = jumpU;
+                }
+                break;
+
+            case JumpPhase.Land:
+                jumpU = Mathf.Lerp(jumpU0, jumpSet.ULand,
+                    Ease(jumpPhaseT / Mathf.Max(0.01f, jumpLandTime)));
+                jumpWeight = 1f;
+                if (jumpPhaseT >= jumpLandTime)
+                { jumpPhase = JumpPhase.Recover; jumpPhaseT = 0f; jumpU0 = jumpU; }
+                break;
+
+            case JumpPhase.Recover:
+                jumpU = jumpSet.ULand;
+                jumpWeight = 1f - Ease(jumpPhaseT / Mathf.Max(0.01f, jumpRecoverTime));
+                if (jumpWeight <= 0.001f) { jumpPhase = JumpPhase.None; jumpWeight = 0f; return; }
+                break;
+        }
+
+        ApplyJumpBones(jumpSet, jumpU, jumpWeight);
+    }
+
+    // 段の切り替わりで速度が段差にならないよう、両端の傾きが 0 になる補間を使う。
+    // 線形のままだと 1 コマで 36 度動く箇所ができた (歩行区間の最大は 19 度、実測)。
+    static float Ease(float k) { k = Mathf.Clamp01(k); return k * k * (3f - 2f * k); }
+
+    /// <summary>歩行からのジャンプで、**いま接地している足で踏み切る** セットを選ぶ。
+    /// 左右の取り違えを避けるため、セット側が「踏切の瞬間にどちらが支持脚か」を
+    /// SupportIsLeftSide で申告し、ここではリグの leftToeBone / rightToeBone の高さと
+    /// 突き合わせるだけにしてある (ボーン名の左右入れ替えに依存しない)。</summary>
+    IGoblinJumpPoses PickRunJumpSet()
+    {
+        if (leftToeBone == null || rightToeBone == null) return GoblinJumpRun.I;
+        bool leftPlanted = Posture.InverseTransformPoint(leftToeBone.position).y
+                         < Posture.InverseTransformPoint(rightToeBone.position).y;
+        return leftPlanted == GoblinJumpRun.I.SupportIsLeftSide
+            ? (IGoblinJumpPoses)GoblinJumpRun.I
+            : GoblinJumpRunL.I;
+    }
+
+    void ApplyJumpBones(IGoblinJumpPoses set, float u, float t)
+    {
+        Vector3 hy, hx, luy, lux, lly, llx, ruy, rux, rly, rlx, lfy, lfx, rfy, rfx, lty, ltx, rty, rtx;
+        set.SampleHips(u, out hy, out hx);
+        set.SampleLeftUpLeg(u, out luy, out lux);
+        set.SampleLeftLeg(u, out lly, out llx);
+        set.SampleRightUpLeg(u, out ruy, out rux);
+        set.SampleRightLeg(u, out rly, out rlx);
+        set.SampleLeftFoot(u, out lfy, out lfx);
+        set.SampleRightFoot(u, out rfy, out rfx);
+        set.SampleLeftToe(u, out lty, out ltx);
+        set.SampleRightToe(u, out rty, out rtx);
+
+        // 腰の高さがこの動きの本体 (沈む/伸びる)。接地正規化済みなので GroundOffset は足さない。
+        Vector3 hp = set.SampleHipsPos(u);
+        Vector3 target = Posture.position + Posture.rotation * hp;
+        hipsBone.position = Vector3.Lerp(hipsBone.position, target, t);
+
+        BlendAimFull(hipsBone, hy, hx, t);
+        ApplyLegChain(leftUpLegBone, leftLegBone, leftFootBone, leftToeBone,
+            luy, lux, lly, llx, lfy, lfx, leftUpLegLen, leftLegLen, leftFootLen, t);
+        ApplyLegChain(rightUpLegBone, rightLegBone, rightFootBone, rightToeBone,
+            ruy, rux, rly, rlx, rfy, rfx, rightUpLegLen, rightLegLen, rightFootLen, t);
+        if (leftToeBone  != null) BlendAimFull(leftToeBone, lty, ltx, t);
+        if (rightToeBone != null) BlendAimFull(rightToeBone, rty, rtx, t);
+
+        // 上半身は歩行と同じく加算。基準は ApplyBasePose 直後に控えた向き (baseSpine ほか)。
+        // **親から子の順**に適用すること (Hips → Spine02 → Spine01 → Spine)。
+        float uw = t * jumpUpperBodyWeight;
+        float hw = t * jumpHeadWeight;
+        AimAdditive(spine02Bone, set.SampleSpine02Add(u), baseSpine02, uw);
+        AimAdditive(spine01Bone, set.SampleSpine01Add(u), baseSpine01, uw);
+        AimAdditive(spineBone,   set.SampleSpineAdd(u),   baseSpine,   uw);
+        AimAdditive(neckBone,    set.SampleNeckAdd(u),    baseNeck,    hw);
+        AimAdditive(headBone,    set.SampleHeadAdd(u),    baseHead,    hw);
+        float sw = t * walkShoulderWeight;
+        AimAdditive(leftShoulderBone,  set.SampleLeftShoulderAdd(u),  baseShoulderL, sw);
+        AimAdditive(rightShoulderBone, set.SampleRightShoulderAdd(u), baseShoulderR, sw);
+    }
+
+    /// <summary>案A の変調量。割り込み (案B) 中は歩容を止めているので 0。</summary>
+    float StaggerWalkAmount => staggerEnabled ? staggerIntensity : 0f;
+
+    /// <summary>もう一段強いよろけの量 (0-1)。1 段目が振り切る手前から重なって効く。</summary>
+    float StaggerHeavyAmount
+    {
+        get
+        {
+            if (!staggerEnabled || pot == null) return 0f;
+            float deg = Mathf.Abs(PotLateralDeg());
+            return Mathf.InverseLerp(staggerHeavyStartDeg,
+                Mathf.Max(staggerHeavyStartDeg + 0.1f, staggerHeavyFullDeg), deg);
+        }
+    }
+
+    // 案A: 足を外へ開いて支持面を広げ、腰を落とす。
+    // 腰を落とすときは **足首の位置を保ったまま膝を曲げる**。単に腰を下げると足が地面へ
+    // めり込み、接地補正が体ごと持ち上げて何も起きなくなる。
+    void ApplyStaggerStance()
+    {
+        float a = StaggerWalkAmount;
+        if (a <= 0.001f || hipsBone == null) return;
+
+        if (staggerStanceWidenDeg > 0.01f)
+        {
+            float deg = staggerStanceWidenDeg * a;
+            WidenLeg(leftUpLegBone, leftLegBone, leftFootBone, leftToeBone,
+                     +deg, leftUpLegLen, leftLegLen, leftFootLen);
+            WidenLeg(rightUpLegBone, rightLegBone, rightFootBone, rightToeBone,
+                     -deg, rightUpLegLen, rightLegLen, rightFootLen);
+        }
+
+        float heavy = StaggerHeavyAmount;
+
+        // もう一段: 腰を傾いた方へ振る。足は付いていかないので体ごと持っていかれて見える。
+        if (heavy > 0.001f && staggerHeavyLurch > 0.001f)
+            hipsBone.position += Posture.right * (Mathf.Sign(PotLateralDeg()) * staggerHeavyLurch * heavy);
+
+        float drop = staggerHipDrop * a + staggerHeavyHipDrop * heavy;
+        if (drop > 0.001f) DropHipsKeepingFeet(drop);
+    }
+
+    // 上脚を進行軸まわりに回して足を外へ開く。子は FK で置き直す。
+    void WidenLeg(Transform upLeg, Transform leg, Transform foot, Transform toe,
+                  float deg, float upLen, float legLen, float footLen)
+    {
+        if (upLeg == null) return;
+        Vector3 axis = Posture.forward;
+        upLeg.rotation = Quaternion.AngleAxis(deg, axis) * upLeg.rotation;
+        PositionFromParent(upLeg, leg, upLen);
+        PositionFromParent(leg, foot, legLen);
+        PositionFromParent(foot, toe, footLen);
+    }
+
+    // 腰を下げ、足首が元の位置に残るよう膝を曲げ直す (2 ボーン IK)。
+    void DropHipsKeepingFeet(float drop)
+    {
+        Vector3 lAnkle = leftFootBone != null ? leftFootBone.position : Vector3.zero;
+        Vector3 rAnkle = rightFootBone != null ? rightFootBone.position : Vector3.zero;
+        Vector3 lKnee = leftLegBone != null ? leftLegBone.position : Vector3.zero;
+        Vector3 rKnee = rightLegBone != null ? rightLegBone.position : Vector3.zero;
+
+        hipsBone.position -= Posture.up * drop;
+
+        SolveLegToAnkle(leftUpLegBone, leftLegBone, leftFootBone, leftToeBone,
+                        lAnkle, lKnee, leftUpLegLen, leftLegLen, leftFootLen);
+        SolveLegToAnkle(rightUpLegBone, rightLegBone, rightFootBone, rightToeBone,
+                        rAnkle, rKnee, rightUpLegLen, rightLegLen, rightFootLen);
+    }
+
+    // 2 ボーン IK。曲げ平面は元の膝位置で決めるので、膝の向きは元の歩容のまま。
+    void SolveLegToAnkle(Transform upLeg, Transform leg, Transform foot, Transform toe,
+                         Vector3 ankle, Vector3 kneeHint, float upLen, float legLen, float footLen)
+    {
+        if (upLeg == null || leg == null || foot == null) return;
+        Vector3 root0 = upLeg.position;
+        Vector3 d = ankle - root0;
+        float dist = Mathf.Clamp(d.magnitude, 1e-4f, upLen + legLen - 1e-4f);
+        Vector3 u = d.normalized;
+        float a = (upLen * upLen - legLen * legLen + dist * dist) / (2f * dist);
+        float h = Mathf.Sqrt(Mathf.Max(0f, upLen * upLen - a * a));
+        Vector3 n = Vector3.ProjectOnPlane(kneeHint - root0, u);
+        if (n.sqrMagnitude < 1e-8f) n = Vector3.ProjectOnPlane(Posture.forward, u);
+        n = n.normalized;
+        Vector3 knee = root0 + u * a + n * h;
+
+        AimLocalY(upLeg, (knee - root0).normalized);
+        PositionFromParent(upLeg, leg, upLen);
+        AimLocalY(leg, (ankle - knee).normalized);
+        PositionFromParent(leg, foot, legLen);
+        PositionFromParent(foot, toe, footLen);
+    }
+
+    // 2026-08-24: 上半身は歩行クリップの **平均姿勢からのズレ** だけを加算する。
+    // 絶対値で入れると、元クリップ (前かがみの重い歩き) の姿勢が、壺を頭上に担いだ
+    // BasePose の立ち姿勢を丸ごと押し潰してしまう (実測で上体が 60 度以上倒れた)。
+    //
+    // 基準は **ApplyBasePose 直後に控えた向き** を使う (baseSpine ほか)。ここで現在値を
+    // 読んではいけない: 腰を回した後なので骨盤の振れが混入し、重みを 0 にしても上体が
+    // 振れ続ける。重みは「歩行の振りをどれだけ乗せるか」であると同時に「骨盤の振れから
+    // どれだけ上体を切り離すか」でもあり、壺が水平に保たれるかを直接決める。
     void ApplyWalkUpperBody(float t)
     {
-        Vector3 y, x;
-        if (spineBone   != null) { GoblinWalk.SampleSpine(walkPhase, out y, out x);   BlendAimFull(spineBone, y, x, t); }
-        if (spine01Bone != null) { GoblinWalk.SampleSpine01(walkPhase, out y, out x); BlendAimFull(spine01Bone, y, x, t); }
-        if (spine02Bone != null) { GoblinWalk.SampleSpine02(walkPhase, out y, out x); BlendAimFull(spine02Bone, y, x, t); }
-        if (neckBone    != null) { GoblinWalk.SampleNeck(walkPhase, out y, out x);    BlendAimFull(neckBone, y, x, t); }
-        if (headBone    != null) { GoblinWalk.SampleHead(walkPhase, out y, out x);    BlendAimFull(headBone, y, x, t); }
+        float uw = t * walkUpperBodyWeight;
+        float hw = t * walkHeadWeight;
+        // **親から子の順**で適用すること。このリグの背骨は Hips → Spine02 → Spine01 → Spine
+        // (Spine が最上位で、首と肩がその子) という並びで、Spine02 が腰に最も近い。子を決めて
+        // から親を回すと、親の回転が子を引きずって設定値が壊れる (実測: 重み 0 でも背骨が
+        // 基準姿勢から 67 度ずれていた)。BasePose の並び順が根拠。
+        AimAdditive(spine02Bone, GoblinWalk.SampleSpine02Add(walkPhase), baseSpine02, uw);
+        AimAdditive(spine01Bone, GoblinWalk.SampleSpine01Add(walkPhase), baseSpine01, uw);
+        AimAdditive(spineBone,   GoblinWalk.SampleSpineAdd(walkPhase),   baseSpine,   uw);
+        AimAdditive(neckBone,    GoblinWalk.SampleNeckAdd(walkPhase),    baseNeck,    hw);
+        AimAdditive(headBone,    GoblinWalk.SampleHeadAdd(walkPhase),    baseHead,    hw);
+
+        // 肩は腕 IK (SolveArm) より **前** に動く。IK は壺の取っ手を世界座標で狙うので、
+        // 手の位置は変わらず、肩線の傾きと上腕の付け根だけが歩行に連動する。
+        float sw = t * walkShoulderWeight;
+        AimAdditive(leftShoulderBone,  GoblinWalk.SampleLeftShoulderAdd(walkPhase),  baseShoulderL, sw);
+        AimAdditive(rightShoulderBone, GoblinWalk.SampleRightShoulderAdd(walkPhase), baseShoulderR, sw);
+    }
+
+    // baseRot (BasePose が置いた向き) に歩行の差分 add を掛けた向きへ、weight で寄せる。
+    // 座標系に注意: GoblinWalk の焼き込みは root ローカル、BlendAimFull が受け取るのも
+    // Posture ローカルなので、world の baseRot をいったん Posture ローカルへ落としてから
+    // 差分を掛ける。ここを world のまま渡すと Posture の回転が二重に掛かる。
+    void AimAdditive(Transform bone, Quaternion add, Quaternion baseRot, float weight)
+    {
+        if (bone == null) return;
+        Quaternion baseLocal = Quaternion.Inverse(Posture.rotation) * baseRot;
+        Quaternion local = Quaternion.Slerp(baseLocal, add * baseLocal, weight);
+        BlendAimFull(bone, local * Vector3.up, local * Vector3.right, 1f);
     }
 
     // ADDED 2026-08-10: blends the Hips + 4 leg bones (already placed by ApplyBasePose()/
@@ -866,8 +1516,24 @@ public class GoblinCarryRig : MonoBehaviour
     // Direction: the very first playtest reported the lean backwards, so `leanRight` below is the
     // flipped version of the original physical-reasoning guess (see git history for that
     // reasoning) -- treat this sign as empirically-fixed now, not re-derived from first principles.
+    /// <summary>担ぎ姿勢の偏りを差し引いた、壺の左右の倒れ (度)。正 = ゴブリンの右へ倒れている。
+    /// よろけ・引っぱり・踏ん張りはすべてこの値で判定する。</summary>
+    float PotLateralDeg()
+    {
+        if (pot == null) return 0f;
+        float d = Mathf.Asin(Mathf.Clamp(Vector3.Dot(pot.up, root.right), -1f, 1f)) * Mathf.Rad2Deg;
+        return d - potTiltBiasDeg;
+    }
+
     void ApplyStagger()
     {
+        if (!staggerEnabled)
+        {
+            // 止めている間は強度も 0 に落とす。転倒の判定と踏ん張りがこれを見ているため。
+            staggerIntensity = 0f;
+            staggerPhase = 0f;
+            return;
+        }
         // **世界基準**での壺の傾き。ゴブリンに対する相対角ではない。
         // pot.rotation はこの LateUpdate の末尾で更新されるので、ここで読むのは
         // 1 フレーム前の姿勢。よろけの判定にとっては問題にならない遅れ。
@@ -878,8 +1544,8 @@ public class GoblinCarryRig : MonoBehaviour
         if (pot != null)
         {
             Vector3 up = pot.up;
-            leanSide = Vector3.Dot(up, root.right);
-            float lateralDeg = Mathf.Asin(Mathf.Clamp(leanSide, -1f, 1f)) * Mathf.Rad2Deg;
+            float lateralDeg = PotLateralDeg();
+            leanSide = -lateralDeg;   // 従来の符号 (leanSide < 0 を「右」と呼ぶ実測合わせ) を維持
             float foreDeg = Mathf.Asin(Mathf.Clamp(Vector3.Dot(up, root.forward), -1f, 1f)) * Mathf.Rad2Deg;
             float weighted = foreDeg * staggerPitchWeight;
             tiltDeg = Mathf.Sqrt(lateralDeg * lateralDeg + weighted * weighted);
@@ -908,51 +1574,27 @@ public class GoblinCarryRig : MonoBehaviour
         float targetIntensity = reversalPending ? 0f : rawTargetIntensity;
         staggerIntensity = Mathf.MoveTowards(staggerIntensity, targetIntensity, staggerBlendSpeed * Time.deltaTime);
 
-        if (staggerIntensity > 0.001f)
-            staggerPhase = Mathf.Repeat(staggerPhase + Time.deltaTime / Mathf.Max(0.01f, staggerCycleDuration), 1f);
-        else
-            staggerPhase = 0f;
-
-        if (staggerIntensity <= 0.001f || hipsBone == null) return;
-
-        bool leanRight = staggerLeanRight;
-
-        GoblinStagger.SampleHips(staggerPhase, leanRight, out Vector3 hy, out Vector3 hx);
-        GoblinStagger.SampleLeftUpLeg(staggerPhase, out Vector3 luy, out Vector3 lux);
-        GoblinStagger.SampleLeftLeg(staggerPhase, out Vector3 lly, out Vector3 llx);
-        GoblinStagger.SampleRightUpLeg(staggerPhase, out Vector3 ruy, out Vector3 rux);
-        GoblinStagger.SampleRightLeg(staggerPhase, out Vector3 rly, out Vector3 rlx);
-        GoblinStagger.SampleLeftFoot(staggerPhase, out Vector3 lfy, out Vector3 lfx);
-        GoblinStagger.SampleRightFoot(staggerPhase, out Vector3 rfy, out Vector3 rfx);
-
-        BlendAimFull(hipsBone, hy, hx, staggerIntensity);
-        ApplyLegChain(leftUpLegBone, leftLegBone, leftFootBone, leftToeBone,
-            luy, lux, lly, llx, lfy, lfx, leftUpLegLen, leftLegLen, leftFootLen, staggerIntensity);
-        ApplyLegChain(rightUpLegBone, rightLegBone, rightFootBone, rightToeBone,
-            ruy, rux, rly, rlx, rfy, rfx, rightUpLegLen, rightLegLen, rightFootLen, staggerIntensity);
-
-        // Stagger toward the side it's leaning, plus forward -- "よろけながら斜めに進んでいく"
-        // per the original animation spec. Goes through CharacterController.Move() (not a raw
-        // transform.position edit) since GoblinLocomotion already drives this same object via the
-        // CharacterController and a direct position write would fight/desync with that.
-        if (controller != null)
+        // ---- 案B: 傾いた方向へ進行方向を引っぱる ----
+        // モードを作らず、傾きの大きさに応じて連続的に強くする。歩行は止めない。
+        // 失うのは「位置」なので、崖や川のそばでだけ本当に危険になる。
+        // 引っぱりは **歩いている間だけ**。止まっているのに横へ滑るのは、進行方向が
+        // 引っぱられるという意図とも違うし、操作していないのに位置が動くので理不尽 (ユーザー報告)。
+        bool movingNow = locomotion != null && locomotion.IsMoving;
+        if (controller != null && pot != null && movingNow)
         {
-            float sideSign = (leanRight ? 1f : -1f) * (invertStaggerMoveSide ? -1f : 1f);
-            Vector3 sideDir = Posture.right * sideSign;
-            Vector3 moveDir = (Posture.forward + sideDir).normalized;
-            // FIXED 2026-08-15 (バグ報告「壺に傾きがあるときジャンプできない」):
-            // CharacterController.isGrounded は **最後に呼ばれた Move** の結果で決まる。
-            // この横移動だけの Move が毎フレーム最後 (LateUpdate) に走ると接地が外れ、
-            // 傾き > staggerThresholdDeg の間ずっと GoblinLocomotion の canJump が
-            // false になっていた (実測: tilt=0.6 で 60 フレーム後 grounded=False)。
-            // 接地中は下向き成分を混ぜて接地を保つ (GoblinLocomotion の
-            // verticalVelocity=-1 と同じ手法)。空中 (ジャンプ中) では混ぜない --
-            // 混ぜるとよろけ中のジャンプだけ弾道が重くなる。
-            // ここで読む isGrounded は今フレームの GoblinLocomotion.Update の Move の
-            // 結果なので、着地状態を正しく表している。
-            Vector3 staggerMove = moveDir * (staggerMoveSpeed * staggerIntensity);
-            if (controller.isGrounded) staggerMove += Vector3.down * 1f;
-            controller.Move(staggerMove * Time.deltaTime);
+            float deg = PotLateralDeg();
+            float drift = Mathf.InverseLerp(staggerDriftStartDeg,
+                Mathf.Max(staggerDriftStartDeg + 0.1f, staggerDriftFullDeg), Mathf.Abs(deg));
+            if (drift > 0.001f && jumpWeight < 0.01f)
+            {
+                // 壺が倒れている側へ流される。前進はそのままなので、進路が弧を描く。
+                float speed = staggerDriftSpeed * drift + staggerHeavyDriftSpeed * StaggerHeavyAmount;
+                Vector3 push = Posture.right * Mathf.Sign(deg) * speed;
+                // 下向き成分を残す: 水平だけ Move すると isGrounded が落ちてジャンプできなくなる
+                // (2026-08-19 の既知の不具合。よろけの押し出しでも同じ)。
+                push.y = -1f;
+                controller.Move(push * Time.deltaTime);
+            }
         }
     }
 

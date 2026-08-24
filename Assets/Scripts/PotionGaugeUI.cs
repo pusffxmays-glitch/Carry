@@ -101,9 +101,9 @@ public class PotionGaugeUI : MonoBehaviour
     // 平地では輪はドットに重なり、坂では輪だけがズレる。「坂ではドットを逆に倒して
     // 輪を中心に戻す」という斜面バランスの本質が UI からそのまま読める。
     [Header("Spirit level (水平器: 壺のワールド傾き)")]
-    [Tooltip("この角度 (度) でパッドの端に達する。矢印キーで届く最大傾き (約 18 度) に合わせてある。")]
+    [Tooltip("この角度 (度) でパッドの端に達する。転倒の危険度が最大になる角 (staggerThresholdDeg + staggerRampDeg)。")]
     public float worldTiltFullDeg = 18f;
-    [Tooltip("よろけ始める角 (度)。パッドに危険円として描く。GoblinCarryRig.staggerThresholdDeg と合わせること。")]
+    [Tooltip("転倒の秒読みが始まる角 (度)。パッドに危険円として描く。GoblinCarryRig.staggerThresholdDeg と合わせること。")]
     public float worldTiltWarnDeg = 5.5f;
     [Tooltip("気泡リングの色 (安全域)。危険円を超えると赤へ寄る。")]
     public Color bubbleColor = new Color(0.35f, 0.9f, 1f, 0.95f);

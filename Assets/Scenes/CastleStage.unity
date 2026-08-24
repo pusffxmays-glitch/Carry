@@ -3551,6 +3551,8 @@ MonoBehaviour:
   maxDistance: 10
   yawFollowLerp: 6
   followLerp: 15
+  pullInLerp: 10
+  releaseLerp: 3
 --- !u!114 &877844940
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -6263,11 +6265,15 @@ MonoBehaviour:
   turnSpeed: 110
   gravity: -20
   terminalVelocity: -20
-  jumpSpeed: 6
+  jumpSpeed: 7
+  jumpAnticipation: 0.12
+  jumpAnticipationMoving: 0.08
+  debugJumpRequest: 0
+  debugMoveForward: 0
   hotJumpSpeed: 8.5
   jumpSuppressedUntil: 0
   parrySoftFallSpeed: 3.5
-  walkJumpBoost: 1.4
+  walkJumpBoost: 3
   carryAccel: 3.5
   carryDecel: 5
   carryTurnLatAccel: 1.4
@@ -6313,26 +6319,73 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::GoblinCarryRig
   armInputSpeed: 2.4
   pitchInputSpeed: 3.6
+  mouseBalance: 1
+  mouseSensitivity: 0.006
+  lockCursorWhileCarrying: 1
+  mouseMaxSpeed: 4000
+  mouseSmoothing: 25
+  invertMouseX: 0
+  invertMouseY: 0
+  mouseAbsolute: 1
+  mouseAbsoluteRangePx: 220
   armBalance: 0
   pitchBalance: 0
   pitchRangeDeg: 18
   pitchHandReach: 0.07
   balanceApplySpeed: 1.8
-  heightRange: 0.2
+  heightRange: 0.24
   leftPalmSign: -1
   rightPalmSign: 1
+  braceMinTiltDeg: 4
+  braceMinInput: 0.15
+  braceWeight: 0.8
+  braceBlendTime: 0.18
+  braceHold: 0.18
+  braceShoulderLevel: 0.9
+  staggerHeavyStartDeg: 16
+  staggerHeavyFullDeg: 24
+  staggerHeavyStrideShrink: 0.4
+  staggerHeavyHipDrop: 0.06
+  staggerHeavyLurch: 0.15
+  staggerHeavyDriftSpeed: 0.45
+  staggerDriftStartDeg: 10
+  staggerDriftFullDeg: 22
+  staggerDriftSpeed: 0.45
+  potNeutralRollDeg: 3.7
+  potTiltBiasDeg: 1.2
+  staggerEnabled: 1
+  staggerStrideShrink: 0.5
+  staggerCadenceBoost: 1.7
+  staggerStanceWidenDeg: 8
+  staggerHipDrop: 0.07
+  staggerLeanWeight: 0.45
   staggerThresholdDeg: 5.5
-  staggerRampDeg: 10.5
+  staggerRampDeg: 18
   staggerPitchWeight: 0.35
   staggerCycleDuration: 2.5
   staggerBlendSpeed: 3
   staggerMoveSpeed: 1
   invertStaggerMoveSide: 1
-  walkCycleDuration: 2.5
-  walkStrideRefSpeed: 1
+  walkCycleDuration: 3.375
+  walkStrideRefSpeed: 0.4531
+  walkShoulderWeight: 0.35
+  walkUpperBodyWeight: 0.2
+  walkHeadWeight: 0.08
+  jumpCrouchTime: 0.06
+  jumpCrouchTimeMoving: 0.04
+  jumpLaunchAt: 0.8
+  jumpTakeoffTime: 0.15
+  jumpAirTime: 0.18
+  jumpLandTime: 0.09
+  jumpRecoverTime: 0.26
+  jumpUpperBodyWeight: 0.45
+  jumpHeadWeight: 0.15
+  jumpLandMinAirtime: 0.15
   walkBlendSpeed: 4
   walkArmBobAmplitude: 0.02
   potScale: {x: 2.366, y: 2.366, z: 2.366}
+  potFollowRate: 15
+  potFollowRotRate: 60
   postureRoot: {fileID: 0}
 --- !u!114 &1578526215
 MonoBehaviour:
@@ -6403,6 +6456,11 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::NarrowBeamSensor
   rayLength: 0.6
+  autoNarrowWidth: 0
+  edgeDropTolerance: 0.35
+  narrowHoldSeconds: 0.25
+  narrowEngageSeconds: 0.4
+  autoSpeedMultiplier: 0.55
 --- !u!114 &1578526219
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -6417,8 +6475,15 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::GoblinPotActions
   actionKey: 32
   pickupRange: 1.6
+  pickupHeightRange: 1.2
   pickupStandDistance: 1
+  spillTipAngle: 125
+  spillTipSeconds: 0.55
+  spillTipLift: 0.45
+  fallEnabled: 0
   fallAfterSeconds: 0.9
+  fallRecallSeconds: 0.8
+  fallRecallStrength: 5
   fallCooldown: 2
   fallRecoverFrames: 18
   fallRecoverSpeed: 1.4
@@ -6430,9 +6495,17 @@ MonoBehaviour:
   cushionJustCalm: 0.5
   cushionFailNudge: 0.25
   cushionJumpSuppress: 0.2
+  significantFallAirtime: 0.35
+  rampCalmClamp: 0.5
+  walkCalmClamp: 1
+  runCalmClamp: 0.7
+  balanceCalmClamp: 1.3
+  balanceInertiaRate: 1.2
+  cushionMissJolt: 5
   debugParryHud: 1
   putDownSpeed: 2
   pickUpSpeed: 1.8
+  sweptByRiver: 0
 --- !u!114 &1578526220
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -8356,10 +8429,15 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::FluidCore
   particleCount: 16384
+  ballisticMode: 0
   solverIterations: 4
   minSubSteps: 6
+  stableSubstepDt: 0.0037
   maxSubSteps: 20
   cflSpeedMargin: 1.6
+  containerTravelBudget: 1.5
+  emergencyTravelSpacing: 1.5
+  escapedIgnoreCalm: 1
   kernelRadiusScale: 2
   viscosity: 4.5
   boundaryViscosity: 0.55
@@ -8374,9 +8452,15 @@ MonoBehaviour:
   solverRelaxation: 0.12
   maxDeltaPPerSpacing: 0.25
   maxSpeed: 5
+  maxSpeedFalling: 14
   maxSpeedInPot: -1
   fillFraction: 0.95
   initialSettleSeconds: 0.7
+  startupCalmSimSeconds: 30
+  startupCalmClamp: 0.6
+  startupCalmReleaseSpeed: 0.45
+  startupCalmReleaseContainerSpeed: 0.8
+  xsphBlendCap: 0.75
   simPadding: 0.45
   fallZoneBelow: 1.2
   groundY: 0
@@ -8388,12 +8472,34 @@ MonoBehaviour:
   groundLifetime: 10
   escapeAboveRim: 1
   escapeMarginSpacings: 3
+  escapeFarSpacings: 8
   boundsRestitution: 0.02
   boundsFriction: 0.15
+  slopeProfileHeights: []
+  slopeZStart: 0
+  slopeZEnd: 0
+  slopeRestitution: 0.35
+  slopeFriction: 0.03
+  spawnBoxMin: {x: 0, y: 0, z: 0}
+  spawnBoxSize: {x: 0, y: 0, z: 0}
+  spawnVelocity: {x: 0, y: 0, z: 0}
+  spawnChance: 1
   collideWithGroundSurfaces: 1
+  collideWithCourseColliders: 1
+  courseColliderMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  maxSolidBoxes: 32
+  maxCourseBoxSize: 8
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
+  stepEveryNFrames: 1
   synchronousReadback: 1
+  classifyInterval: 3
+  watchdogStepMs: 120
+  watchdogFrames: 5
+  watchdogSafeSubSteps: 4
+  recoverTiltLimitDeg: 60
 --- !u!114 &2131736044
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -8408,6 +8514,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::FluidSurface
   voxelsPerSpacing: 3
   splatRadiusPerSpacing: 1.5
+  escapedSplatScale: 0.75
   isoValue: 0.45
   smoothingPasses: 2
   normalEpsVoxels: 1.2

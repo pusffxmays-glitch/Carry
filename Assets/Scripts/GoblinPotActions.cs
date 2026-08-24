@@ -46,8 +46,26 @@ public class GoblinPotActions : MonoBehaviour
     public float spillTipLift = 0.45f;
 
     [Header("Fall")]
+    [Tooltip("転倒を有効にする。2026-08-24 は崩れの見せ方を固めるため一時的にオフ (ユーザー指示)。")]
+    public bool fallEnabled = false;
+
     [Tooltip("よろけ強度が最大のままこの秒数経過したら転倒する。")]
     public float fallAfterSeconds = 0.9f;
+
+    // 2026-08-24: 転倒の「支払い先」を残量からタイムへ寄せる。
+    // 失敗の役割分担を分けるため:
+    //   こぼれ    残量をじわじわ削る  (急いだ代償)
+    //   転倒      **時間を大きく持っていく**  (バランスを崩した代償)
+    //   川へ落下  全部失う            (場所を間違えた代償)
+    // 従来の転倒は残量も時間も最大で持っていくので、川と役割が重なっていた。
+    // 転倒しきった後、こぼれたポーションを壺へ吸い戻す時間 (秒) と強さ。
+    // 戻る量は「時間 x 強さ」で決まる (RecallSpill は割合ではなく持続時間を取る)。
+    // 0 秒にすると従来どおりの全損になる。着地パリィは 0.5〜0.7 秒 / 強さ 6〜10。
+    [Tooltip("転倒後にこぼれたポーションを吸い戻す時間 (秒)。0 で全損 (従来の挙動)。")]
+    public float fallRecallSeconds = 0.8f;
+
+    [Tooltip("転倒後の吸い戻しの強さ。着地パリィは 6〜10。")]
+    public float fallRecallStrength = 5f;
     [Tooltip("転倒の再トリガー禁止時間 (s)。")]
     public float fallCooldown = 2.0f;
     // 2026-08-16: 転倒クリップの序盤 (踏ん張りフェーズ f1-19、壺リリースは f22) の間は
@@ -564,6 +582,8 @@ public class GoblinPotActions : MonoBehaviour
     // ---- 転倒 ----
     void UpdateFallTrigger()
     {
+        // 2026-08-24: 転倒は一時停止 (ユーザー指示)。崩れの見せ方を固めてから戻す。
+        if (!fallEnabled) { staggerMaxTimer = 0f; return; }
         if (rig == null || anim.OneShotActive || fallCooldownTimer > 0f) { staggerMaxTimer = 0f; return; }
         bool grounded = cc == null || cc.isGrounded;
         if (grounded && rig.StaggerIntensity01 >= 0.999f) staggerMaxTimer += Time.deltaTime;
@@ -607,6 +627,10 @@ public class GoblinPotActions : MonoBehaviour
             {
                 Current = State.PotDown;   // 壺は横の地面。拾い直すところから
                 if (loco != null) loco.movementLocked = false;
+                // 転倒はタイムで払わせる失敗なので、残量は全損にしない (宣言部の注記を参照)。
+                // 拾い直しに掛かる時間そのものが主な代償。
+                if (fluid != null && fallRecallSeconds > 0.001f)
+                    fluid.RecallSpill(fallRecallSeconds, fallRecallStrength);
                 // 倒すのは TipPotForSpill が引き続き担当。ここは高さを地面へ合わせるだけ。
                 StartCoroutine(SettlePotToGround(spillTipLift));
             },

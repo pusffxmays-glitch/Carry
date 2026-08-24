@@ -28,7 +28,52 @@ public class GoblinLocomotion : MonoBehaviour
     public float terminalVelocity = -20f;
 
     [Header("Jump")]
-    public float jumpSpeed = 6f;
+    // 2026-08-24: 6 → 7 (ユーザー指定「もう少し高くてもいい」)。重力 -20 なので
+    // 到達高さは 6^2/40 = 0.90m → 7^2/40 = 1.23m。
+    public float jumpSpeed = 7f;
+
+    // 溜め (anticipation)。押した瞬間に飛ばさず、この時間だけしゃがんでから踏み切る。
+    // これが無いと体がそのまま上へ跳ね上がるだけでジャンプに見えない (ユーザー指摘)。
+    // 長くすると入力が重く感じるので、目に見える最小限に留めること。
+    [Tooltip("静止からのジャンプの溜め時間 (秒)。長くすると重く感じる。")]
+    public float jumpAnticipation = 0.12f;
+
+    // 走りながら屈む人はいない。移動中は既に脚に荷重が乗っているので、溜めは短く済む。
+    // ここを静止と同じにすると、歩いていて跳ぼうとした瞬間に一度止まったように見える。
+    // 0.06 だと歩行姿勢から踏切姿勢へ 4 コマで移り、そこがつなぎ目の最大 (23度/コマ) に
+    // なっていた。0.08 で 18 度まで下がり、最大の位置も入口から離れる (実測)。
+    [Tooltip("歩行/走行中のジャンプの溜め時間 (秒)。静止時より短くする。短すぎると踏切で姿勢が飛ぶ。")]
+    public float jumpAnticipationMoving = 0.08f;
+
+    /// <summary>入力から実際に地面を離れるまでの時間。姿勢側 (GoblinCarryRig) が
+    /// 「沈み込み + 伸び上がりの途中まで」として持っているので、あればそれを使う。
+    /// リグが無い場合 (壺なし等) だけ下の jumpAnticipation を使う。</summary>
+    public float CurrentJumpAnticipation
+    {
+        get
+        {
+            var rig = GetComponent<GoblinCarryRig>();
+            if (rig != null) return rig.PreLaunchTime(IsMoving);
+            return IsMoving ? jumpAnticipationMoving : jumpAnticipation;
+        }
+    }
+    float pendingJumpAt = -1f;
+
+    // 調査用: 入力なしでジャンプを起こす。ゲームビューが非フォーカスだと InputSystem への
+    // 入力注入が毎フレーム破棄されるため、エディタ外 (MCP) からジャンプを試せない (実測)。
+    // 立てた次の Update で 1 回だけ消費される。
+    [HideInInspector] public bool debugJumpRequest;
+
+    // 調査用: 入力なしで前進させる。ゲームビューが非フォーカスだと入力注入が破棄されるため、
+    // エディタ外 (MCP) から「歩きながらの挙動」を観測できない。true の間ずっと前進する。
+    [HideInInspector] public bool debugMoveForward;
+
+    /// <summary>溜め中 (入力済みだがまだ踏み切っていない) か。</summary>
+    public bool JumpCharging => pendingJumpAt > 0f;
+    /// <summary>現在の上下速度 (m/s)。ジャンプ姿勢の上昇/落下判定に使う。</summary>
+    public float VerticalVelocity => verticalVelocity;
+    /// <summary>接地しているか。</summary>
+    public bool Grounded => controller != null && controller.isGrounded;
     // 熱い床 (マグマ、2026-08-16 ギミック 9): 踏むと強制的に高く飛ばされる。
     [Tooltip("熱い床を踏んだときの強制ジャンプ初速 (m/s)。8.5 で高さ約 3.7m (通常ジャンプ 1.8m の 2 倍)。")]
     public float hotJumpSpeed = 8.5f;
@@ -64,7 +109,11 @@ public class GoblinLocomotion : MonoBehaviour
     // 走りジャンプ (runSpeed 5 ≒ 3m) には掛けない。
     // 追補 23: walkSpeed 1.5 → 1.8 に伴い 1.6 → 1.4 へ (飛距離 1.8×1.4×0.6 = 1.51m < 1.6m を維持)。
     [Tooltip("歩き中ジャンプの水平速度倍率。飛距離 ≒ walkSpeed x これ x 0.6s。ジャンプ台の隙間 1.6m を歩きで越えられない値にすること (walkSpeed 1.8 なら 1.48 未満)。")]
-    public float walkJumpBoost = 1.4f;
+    // 2026-08-24 実機修正: 飛距離が足りないという指摘。原因は walkSpeed が 0.9 だったこと
+    // (1.5 だと思い込んでいた)。0.9 x 1.4 = 1.26m/s で滞空 0.70 秒 = 0.9m しか進まない。
+    // 3.0 で 2.7m/s = 約 1.9m。歩行速度そのものを上げると歩容の足が滑るので、
+    // ジャンプ中だけの倍率で稼ぐ ([[carry-walk-stride-decoupling]] 参照)。
+    public float walkJumpBoost = 3.0f;
 
     // 2026-08-16 追補 13: 運搬中の加減速ランプ。
     // 満杯の壺は静止液面がリム直下 (fillFraction 0.95) にあり、瞬間的な速度変化
@@ -170,7 +219,7 @@ public class GoblinLocomotion : MonoBehaviour
         if (kb != null)
         {
             // 移動は WASD。矢印キーは壺のバランス操作 (GoblinCarryRig) に割り当てている。
-            if (kb.wKey.isPressed) moveZ += 1f;
+            if (kb.wKey.isPressed || debugMoveForward) moveZ += 1f;
             if (kb.sKey.isPressed) moveZ -= 1f;
             if (kb.dKey.isPressed) turnX += 1f;
             if (kb.aKey.isPressed) turnX -= 1f;
@@ -216,8 +265,9 @@ public class GoblinLocomotion : MonoBehaviour
         // 水に浮いている間もジャンプ可 (川から岸へ上がる手段)。
         bool inWaterNow = swimmer != null && swimmer.InWater;
         bool canJump = (controller.isGrounded || inWaterNow) && !inJumpState;
-        bool jumpTriggered = kb != null
-            && kb.spaceKey.wasPressedThisFrame
+        bool jumpPressed = (kb != null && kb.spaceKey.wasPressedThisFrame) || debugJumpRequest;
+        debugJumpRequest = false;
+        bool jumpTriggered = jumpPressed
             && canJump
             && Time.time >= jumpSuppressedUntil;   // 追補 15: 着地クッション直後の誤ジャンプ防止
 
@@ -245,7 +295,14 @@ public class GoblinLocomotion : MonoBehaviour
         // Vertical velocity is resolved once per frame -- computing it separately inside
         // both the moving/stationary branches let a same-frame jump impulse get immediately
         // stomped back to -1 by the grounded check, so it lives here instead.
-        if (jumpTriggered) verticalVelocity = jumpSpeed;
+        // 通常ジャンプは押した瞬間ではなく、溜めが終わってから踏み切る (jumpAnticipation)。
+        // 熱い床は演出上の溜めが無いので即時のまま。
+        if (jumpTriggered) pendingJumpAt = Time.time + CurrentJumpAnticipation;
+
+        bool launchNow = pendingJumpAt > 0f && Time.time >= pendingJumpAt;
+        if (launchNow) pendingJumpAt = -1f;
+
+        if (launchNow) verticalVelocity = jumpSpeed;
         else if (hotLaunch) verticalVelocity = hot != null ? hot.launchSpeed : hotJumpSpeed;
         else ApplyVerticalVelocity();
 
