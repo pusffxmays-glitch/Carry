@@ -205,10 +205,15 @@ public class GoblinPotActions : MonoBehaviour
     [Tooltip("着地クッションの伸び上がり (折り返し以降) の再生速度。1 = 素材どおり。")]
     [Range(0.2f, 1f)] public float cushionRiseSpeed = 0.5f;
 
-    [Tooltip("パリー成功時にヒットストップ + スローモーションを入れる。")]
-    public bool cushionSlowMo = true;
     bool cushionPressed;         // この滞空中に Space を押したか
     float cushionPressTime = -999f;
+
+    [Tooltip("着地クッションを加算再生する (担ぎ姿勢からの差分)。切ると従来の絶対再生に戻る。A/B 用。")]
+    public bool cushionAdditive = true;
+    // 2026-08-25: 着地クッションは **加算再生** (担ぎ姿勢からの差分) にしてある。
+    // 体は運搬パイプラインが書き続けるので、クッション中でも歩容・地形の傾き・
+    // バランス入力がそのまま生きる。「着地ポーズのまま滑る」「歩き出しが遅れる」ために
+    // 一時期入れていた「途中で打ち切る」処理は、これで不要になったので削除した。
 
     // ---- パリーデバッグ HUD (2026-08-16: 「全然発動しない」調査用) ----
     [Header("Debug")]
@@ -556,6 +561,17 @@ public class GoblinPotActions : MonoBehaviour
         }
     }
 
+    // 壺内の calm は着地から 0.8〜1.0 秒で切れる設定だが、クッションのクリップは 1.05 秒ある
+    // (伸び上がりを cushionRiseSpeed で半速にしているため)。つまり **伸び上がりの終盤が
+    // 無防備**だった。クリップが終わるまで延長する。
+    void ExtendCalmThroughHandover(bool just)
+    {
+        float hand = rig != null ? rig.potHandoverSeconds : 0.45f;
+        float fade = anim != null ? anim.handoverFadeSeconds : 0.25f;
+        BeginFluidCalm(just ? cushionJustCalm : cushionCalm);
+        hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + Mathf.Max(hand, fade) + 0.2f);
+    }
+
     void DoCushion(bool just)
     {
         // 走り着地 (水平速度 3 超) は深いスタンスのバリエーション
@@ -565,8 +581,13 @@ public class GoblinPotActions : MonoBehaviour
             // 等速で再生すると壺が最大 0.33 m/s (深いほうは 0.39 m/s) で持ち上がり、
             // パリーが成功しているのに戻り際でこぼれていた (ユーザー報告)。
             // 折り返しは壺の速度が 0 になる点なので、そこで速度を切り替えても段差は出ない。
-            anim.PlayOneShot(clip, reverse: false, drivePotToEnd: true, potEvent: null, done: null,
-                             slowFromFrame: clip.LowestPotFrame, slowSpeed: cushionRiseSpeed);
+            anim.PlayOneShot(clip, reverse: false, drivePotToEnd: true, potEvent: null,
+                             done: () => ExtendCalmThroughHandover(just),
+                             slowFromFrame: clip.LowestPotFrame, slowSpeed: cushionRiseSpeed,
+                             // 担ぎ姿勢からの **差分** として乗せる。終端で差分が 0 になるので、
+                             // 「クリップの終端姿勢 → 担ぎ姿勢」の受け渡しそのものが無くなる
+                             // (従来はここで手が 23cm・前腕が 32cm 動いていた)。
+                             additive: cushionAdditive);
         // 滞空 calm (1.2) よりさらに強く絞って着地衝撃を吸収する
         BeginFluidCalm(just ? cushionJustCalm : cushionCalm);
         hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + (just ? 1.0f : 0.8f));
@@ -579,9 +600,8 @@ public class GoblinPotActions : MonoBehaviour
         // ゲージの色も同色系でフラッシュ
         if (gaugeUI == null) gaugeUI = FindFirstObjectByType<PotionGaugeUI>();
         if (gaugeUI != null) gaugeUI.FlashParry(just);
-        // 2026-08-24: 成功の瞬間を短く止めてスローにする (ストリートファイター 6 のパリー)。
-        // リングも発光もスケール時間で動くので、まとめてゆっくり見えるようになる。
-        if (cushionSlowMo) ParrySlowMo.Play(just);
+        // 2026-08-25: ヒットストップ + スローモーション (ParrySlowMo) は
+        // 「違和感がすごい」との判断で削除した。timeScale はもう触らない。
     }
 
     // 成功フィードバック: ポーションの発光を一瞬強める (Bloom が滲ませてくれる)

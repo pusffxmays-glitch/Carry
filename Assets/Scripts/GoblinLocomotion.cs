@@ -83,6 +83,10 @@ public class GoblinLocomotion : MonoBehaviour
     // 着地クッション (追補 15): 着地直後の Space をジャンプにしない猶予。
     // 「着地直前に押すつもりが僅かに遅れた」入力が意図しないジャンプに化けるのを防ぐ。
     [HideInInspector] public float jumpSuppressedUntil;
+    /// <summary>診断用: Animator がジャンプ状態か。</summary>
+    public bool InJumpState { get; private set; }
+    /// <summary>診断用: 離陸速度で横移動が固定されているか。</summary>
+    public bool JumpLockActive { get; private set; }
     /// <summary>熱い床で飛ばされた瞬間 true を 1 回返す (「あちち」アニメ再生用)。</summary>
     public bool ConsumeHotJump() { bool v = hotJumpQueued; hotJumpQueued = false; return v; }
     /// <summary>熱い床ジャンプで滞空中か (着地で false)。アニメの早期終了判定用。</summary>
@@ -318,8 +322,22 @@ public class GoblinLocomotion : MonoBehaviour
         if (Time.time < softLandUntil && !controller.isGrounded)
             verticalVelocity = Mathf.Max(verticalVelocity, -parrySoftFallSpeed);
 
+        // 2026-08-25 (報告「静態パリー後に歩き出しまでに遅延がある」): ジャンプの
+        // アニメーション状態は **着地したあとも ~0.8 秒続く**。その間ずっと横移動が
+        // 離陸時の速度に固定されるので、静止ジャンプ (離陸速度 0) では着地後 0.8 秒
+        // 一切歩き出せなかった (実測: 立ちジャンプ着地の 0.62〜1.44 秒が速度ちょうど 0。
+        // パリーの有無に関係なく出る)。離陸速度を保つ意味があるのは滞空中だけなので、
+        // 一度足が地面を離れて、また接地したらロックを解く。
+        // 接地している間はロックしない。実測では、静止ジャンプの Animator の
+        // ジャンプ状態が **着地の 0.5 秒後に始まり 0.85 秒続く** (静止中は
+        // animator.speed = 0 で凍っているため、歩き出して初めて遷移が走る)。
+        // その間ずっと横移動が離陸速度 = 0 に固定され、「パリーのあと歩き出せない」の
+        // 正体になっていた。離陸速度を保つ意味があるのは滞空中だけ。
+        bool jumpLockActive = inJumpState && !controller.isGrounded;
+        InJumpState = inJumpState; JumpLockActive = jumpLockActive;
+
         Vector3 horizontalMove = Vector3.zero;
-        if (inJumpState)
+        if (jumpLockActive)
         {
             // Keep the takeoff direction/speed locked for the whole jump so late Space taps
             // (or releasing the arrow key mid-air) can't alter it.

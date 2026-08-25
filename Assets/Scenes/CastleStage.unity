@@ -6506,7 +6506,6 @@ MonoBehaviour:
   balanceInertiaRate: 1.2
   cushionMissJolt: 5
   cushionRiseSpeed: 0.5
-  cushionSlowMo: 1
   debugParryHud: 1
   putDownSpeed: 2
   pickUpSpeed: 1.8

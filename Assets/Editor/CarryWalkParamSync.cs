@@ -87,13 +87,13 @@ public static class CarryWalkParamSync
             }
             EditorUtility.SetDirty(rig);
 
-            // パリーの演出 (2026-08-25)。伸び上がりの再生速度とスローモーション。
+            // パリーの演出 (2026-08-25)。伸び上がりの再生速度。
+            // スローモーション (cushionSlowMo) は削除済み。ここに戻さないこと。
             var acts = rig.GetComponent<GoblinPotActions>();
             if (acts != null)
             {
                 var aso = new SerializedObject(acts);
                 aso.FindProperty("cushionRiseSpeed").floatValue = 0.5f;
-                aso.FindProperty("cushionSlowMo").boolValue = true;
                 aso.ApplyModifiedPropertiesWithoutUndo();
                 EditorUtility.SetDirty(acts);
             }

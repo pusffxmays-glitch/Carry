@@ -459,6 +459,17 @@ public class GoblinCarryRig : MonoBehaviour
     public float potHandoverSeconds = 0.45f;
     [Tooltip("その間の追従の速さ。potFollowRate より小さくすること。")]
     public float potHandoverFollowRate = 3.5f;
+    // 2026-08-25 (報告「静態パリーから腕を伸ばすときに左右差があってこぼれる」)。
+    // 緩めていたのは **位置だけ** で、回転は potFollowRotRate (60 = 17ms) の素通しだった。
+    // クリップの姿勢は左右対称 (実測ロール 0.00 度) なのに担ぎ姿勢は非対称なので、
+    // クリップが終わった 0.15 秒で壺が +4.4 → -4.7 度と 9 度振れ、これが液体を横へ持っていく。
+    // 回転も同じ間だけ緩める。
+    [Tooltip("受け渡し中の回転追従レート (1/s)。potFollowRotRate より小さくすること。")]
+    public float potHandoverFollowRotRate = 6f;
+    // 受け渡しの初速は「残差 x レート」なので、クリップを途中で打ち切ると残差ぶん速くなる。
+    // 実測でこぼれ始めるのが 0.33 m/s なので、その手前で頭打ちにする。
+    [Tooltip("受け渡し中に壺が動ける最大速度 (m/s)。0 で無制限。")]
+    public float potHandoverMaxSpeed = 0.30f;
 
     // ---- Base pose data: captured 2026-08-10 directly from the live, approved
     // "Carry_Balance_Neutral" pose in Blender (armature.matrix_world @ pose_bone.matrix, per-bone
@@ -857,6 +868,8 @@ public class GoblinCarryRig : MonoBehaviour
             // 追補 25: 直前に終わったワンショットの最終ポーズを 0.25 秒かけて混ぜ、
             // 「転倒復帰した瞬間に通常ポーズへパッと切り替わる」唐突さを消す。
             // 壺配置 (下) より前に呼ぶこと — 壺は手ボーンの位置から置かれるため。
+            // 加算ワンショット (着地クッション) の差分を、SolveArm の後・壺配置の前に乗せる。
+            if (clipAnimator != null) clipAnimator.ApplyAdditive();
             if (clipAnimator != null) clipAnimator.ApplyHandoverBlend();
         }
 
@@ -916,10 +929,19 @@ public class GoblinCarryRig : MonoBehaviour
                 smoothedPotLocalRot = localTargetRot;
                 potFollowInit = true;
             }
-            float rate = Time.time < potHandoverUntil ? potHandoverFollowRate : potFollowRate;
+            bool handover = Time.time < potHandoverUntil;
+            float rate = handover ? potHandoverFollowRate : potFollowRate;
+            float rotRate = handover ? potHandoverFollowRotRate : potFollowRotRate;
             float kp = 1f - Mathf.Exp(-rate * Time.deltaTime);
-            float kr = 1f - Mathf.Exp(-potFollowRotRate * Time.deltaTime);
-            smoothedPotLocal = Vector3.Lerp(smoothedPotLocal, localTarget, kp);
+            float kr = 1f - Mathf.Exp(-rotRate * Time.deltaTime);
+            Vector3 nextLocal = Vector3.Lerp(smoothedPotLocal, localTarget, kp);
+            if (handover && potHandoverMaxSpeed > 0.001f)
+            {
+                float lim = potHandoverMaxSpeed * Time.deltaTime;
+                Vector3 step = nextLocal - smoothedPotLocal;
+                if (step.magnitude > lim) nextLocal = smoothedPotLocal + step.normalized * lim;
+            }
+            smoothedPotLocal = nextLocal;
             smoothedPotLocalRot = Quaternion.Slerp(smoothedPotLocalRot, localTargetRot, kr);
 
             pot.position = root.TransformPoint(smoothedPotLocal);
