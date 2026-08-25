@@ -203,6 +203,61 @@ public class ParryProbe : MonoBehaviour
         StartCoroutine(DiagSequence(home, dropHeight, moveAfterLand));
     }
 
+    /// <summary>歩行 → 歩行ジャンプの移行を測る。足の開き (左右の足の横位置の差) と
+    /// ジャンプ姿勢のブレンド量を 1 フレームずつ記録する。</summary>
+    public void RunWalkJumpDiag(Vector3 home)
+    {
+        if (Running) return;
+        StopAllCoroutines();
+        StartCoroutine(WalkJumpSequence(home));
+    }
+
+    IEnumerator WalkJumpSequence(Vector3 home)
+    {
+        Running = true;
+        Trace = "";
+        var rig = GetComponent<GoblinCarryRig>();
+        var loco = GetComponent<GoblinLocomotion>();
+        var cc = GetComponent<CharacterController>();
+        var footL = GoblinBoneUtil.FindDeep(rig.transform, "LeftFoot");
+        var footR = GoblinBoneUtil.FindDeep(rig.transform, "RightFoot");
+        var kneeL = GoblinBoneUtil.FindDeep(rig.transform, "LeftLeg");
+        var kneeR = GoblinBoneUtil.FindDeep(rig.transform, "RightLeg");
+        var hips  = GoblinBoneUtil.FindDeep(rig.transform, "Hips");
+        loco.debugMoveForward = false;
+        rig.armBalance = 0f;
+        cc.enabled = false; transform.position = home; cc.enabled = true;
+        yield return new WaitForSeconds(2.0f);
+
+        loco.debugMoveForward = true;
+        yield return new WaitForSeconds(1.6f);      // 歩容が定常になるまで
+        var sb = new System.Text.StringBuilder();
+        float t = 0f;
+        bool jumped = false;
+        while (t < 2.2f)
+        {
+            float rdt = Time.unscaledDeltaTime;
+            t += rdt;
+            if (!jumped && t > 0.5f) { loco.debugJumpRequest = true; jumped = true; }
+            Vector3 lf = rig.transform.InverseTransformPoint(footL.position);
+            Vector3 rf = rig.transform.InverseTransformPoint(footR.position);
+            Vector3 lk = rig.transform.InverseTransformPoint(kneeL.position);
+            Vector3 rk = rig.transform.InverseTransformPoint(kneeR.position);
+            Vector3 hp = rig.transform.InverseTransformPoint(hips.position);
+            // 足の開き = 左右の足の横方向の距離 (cm)。前後の開きとは別物。
+            sb.AppendFormat("{0:F3},{1:F2},{2:F2},{3:F2},{4:F2},{5:F3},{6:F2},{7},{8},{9:F2},{10:F2},{11:F3},{12:F2}|",
+                t, (lf.x - rf.x) * 100f, (lk.x - rk.x) * 100f, (lf.z - rf.z) * 100f,
+                hp.y * 100f, rig.JumpBlend01, rig.StaggerIntensity01,
+                cc.isGrounded ? 1 : 0, rig.JumpPhaseName, loco.CurrentSpeed, rdt * 1000f,
+                rig.LandRecoil * 100f,
+                rig.transform.InverseTransformPoint(footL.position).y * 100f);
+            yield return null;
+        }
+        loco.debugMoveForward = false;
+        Trace = "walkjump" + System.Environment.NewLine + sb.ToString();
+        Running = false;
+    }
+
     /// <summary>比較対照: パリーを挟まずに、その場から歩き出すだけ。
     /// 「歩き出しの遅延」がパリー由来なのか、もともとの加速ランプなのかを分ける。</summary>
     public void RunWalkStart(Vector3 home)

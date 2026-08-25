@@ -327,6 +327,36 @@ public class GoblinCarryRig : MonoBehaviour
     [Tooltip("歩行/走行からのジャンプで沈み込みに掛ける時間 (秒)。走りながら屈む人はいないので短く。")]
     public float jumpCrouchTimeMoving = 0.04f;
 
+    // 2026-08-25 (報告「歩行からジャンプへ移るとき足の開き具合が急激に変わる。蟹股で
+    // 歩いていたのが急に閉じてジャンプする」)。ジャンプ姿勢の混ぜ量は沈み込み時間
+    // (歩行時 0.04 秒) で入れていた。20fps では 1 フレームに満たないので実質パッと
+    // 切り替わり、**足の左右の開きが 1 フレームで 66cm → 32cm** と 34cm 閉じていた (実測)。
+    // 沈み込みの長さは踏切のタイミングを決めるので触らず、混ぜ量だけ別の時間で入れる。
+    // 既定 0.20 秒 = 踏切 (入力から 0.16 秒) の少し後に混ぜ終わる = 地面を離れながら
+    // 脚がまとまる、という人の動きに合う。
+    [Tooltip("ジャンプ姿勢を混ぜ込むのに掛ける時間 (秒)。沈み込み時間とは別。短いと足の開きがパッと変わる。")]
+    public float jumpBlendInSeconds = 0.20f;
+
+    // 2026-08-25 (報告「パリーなしの着地にモーションの反動が欲しい」)。落下速度に比例した
+    // 衝撃量をバネで減衰させ、その量だけ **上体を前へ折る**。脚には触らない (下の注記)。
+    //
+    // バネは **陰解法** で進めること。明示オイラーだとエディタの 20fps (w*dt > 1) で
+    // 1 フレームで符号が反転し、沈むどころか腰が跳ね上がる (実測 -6.7cm)。
+    [Header("Landing recoil (2026-08-25)")]
+    [Tooltip("着地の衝撃量。落下速度 1 m/s あたり。0 で無効。")]
+    public float landRecoilPerSpeed = 0.024f;
+    [Tooltip("衝撃量の上限。ここで頭打ちになる。")]
+    public float landRecoilMax = 0.17f;
+    [Tooltip("これ以下の落下速度では反動を出さない (m/s)。歩行中の接地ちらつき対策。")]
+    public float landRecoilMinSpeed = 2.5f;
+    [Tooltip("戻りのバネの速さ。小さいほどゆっくり戻る。")]
+    public float landRecoilFrequency = 10f;
+    [Tooltip("戻りの減衰。1 で行き過ぎ無し、小さいほど揺り返しが残る。")]
+    public float landRecoilDamping = 0.5f;
+    [Tooltip("上体を前へ折る量 (0-1)。衝撃量に比例して掛かる。0 で反動なし。")]
+    [Range(0f, 1f)] public float landRecoilUpperBody = 0.35f;
+
+
     // 上向きの初速を「伸び上がりのどこで」与えるか。0.8 = 伸びきる少し手前。
     // 以前は伸び上がりが始まる前に飛ばしていたため、**しゃがんだまま浮き上がり、空中で伸びる**
     // という逆さまの動きになっていた (実測: 0.15 秒で高さ 0.21m のときまだ沈んだ姿勢、
@@ -421,6 +451,17 @@ public class GoblinCarryRig : MonoBehaviour
     float jumpU;            // 姿勢軸の現在値
     float jumpU0;           // 現フェーズに入った時点の姿勢軸。ここから補間するので繋ぎ目が飛ばない
     float jumpWeight;       // 立ち姿勢とのブレンド量
+    float jumpBlendT;       // 混ぜ込み開始からの経過秒 (jumpBlendInSeconds 用)
+    float landRecoilY, landRecoilV;   // 着地の沈み込み (m) とその速度
+    float prevVerticalVel;            // 接地する直前の落下速度を拾うため
+    bool prevGrounded = true;
+    float landRecoilSuppressUntil;    // パリー成功中は掛けない
+    /// <summary>診断用: いまの沈み込み量 (m)。</summary>
+    public float LandRecoil => landRecoilY;
+    /// <summary>診断用: ジャンプ姿勢のブレンド量 (0-1)。</summary>
+    public float JumpBlend01 => jumpWeight;
+    /// <summary>診断用: ジャンプの局面名。</summary>
+    public string JumpPhaseName => jumpPhase.ToString();
     float jumpAirborne;     // 連続滞空時間 (小さな踏み外しで着地モーションを出さないため)
     float lastSeenJumpStart = -999f;
     IGoblinJumpPoses jumpSet = GoblinJumpStand.I;   // 踏み切った瞬間に決めて、そのジャンプ中は変えない
@@ -708,6 +749,13 @@ public class GoblinCarryRig : MonoBehaviour
         appliedArmBalance = appliedPitchBalance = 0f;
     }
 
+    /// <summary>パリー成功のように「着地を自分で吸収した」ときに、素の着地反動を止める。</summary>
+    public void SuppressLandRecoil(float seconds = 0.6f)
+    {
+        landRecoilSuppressUntil = Time.time + seconds;
+        landRecoilY = 0f; landRecoilV = 0f;
+    }
+
     /// <summary>外部から小さなバランス外乱を与える (追補 15: 着地クッションの早すぎ押し
     /// ペナルティ)。armBalance 換算なので ±1 が最大傾き入力に相当する。</summary>
     public void NudgeBalance(float amount)
@@ -841,6 +889,7 @@ public class GoblinCarryRig : MonoBehaviour
         ApplyJumpPose();
         ApplyStagger();
         ApplyBraceUnderPot();
+        ApplyLandRecoil();
         ClampFeetToGround();
 
         if (bonesFound)
@@ -1284,6 +1333,7 @@ public class GoblinCarryRig : MonoBehaviour
             jumpSet = locomotion.IsMoving ? PickRunJumpSet() : GoblinJumpStand.I;
             jumpPhase = JumpPhase.Crouch;
             jumpPhaseT = 0f;
+            jumpBlendT = 0f;
             jumpU0 = jumpU;
         }
 
@@ -1294,6 +1344,7 @@ public class GoblinCarryRig : MonoBehaviour
             jumpSet = locomotion.IsMoving ? PickRunJumpSet() : GoblinJumpStand.I;
             jumpPhase = JumpPhase.Air;
             jumpPhaseT = jumpAirTime;      // 既に脚をたたんだ状態から始める
+            jumpBlendT = 0f;               // 崖から歩いて落ちた場合も脚は混ぜて入れる
             jumpU0 = jumpSet.UExtend;
         }
 
@@ -1304,6 +1355,10 @@ public class GoblinCarryRig : MonoBehaviour
         }
 
         jumpPhaseT += Time.deltaTime;
+        jumpBlendT += Time.deltaTime;
+        // 混ぜ込みは局面をまたいで一本の時間で進める。局面ごとに 1 を代入していたのが
+        // 「1 フレームで切り替わる」の原因だった。
+        float blendIn = Ease(jumpBlendT / Mathf.Max(0.01f, jumpBlendInSeconds));
         switch (jumpPhase)
         {
             case JumpPhase.Crouch:
@@ -1312,8 +1367,7 @@ public class GoblinCarryRig : MonoBehaviour
                     Ease(jumpPhaseT / Mathf.Max(0.01f, JumpCrouchTime)));
                 // 割り込みは溜めの全体を使って入れる。0.05 秒で入れると歩行姿勢から
                 // しゃがみへ 3 コマで飛び、そこが最大の飛び (36 度) になっていた。
-                jumpWeight = Mathf.MoveTowards(jumpWeight, 1f,
-                    Time.deltaTime / Mathf.Max(0.02f, JumpCrouchTime));
+                jumpWeight = blendIn;
                 // 沈み込みが終わったら伸び上がりへ。初速は伸び上がりの途中 (jumpLaunchAt) で
                 // 入るので、「飛んだかどうか」では溜めを抜けられない。時間の出どころは
                 // このリグ側に一本化してあり、Locomotion は PreLaunchTime を読む。
@@ -1328,7 +1382,7 @@ public class GoblinCarryRig : MonoBehaviour
             case JumpPhase.Takeoff:
                 jumpU = Mathf.Lerp(jumpU0, jumpSet.UExtend,
                     Ease(jumpPhaseT / Mathf.Max(0.01f, jumpTakeoffTime)));
-                jumpWeight = 1f;
+                jumpWeight = blendIn;
                 if (jumpPhaseT >= jumpTakeoffTime)
                 { jumpPhase = JumpPhase.Air; jumpPhaseT = 0f; jumpU0 = jumpU; }
                 break;
@@ -1339,7 +1393,7 @@ public class GoblinCarryRig : MonoBehaviour
                 float fall = Mathf.Clamp01(-locomotion.VerticalVelocity / 4f);
                 float byTime = Mathf.Clamp01(jumpPhaseT / Mathf.Max(0.01f, jumpAirTime));
                 jumpU = Mathf.Lerp(jumpU0, jumpSet.UAir, Ease(Mathf.Max(fall, byTime)));
-                jumpWeight = 1f;
+                jumpWeight = blendIn;
                 if (grounded && jumpAirborne <= 0f && jumpPhaseT > 0.05f)
                 {
                     jumpPhase = JumpPhase.Land;
@@ -1351,14 +1405,16 @@ public class GoblinCarryRig : MonoBehaviour
             case JumpPhase.Land:
                 jumpU = Mathf.Lerp(jumpU0, jumpSet.ULand,
                     Ease(jumpPhaseT / Mathf.Max(0.01f, jumpLandTime)));
-                jumpWeight = 1f;
+                jumpWeight = blendIn;
                 if (jumpPhaseT >= jumpLandTime)
                 { jumpPhase = JumpPhase.Recover; jumpPhaseT = 0f; jumpU0 = jumpU; }
                 break;
 
             case JumpPhase.Recover:
                 jumpU = jumpSet.ULand;
-                jumpWeight = 1f - Ease(jumpPhaseT / Mathf.Max(0.01f, jumpRecoverTime));
+                // 復帰は抜けるほうの時間。短いジャンプで混ぜ終わる前に着地したときに
+                // 一度 1 まで上がってしまわないよう、小さいほうを採る。
+                jumpWeight = Mathf.Min(blendIn, 1f - Ease(jumpPhaseT / Mathf.Max(0.01f, jumpRecoverTime)));
                 if (jumpWeight <= 0.001f) { jumpPhase = JumpPhase.None; jumpWeight = 0f; return; }
                 break;
         }
@@ -1479,6 +1535,65 @@ public class GoblinCarryRig : MonoBehaviour
     }
 
     // 腰を下げ、足首が元の位置に残るよう膝を曲げ直す (2 ボーン IK)。
+    // 着地の反動。膝で沈んで、上体が少し前へ折れて、バネで戻る。
+    void ApplyLandRecoil()
+    {
+        if (hipsBone == null || locomotion == null || landRecoilPerSpeed <= 0.0001f) return;
+        float dt = Mathf.Min(Time.deltaTime, 0.05f);
+        bool grounded = locomotion.Grounded;
+
+        if (grounded && !prevGrounded && Time.time >= landRecoilSuppressUntil)
+        {
+            float impact = Mathf.Abs(prevVerticalVel);
+            if (impact >= landRecoilMinSpeed)
+            {
+                landRecoilY = Mathf.Min(landRecoilMax, impact * landRecoilPerSpeed);
+                landRecoilV = 0f;
+            }
+        }
+        prevGrounded = grounded;
+        if (!grounded) prevVerticalVel = locomotion.VerticalVelocity;
+
+        if (Mathf.Abs(landRecoilY) <= 0.0005f && Mathf.Abs(landRecoilV) <= 0.001f)
+        { landRecoilY = 0f; landRecoilV = 0f; return; }
+
+        // **先に今の値を使ってから**進める。後回しだと一番深いところが 1 フレーム抜ける。
+        // 伸び上がり側は脚が伸びきるので浅く抑える。
+        // 2026-08-25: **脚は触らない**。腰を沈める版は 2 度作って 2 度とも
+        // 「足を跳ね上げているように見えて変」と却下された。原因は
+        // DropHipsKeepingFeet が「いまの足首の位置」を保つことで、ジャンプ姿勢の
+        // 上がったままの足を基準にすると脚だけが目立って動くため。
+        // 衝撃は上体で見せる。壺は手の位置から置かれるので、上体が折れれば
+        // 壺も一緒に前へ突き出て「受けた重さ」が出る。
+        float shock = Mathf.Clamp01(landRecoilY / Mathf.Max(0.01f, landRecoilMax));
+        float uw = landRecoilUpperBody * shock;
+        if (uw > 0.001f)
+        {
+            LeanBone(spine02Bone, GoblinLean.Spine02Fore, uw);
+            LeanBone(spine01Bone, GoblinLean.Spine01Fore, uw);
+        }
+
+        // 減衰バネを **陰解法** で進める。明示オイラーだとエディタの 20fps
+        // (w*dt が 1 を超える) で 1 フレームで符号が反転し、沈むはずが腰が跳ね上がる。
+        float w = Mathf.Max(0.1f, landRecoilFrequency);
+        float f = 1f + 2f * dt * landRecoilDamping * w;
+        float oo = w * w;
+        float hoo = dt * oo;
+        float detInv = 1f / (f + dt * hoo);
+        float y0 = landRecoilY;
+        landRecoilY = (f * y0 + dt * landRecoilV) * detInv;
+        landRecoilV = (landRecoilV - hoo * y0) * detInv;
+    }
+
+    // 基準姿勢からのズレ (GoblinLean) を、いまの向きに重み付きで乗せる。
+    void LeanBone(Transform bone, Quaternion delta, float w)
+    {
+        if (bone == null || w < 0.001f) return;
+        Quaternion d = Quaternion.Slerp(Quaternion.identity, delta, Mathf.Clamp01(w));
+        Quaternion local = d * (Quaternion.Inverse(Posture.rotation) * bone.rotation);
+        BlendAimFull(bone, local * Vector3.up, local * Vector3.right, 1f);
+    }
+
     void DropHipsKeepingFeet(float drop)
     {
         Vector3 lAnkle = leftFootBone != null ? leftFootBone.position : Vector3.zero;

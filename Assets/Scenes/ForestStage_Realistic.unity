@@ -28307,7 +28307,7 @@ Transform:
   m_GameObject: {fileID: 966228488}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -22.230759, y: 2.0802958, z: 68.16349}
+  m_LocalPosition: {x: -3.2, y: 2.2073908, z: 5}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -28394,6 +28394,7 @@ MonoBehaviour:
   balanceInertiaRate: 1.2
   cushionMissJolt: 5
   cushionRiseSpeed: 0.5
+  cushionAdditive: 1
   debugParryHud: 1
   putDownSpeed: 2
   pickUpSpeed: 1.8
@@ -28539,6 +28540,13 @@ MonoBehaviour:
   walkHeadWeight: 0.08
   jumpCrouchTime: 0.06
   jumpCrouchTimeMoving: 0.04
+  jumpBlendInSeconds: 0.2
+  landRecoilPerSpeed: 0.024
+  landRecoilMax: 0.17
+  landRecoilMinSpeed: 2.5
+  landRecoilFrequency: 10
+  landRecoilDamping: 0.5
+  landRecoilUpperBody: 0.35
   jumpLaunchAt: 0.8
   jumpTakeoffTime: 0.15
   jumpAirTime: 0.18
@@ -28554,6 +28562,8 @@ MonoBehaviour:
   potFollowRotRate: 25
   potHandoverSeconds: 0.45
   potHandoverFollowRate: 3.5
+  potHandoverFollowRotRate: 6
+  potHandoverMaxSpeed: 0.3
   postureRoot: {fileID: 0}
 --- !u!114 &966228498
 MonoBehaviour:
@@ -28568,7 +28578,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::GoblinLocomotion
   walkSpeed: 0.9
-  runSpeed: 5
+  runSpeed: 2.4
+  runJumpBoost: 2.08
   backStepSpeedMultiplier: 0.6
   turnSpeed: 110
   gravity: -20
@@ -28578,6 +28589,7 @@ MonoBehaviour:
   jumpAnticipationMoving: 0.08
   debugJumpRequest: 0
   debugMoveForward: 0
+  debugRun: 0
   hotJumpSpeed: 8.5
   jumpSuppressedUntil: 0
   parrySoftFallSpeed: 3.5

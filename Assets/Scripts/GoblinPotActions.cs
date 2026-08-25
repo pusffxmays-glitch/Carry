@@ -588,6 +588,9 @@ public class GoblinPotActions : MonoBehaviour
                              // 「クリップの終端姿勢 → 担ぎ姿勢」の受け渡しそのものが無くなる
                              // (従来はここで手が 23cm・前腕が 32cm 動いていた)。
                              additive: cushionAdditive);
+        // パリーは「自分で受けた」着地なので、素の着地反動は止める。クッションのクリップが
+        // 吸収を見せる側なので、二重に沈むと腰が抜けて見える。
+        if (rig != null) rig.SuppressLandRecoil(0.6f);
         // 滞空 calm (1.2) よりさらに強く絞って着地衝撃を吸収する
         BeginFluidCalm(just ? cushionJustCalm : cushionCalm);
         hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + (just ? 1.0f : 0.8f));

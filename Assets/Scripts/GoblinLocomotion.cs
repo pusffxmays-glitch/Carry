@@ -22,6 +22,8 @@ public class GoblinLocomotion : MonoBehaviour
     // it reads as "not moving" in a big room. Tune by eye in Play Mode.
     public float walkSpeed = 1.0f;
     public float runSpeed = 3.0f;
+    [Tooltip("走り中ジャンプの水平速度倍率。飛距離 = runSpeed x これ x 滞空秒。runSpeed を下げても飛距離を保つための係数。")]
+    public float runJumpBoost = 2.08f;
     public float backStepSpeedMultiplier = 0.6f;
     public float turnSpeed = 110f; // deg/sec while Left/Right arrow held
     public float gravity = -20f;
@@ -67,6 +69,7 @@ public class GoblinLocomotion : MonoBehaviour
     // 調査用: 入力なしで前進させる。ゲームビューが非フォーカスだと入力注入が破棄されるため、
     // エディタ外 (MCP) から「歩きながらの挙動」を観測できない。true の間ずっと前進する。
     [HideInInspector] public bool debugMoveForward;
+    [HideInInspector] public bool debugRun;      // 計測用: Shift を押しているものとして扱う
 
     /// <summary>溜め中 (入力済みだがまだ踏み切っていない) か。</summary>
     public bool JumpCharging => pendingJumpAt > 0f;
@@ -219,7 +222,7 @@ public class GoblinLocomotion : MonoBehaviour
         // SWAPPED AGAIN 2026-08-12 per explicit request ("走りとジャンプのキーを入れ替えたい。
         // シフトとスペース"): run is now held Shift, jump is now pressed Space (reverse of the
         // previous swap earlier the same day).
-        bool runHeld = false;
+        bool runHeld = debugRun;
         if (kb != null)
         {
             // 移動は WASD。矢印キーは壺のバランス操作 (GoblinCarryRig) に割り当てている。
@@ -227,7 +230,7 @@ public class GoblinLocomotion : MonoBehaviour
             if (kb.sKey.isPressed) moveZ -= 1f;
             if (kb.dKey.isPressed) turnX += 1f;
             if (kb.aKey.isPressed) turnX -= 1f;
-            runHeld = kb.leftShiftKey.isPressed || kb.rightShiftKey.isPressed;
+            runHeld = debugRun || kb.leftShiftKey.isPressed || kb.rightShiftKey.isPressed;
         }
 
         TurnInputThisFrame = turnX;
@@ -285,7 +288,12 @@ public class GoblinLocomotion : MonoBehaviour
         if (jumpTriggered || hotLaunch)
         {
             animator.SetTrigger("Jump");
-            jumpHorizontalSpeed = IsRunning ? runSpeed : (IsMoving ? walkSpeed * walkJumpBoost : 0f);
+            // 2026-08-25: runSpeed を下げた (5 → 3) ぶん、走りジャンプの飛距離が半分に
+            // なってしまうのでここで戻す。コース側は「歩きジャンプでは越えられないが
+            // 走りジャンプなら越えられる」隙間で作ってあるため、移動速度と飛距離は
+            // 別々に持たせる。
+            jumpHorizontalSpeed = IsRunning ? runSpeed * runJumpBoost
+                                            : (IsMoving ? walkSpeed * walkJumpBoost : 0f);
             inJumpState = true; // about to transition this frame; treat as locked immediately
             LastJumpStartTime = Time.time;
             if (hotLaunch)
