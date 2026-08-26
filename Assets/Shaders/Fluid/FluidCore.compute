@@ -137,7 +137,8 @@ float MaxSpeedPot;
 // 高所からのこぼれが不自然に遅く落ちる。地面バンドのトンネリング防止条件
 // (v * sdt < GroundBandHeight) を満たす範囲で上げる。
 float MaxSpeedFalling;
-float MaxSpeedAboveRim;  // 壺のリムより上に跳ね上がった液の下限クランプ (calm でも遅くしない)
+float MaxSpeedAboveRim;
+float RestoreDropHeight;  // >0 なら回収した粒子をリムの上へ置いて落とし込む (0 = 旧: 壺の中へ直接)  // 壺のリムより上に跳ね上がった液の下限クランプ (calm でも遅くしない)
 float EscapedIgnoreCalm;   // 追補 33: 1 = 脱出済み液滴に calm を掛けない
 // 追補 26: パリー成功の「回収」— 壺の近くではみ出している粒子を口へ引き戻す。
 // RecallStrength > 0 の間だけ有効。RecallTarget は壺の口の少し上 (world)。
@@ -1009,8 +1010,22 @@ void Finalize(uint3 id : SV_DispatchThreadID)
             float u2 = frac((float)(rh2 & 0xFFFFu) / 65536.0);
             rh2 = rh2 * 747796405u + 2891336453u;
             float u3 = frac((float)(rh2 & 0xFFFFu) / 65536.0);
-            float ly = lerp(PotFloorY + 0.02, PotRimY - 0.02, u1);
-            float lr = PotRadiusAt(ly) * 0.85 * sqrt(u2);
+            // 2026-08-26 (報告「戻るときに少量のしぶきがはじける」):
+            // 旧実装は **液が詰まっている壺の奥にも粒子を差し込んでいた**。
+            // 密度制約が過密を解こうと押し返し、それが弾けて見える。
+            // リムの少し上の空間に置いて自然に落とし込めば過密は起きない
+            // (ついでに「注ぎ戻される」絵にもなる)。
+            float ly, lr;
+            if (RestoreDropHeight > 0.001)
+            {
+                ly = PotRimY + lerp(0.02, RestoreDropHeight, u1);
+                lr = PotRadiusAt(PotRimY) * 0.75 * sqrt(u2);
+            }
+            else
+            {
+                ly = lerp(PotFloorY + 0.02, PotRimY - 0.02, u1);
+                lr = PotRadiusAt(ly) * 0.85 * sqrt(u2);
+            }
             float la = u3 * 6.2831853;
             float3 lpR = float3(lr * cos(la), ly, lr * sin(la));
             Positions[i] = mul(PotToWorldSafety, float4(lpR, 1.0)).xyz;

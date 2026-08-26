@@ -161,6 +161,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // p = 1 - exp(-dt/tau) なら、どの fps でも restoreSeconds でほぼ戻り切る。
     [Tooltip("戻す速さ。tau = restoreSeconds / この値。大きいほど速い。")]
     public float restoreRateFactor = 2.5f;
+    [Tooltip("回収した粒子をリムから何 m 上に置いて落とし込むか。0 だと壺の中へ直接置くが、" +
+             "液が詰まっている場所に差し込むと密度制約が押し返して しぶきが弾ける。")]
+    // 実測 (走りジャンプの金パリー、3 本ずつ、最終差 / 着地後 1.5 秒の平均速度):
+    //   0 (壺の中へ直接) +179 / 1.13   0.24 +271 / 3.17   0.06 +356 / 2.19
+    // **低いほど回収量が増え、速度も落ち着く**。落差が小さいほど液面への衝撃が減る。
+    public float restoreDropHeight = 0.06f;
     /// <summary>いま猶予中の (= このジャンプでこぼれた) 液を、次のフレームで壺へ戻す。
     /// ジャストパリーの「全回収」。吸い寄せ (RecallSpill) は最終残量を変えられなかったので、
     /// 物理ではなく明示的に戻す。</summary>
@@ -1649,6 +1655,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         //   0.5 (= calm のまま) 0.68 m/s / 4.0 → 1.39 / 14 (落下と同じ) → 1.82
         // 壺の残量はどれも満杯のまま (最終差 +188 / +144 / +145) だったので、
         // **速くしても損はしない**。既定は落下と同じ扱いにする。
+        fluidCompute.SetFloat("RestoreDropHeight", restoreDropHeight);
         fluidCompute.SetFloat("MaxSpeedAboveRim",
             maxSpeedAboveRim > 0f ? maxSpeedAboveRim : maxSpeedFalling);
         bool restoring = Time.time >= restoreFrom && Time.time < restoreUntil;
