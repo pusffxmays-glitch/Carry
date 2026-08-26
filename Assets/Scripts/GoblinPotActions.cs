@@ -159,6 +159,11 @@ public class GoblinPotActions : MonoBehaviour
             LogParry($"<color=grey>空振り確定 ({(rising ? "上昇中" : "高い")}, 足元まで "
                      + $"{(terrainTilt != null ? terrainTilt.GroundDistance : -1f):F2}m) → 保護なし</color>");
             ParryRingFX.Spawn(transform.position + Vector3.up * 0.15f, cushionWhiffColor);
+            // **予約は残す。ただし空振り確定の印を付ける。** これを付けずに return すると、
+            // 足元 1.2m あたりで押した場合に 0.35 秒以内で着地してしまい、
+            // 灰リング (失敗) を出した直後に着地判定が青を出す (報告されたバグ)。
+            // 設計どおり「押した時期は演出の差だけ、代償は着地時に同じものを払う」。
+            cushionWhiffed = true;
             return;
         }
 
@@ -286,6 +291,7 @@ public class GoblinPotActions : MonoBehaviour
 
     bool cushionPressed;         // この滞空中に Space を押したか
     bool cushionPressUsed;       // この滞空でパリー入力を使い切ったか (1 滞空 1 回)
+    bool cushionWhiffed;         // 押した時点で空振り確定 (上昇中/高い)。着地は必ず失敗にする
     /// <summary>直近の着地判定 ("just" / "good" / "fail" / "none")。計測用。</summary>
     public string LastParryResult = "";
     float cushionPressTime = -999f;
@@ -422,6 +428,7 @@ public class GoblinPotActions : MonoBehaviour
                         LogParry($"接地 (滞空 {airborneTime:F2}s < 0.12 → 判定なし)");
                     airborneTime = 0f;
                     cushionPressUsed = false;   // 次の滞空でまた 1 回使える
+                    cushionWhiffed = false;
                 }
                 // 追補 16→19 改訂: calm は「離陸直後 0.35 秒 (上昇の保護 = 理不尽なし)」と
                 // 「パリー押下後」だけ。降下中は素通しにして揺れを再発達させる。
@@ -609,7 +616,18 @@ public class GoblinPotActions : MonoBehaviour
         {
             cushionPressed = false;
             float sincePress = Time.time - cushionPressTime;
-            if (sincePress <= cushionJustWindow)
+            if (cushionWhiffed)
+            {
+                // 押した瞬間に灰リングで失敗を見せている。着地でひっくり返さない。
+                LogParry($"<color=orange>着地: {sincePress:F2}s 前の押し → 空振り確定ぶんの失敗</color>");
+                if (rig != null)
+                {
+                    rig.DisturbPotOutward(cushionFailTiltDeg);
+                    rig.NudgeBalance((Random.value < 0.5f ? -1f : 1f) * cushionFailNudge);
+                }
+                failed = true; LastParryResult = "fail";
+            }
+            else if (sincePress <= cushionJustWindow)
             {
                 LogParry($"<color=yellow>着地: {sincePress:F2}s 前の押し → ジャスト!</color> (窓 {cushionJustWindow:F2})");
                 DoCushion(just: true); parried = true; LastParryResult = "just";

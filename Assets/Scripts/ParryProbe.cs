@@ -458,7 +458,11 @@ public class ParryProbe : MonoBehaviour
             // しきい値 0.42m は低すぎた。20fps では 1 フレーム 0.2m 落ちるので、
             // 予約が消費される前に接地して丸ごと無視されていた (判定=none が 9/9)。
             // 0.75m なら SoftenLanding (3.5 m/s) で着地まで 0.21 秒 = グッドの窓の内側。
-            if (airborneSeen && loco.VerticalVelocity < -0.2f && gd < 0.75f && !cc.isGrounded)
+            // mode 3: **空振り押しの再現**。上昇中 (踏切直後) に押す。押した瞬間に
+            // 灰リングで失敗が出るはずで、着地でそれが青にひっくり返ってはいけない。
+            if (mode == 3 && !armed && !cc.isGrounded && loco.VerticalVelocity > 0.5f)
+            { acts.debugParryRequest = true; armed = true; }
+            else if (mode != 3 && airborneSeen && loco.VerticalVelocity < -0.2f && gd < 0.75f && !cc.isGrounded)
             { acts.debugParryRequest = true; armed = true; }
             if (armed && cc.isGrounded && t > 0.3f) break;
             yield return null;

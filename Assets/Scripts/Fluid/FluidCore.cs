@@ -148,12 +148,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // (RecallSpill) で液滴を壺へ向かわせ、**間に合わなかった分だけ**を少し遅れて戻す。
     // 吸い寄せだけでは全回収にならない (強化しても最終差 -633、回収なしの -776 と大差なし)。
     [Tooltip("全回収を始めるまでの遅れ (秒)。この間に吸い寄せで飛んで戻る絵を見せる。")]
-    public float restoreDelay = 0.35f;
+    public float restoreDelay = 0.12f;
     [Tooltip("全回収を何秒かけて戻すか。一度に戻すと圧力が暴れて逆に噴き出す。")]
-    public float restoreSeconds = 0.5f;
-    [Range(0f, 1f)]
-    [Tooltip("全回収で 1 フレームに戻す割合。")]
-    public float restoreChancePerFrame = 0.15f;
+    public float restoreSeconds = 0.25f;
+    // 抽選は **時間基準** にする。Finalize は毎サブステップ走るが FrameSeed はフレーム
+    // 単位なので、実効は「1 フレームに 1 回」。固定の割合だと fps で戻る量が変わる
+    // (20fps の 10 フレームで 80%、60fps の 30 フレームで 99%)。
+    // p = 1 - exp(-dt/tau) なら、どの fps でも restoreSeconds でほぼ戻り切る。
+    [Tooltip("戻す速さ。tau = restoreSeconds / この値。大きいほど速い。")]
+    public float restoreRateFactor = 2.5f;
     /// <summary>いま猶予中の (= このジャンプでこぼれた) 液を、次のフレームで壺へ戻す。
     /// ジャストパリーの「全回収」。吸い寄せ (RecallSpill) は最終残量を変えられなかったので、
     /// 物理ではなく明示的に戻す。</summary>
@@ -1639,7 +1642,9 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("RecallRadius", recallRadius);
         fluidCompute.SetFloat("SpillGrace", Time.time < spillGraceUntil ? 1f : 0f);
         bool restoring = Time.time >= restoreFrom && Time.time < restoreUntil;
-        fluidCompute.SetFloat("RestoreEscaped", restoring ? restoreChancePerFrame : 0f);
+        float restoreTau = Mathf.Max(0.02f, restoreSeconds / Mathf.Max(0.5f, restoreRateFactor));
+        fluidCompute.SetFloat("RestoreEscaped",
+            restoring ? 1f - Mathf.Exp(-Mathf.Min(Time.deltaTime, 0.1f) / restoreTau) : 0f);
         // 上+前方に注入する (着地の跳ね返り + 前方サージ)。下向きは圧力ソルバが床境界へ
         // 吸収し、真上だけの噴水は壺内へ落ち戻るため、どちらも実測ほぼ無効だった。
         fluidCompute.SetVector("JoltAccel",
