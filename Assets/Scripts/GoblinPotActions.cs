@@ -147,6 +147,21 @@ public class GoblinPotActions : MonoBehaviour
         LogParry($"<color=cyan>空中押し → 予約</color> (滞空 {airborneTime:F2}s 時点)");
         // 追補 19: 押した瞬間から clamp が入る (パリーの手応え)。
         // 着地判定で成立なら 0.6/0.5 へ強化、失敗なら即解除される。
+        // 2026-08-26: **押した時点で空振りと分かるなら、保護を一切与えない。**
+        // 「高いところ」「上昇中」は 0.35 秒以内に着地しないので、その場で失敗が確定する。
+        // 従来は空振りでも壺が水平に戻り、落下も軟化されたので、**早押しのほうが
+        // 何もしないより液が残っていた** (実測: 早押し -2.1% / 無押し -10.4%)。
+        // 望ましい優劣は 成功 > 何もしない > 失敗 なので、確定空振りは手ぶらで着地させる。
+        bool rising = loco != null && loco.VerticalVelocity > 0.5f;
+        bool tooHigh = terrainTilt != null && terrainTilt.GroundDistance > cushionWhiffDistance;
+        if (rising || tooHigh)
+        {
+            LogParry($"<color=grey>空振り確定 ({(rising ? "上昇中" : "高い")}, 足元まで "
+                     + $"{(terrainTilt != null ? terrainTilt.GroundDistance : -1f):F2}m) → 保護なし</color>");
+            ParryRingFX.Spawn(transform.position + Vector3.up * 0.15f, cushionWhiffColor);
+            return;
+        }
+
         // 2026-08-26: 保護の持続を **判定窓に合わせる**。
         // 従来は calm 1.0 秒 / 水平化 0.5 秒 / 落下軟化 1.2 秒で、**押しさえすれば**
         // 着地まで効果が残っていた。実測では、押した時期に関係なくこぼれ 0% で、
@@ -173,16 +188,6 @@ public class GoblinPotActions : MonoBehaviour
         // 代償 (着地のよろけ) は着地時に払うので中身は変わらない。ここは演出だけ。
         // 窓は着地前 0.35 秒なので、足元まで cushionWhiffDistance 以上あれば
         // まず間に合わない = 押した瞬間に「早い」と言い切れる。
-        // 「高い位置」だけでは足りない。**離陸直後は低いのに一番早い押し**なので、
-        // 上昇中かどうかも見る。上がっている最中に押したら 0.35 秒以内には着地しない。
-        bool rising = loco != null && loco.VerticalVelocity > 0.5f;
-        bool tooHigh = terrainTilt != null && terrainTilt.GroundDistance > cushionWhiffDistance;
-        if (rising || tooHigh)
-        {
-            LogParry($"<color=grey>空振り確定 ({(rising ? "上昇中" : "高い")}, 足元まで "
-                     + $"{(terrainTilt != null ? terrainTilt.GroundDistance : -1f):F2}m)</color>");
-            ParryRingFX.Spawn(transform.position + Vector3.up * 0.15f, cushionWhiffColor);
-        }
     }
 
     /// <summary>計測用: 次に空中判定になったフレームでパリーを押したことにする。
