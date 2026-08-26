@@ -710,7 +710,8 @@ public class GoblinPotActions : MonoBehaviour
         if (just && cushionJustRestoreAll && fluid != null) fluid.RestoreSpilledToPot();
         // 成立したら、回収が終わるまで猶予を延ばす (拾い直しの時間を確保する)。
         if (fluid != null)
-            fluid.GrantSpillGrace((just ? cushionJustRecallSeconds : cushionRecallSeconds) + 0.3f);
+            fluid.GrantSpillGrace(Mathf.Max(just ? cushionJustRecallSeconds : cushionRecallSeconds,
+                                            just && cushionJustRestoreAll ? fluid.RestoreTotalSeconds : 0f) + 0.3f);
         // パリーは「自分で受けた」着地なので、素の着地反動は止める。クッションのクリップが
         // 吸収を見せる側なので、二重に沈むと腰が抜けて見える。
         if (rig != null) rig.SuppressLandRecoil(0.6f);

@@ -143,7 +143,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public void GrantSpillGrace(float seconds) { spillGraceUntil = Time.time + seconds; }
     /// <summary>猶予を打ち切る。パリー失敗・無押しの着地で呼ぶ = こぼれは確定する。</summary>
     public void EndSpillGrace() { spillGraceUntil = 0f; }
-    float restoreUntil;
+    float restoreFrom, restoreUntil;
+    // 見た目は「飛んで帰ってくる」ほうが良い (ユーザー指定) ので、まず吸い寄せ
+    // (RecallSpill) で液滴を壺へ向かわせ、**間に合わなかった分だけ**を少し遅れて戻す。
+    // 吸い寄せだけでは全回収にならない (強化しても最終差 -633、回収なしの -776 と大差なし)。
+    [Tooltip("全回収を始めるまでの遅れ (秒)。この間に吸い寄せで飛んで戻る絵を見せる。")]
+    public float restoreDelay = 0.35f;
     [Tooltip("全回収を何秒かけて戻すか。一度に戻すと圧力が暴れて逆に噴き出す。")]
     public float restoreSeconds = 0.5f;
     [Range(0f, 1f)]
@@ -152,7 +157,14 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     /// <summary>いま猶予中の (= このジャンプでこぼれた) 液を、次のフレームで壺へ戻す。
     /// ジャストパリーの「全回収」。吸い寄せ (RecallSpill) は最終残量を変えられなかったので、
     /// 物理ではなく明示的に戻す。</summary>
-    public void RestoreSpilledToPot() { restoreUntil = Time.time + restoreSeconds; }
+    /// <summary>全回収に掛かる合計時間 (遅れ + 戻し)。猶予をこの長さ以上にすること。</summary>
+    public float RestoreTotalSeconds => restoreDelay + restoreSeconds;
+
+    public void RestoreSpilledToPot()
+    {
+        restoreFrom = Time.time + restoreDelay;
+        restoreUntil = restoreFrom + restoreSeconds;
+    }
 
     /// <summary>診断用: 猶予が効いているか。</summary>
     public bool SpillGraceActive => Time.time < spillGraceUntil;
@@ -1626,7 +1638,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("RecallMinY", potPos.y - recallMinYDrop);
         fluidCompute.SetFloat("RecallRadius", recallRadius);
         fluidCompute.SetFloat("SpillGrace", Time.time < spillGraceUntil ? 1f : 0f);
-        fluidCompute.SetFloat("RestoreEscaped", Time.time < restoreUntil ? restoreChancePerFrame : 0f);
+        bool restoring = Time.time >= restoreFrom && Time.time < restoreUntil;
+        fluidCompute.SetFloat("RestoreEscaped", restoring ? restoreChancePerFrame : 0f);
         // 上+前方に注入する (着地の跳ね返り + 前方サージ)。下向きは圧力ソルバが床境界へ
         // 吸収し、真上だけの噴水は壺内へ落ち戻るため、どちらも実測ほぼ無効だった。
         fluidCompute.SetVector("JoltAccel",

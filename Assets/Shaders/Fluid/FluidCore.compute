@@ -1033,6 +1033,17 @@ void Finalize(uint3 id : SV_DispatchThreadID)
                 float rX = length(lpX.xz);
                 float outR = PotOuterAt(lpX.y);
                 bool inCavity = (lpX.y >= PotFloorY) && (rX <= PotRadiusAt(clamp(lpX.y, PotFloorY, PotRimY)));
+                // 2026-08-26: **回収中に壺の中へ入ってきたら合流させる。**
+                // これが無いと、吸い寄せても壺を素通りするだけで戻らない
+                // (= 「巻き戻しで帰ってくる」絵にならない)。回収 or 猶予の間だけ。
+                if (inCavity && (RecallStrength > 0.001 || SpillGrace > 0.5))
+                {
+                    RetiredFlags[i] = 0u;
+                    Positions[i] = p;
+                    Velocities[i] = ContainerLinearVelocity;
+                    Ages[i] = 0.0;
+                    return;
+                }
                 if (!inCavity && rX <= outR && rX > 1e-4)
                 {
                     lpX.xz *= (outR + WallTolerance) / rX;
