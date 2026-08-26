@@ -69,6 +69,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Range(0.5f, 6f)] public float emergencyTravelSpacing = 1.5f;
     [Tooltip("追補 33: 壺から出た液滴に calm (壺内の速度制限) を掛けない。OFF にすると、こぼれた液体が壺の近くにいる間だけゆっくり落ちる旧挙動に戻る。")]
     public bool escapedIgnoreCalm = true;
+    [Tooltip("壺のリムより上に跳ね上がった液の速度下限。calm 中でもここまでは出せる " +
+             "(0.5 m/s の calm に張り付いてスローモーションで戻るのを防ぐ)。" +
+             "0 なら maxSpeedFalling と同じ = リムより上は落下中の液と同じ扱い。")]
+    public float maxSpeedAboveRim = 0f;
 
     [Header("Material")]
     [Range(1.5f, 3f)] public float kernelRadiusScale = 2f;
@@ -1641,6 +1645,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetFloat("RecallMinY", potPos.y - recallMinYDrop);
         fluidCompute.SetFloat("RecallRadius", recallRadius);
         fluidCompute.SetFloat("SpillGrace", Time.time < spillGraceUntil ? 1f : 0f);
+        // 実測 (走りジャンプの金パリー、着地後 1.5 秒の最大速度の平均):
+        //   0.5 (= calm のまま) 0.68 m/s / 4.0 → 1.39 / 14 (落下と同じ) → 1.82
+        // 壺の残量はどれも満杯のまま (最終差 +188 / +144 / +145) だったので、
+        // **速くしても損はしない**。既定は落下と同じ扱いにする。
+        fluidCompute.SetFloat("MaxSpeedAboveRim",
+            maxSpeedAboveRim > 0f ? maxSpeedAboveRim : maxSpeedFalling);
         bool restoring = Time.time >= restoreFrom && Time.time < restoreUntil;
         float restoreTau = Mathf.Max(0.02f, restoreSeconds / Mathf.Max(0.5f, restoreRateFactor));
         fluidCompute.SetFloat("RestoreEscaped",

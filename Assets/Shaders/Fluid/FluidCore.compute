@@ -137,6 +137,7 @@ float MaxSpeedPot;
 // 高所からのこぼれが不自然に遅く落ちる。地面バンドのトンネリング防止条件
 // (v * sdt < GroundBandHeight) を満たす範囲で上げる。
 float MaxSpeedFalling;
+float MaxSpeedAboveRim;  // 壺のリムより上に跳ね上がった液の下限クランプ (calm でも遅くしない)
 float EscapedIgnoreCalm;   // 追補 33: 1 = 脱出済み液滴に calm を掛けない
 // 追補 26: パリー成功の「回収」— 壺の近くではみ出している粒子を口へ引き戻す。
 // RecallStrength > 0 の間だけ有効。RecallTarget は壺の口の少し上 (world)。
@@ -469,6 +470,12 @@ bool InPotGate(float3 worldPos)
            dot(pl.xz, pl.xz) < PotMaxRadius * PotMaxRadius * 2.25;
 }
 
+// 壺ローカルの高さ。リムより上かどうかの判定に使う。
+float PotLocalY(float3 worldPos)
+{
+    return mul(WorldToPotSafety, float4(worldPos, 1.0)).y;
+}
+
 float3 SpeedClampRef(float3 worldPos)
 {
     return InPotGate(worldPos) ? ContainerLinearVelocity : float3(0, 0, 0);
@@ -497,6 +504,14 @@ float3 ClampSpeedFor(float3 v, float3 worldPos, uint retired)
     bool gated = !escapedFree && InPotGate(worldPos);
     float3 vref = gated ? ContainerLinearVelocity : float3(0, 0, 0);
     float lim = gated ? MaxSpeedPot : MaxSpeedFalling;
+    // 2026-08-26 (報告「パリーすると跳ね上がったポーションがすごくゆっくり壺に戻る」):
+    // 追補 33 は **脱出済み** の液滴だけを calm から外した。しかし着地の衝撃で跳ね上がった
+    // 直後の液は、まだ脱出扱いではないのに InPotGate (外形 1.5 倍・上下 1 span) の中にいる。
+    // パリー成立で calm が 0.5 m/s / 1.2 秒かかるため、自由落下なら 2〜3 m/s で戻るはずの
+    // 液が 0.5 m/s に張り付き、宙に浮いたままゆっくり降りてくる。
+    // **リムより上は「壺の中身」ではなく飛沫**なので calm の対象外にする。
+    // 容器基準は保つ (世界基準にすると歩行中に飛沫だけ置き去りに見える)。
+    if (gated && PotLocalY(worldPos) > PotRimY) lim = max(lim, MaxSpeedAboveRim);
     float3 rel = v - vref;
     float sp = length(rel);
     if (sp > lim) rel *= lim / sp;

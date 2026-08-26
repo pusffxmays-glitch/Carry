@@ -462,7 +462,9 @@ public class ParryProbe : MonoBehaviour
             // 灰リングで失敗が出るはずで、着地でそれが青にひっくり返ってはいけない。
             if (mode == 3 && !armed && !cc.isGrounded && loco.VerticalVelocity > 0.5f)
             { acts.debugParryRequest = true; armed = true; }
-            else if (mode != 3 && airborneSeen && loco.VerticalVelocity < -0.2f && gd < 0.75f && !cc.isGrounded)
+            // 0.75m はエディタが重いと 1 フレームで跨いで押し損ねる (実測 4 連続 none)。
+            // 空振り確定は 1.2m 以上なので、1.0m まで上げても「早すぎ」にはならない。
+            else if (mode != 3 && airborneSeen && loco.VerticalVelocity < -0.2f && gd < 1.0f && !cc.isGrounded)
             { acts.debugParryRequest = true; armed = true; }
             if (armed && cc.isGrounded && t > 0.3f) break;
             yield return null;
@@ -479,6 +481,11 @@ public class ParryProbe : MonoBehaviour
         // 「Step 70ms」のような偽のスパイクが出る。
         float stepPeak = 0f, wt = 0f, recallPeak = 0f;
         float duringMs = 0f, afterMs = 0f;
+        // **見た目の「ゆっくり戻る」は保持率では測れない** ので、跳ね上がった液
+        // (AirborneCount) がピークから 10% まで引くのに何秒かかるかを測る。
+        int airPeak = 0; float airSettle = -1f;
+        // 速度そのものも見る。calm が飛沫の頭を押さえているなら、ここが上限に張り付く。
+        float spdPeak = 0f, spdSum = 0f; int spdN = 0;
         if (fc != null) fc.ResetStepCost();
         while (wt < 3.0f)
         {
@@ -486,6 +493,18 @@ public class ParryProbe : MonoBehaviour
             wt += Time.unscaledDeltaTime;
             if (fc != null && fc.LastStepMs > stepPeak) stepPeak = fc.LastStepMs;
             if (fc != null && fc.RecallStrengthNow > recallPeak) recallPeak = fc.RecallStrengthNow;
+            if (fc != null)
+            {
+                int air = fc.AirborneCount;
+                if (air > airPeak) { airPeak = air; airSettle = -1f; }
+                if (airSettle < 0f && airPeak > 50 && air <= airPeak / 10) airSettle = wt;
+                if (wt < 1.5f)
+                {
+                    float sp2 = fc.MeasuredMaxSpeed;
+                    if (sp2 > spdPeak) spdPeak = sp2;
+                    spdSum += sp2; spdN++;
+                }
+            }
             // 吸い寄せ + 全回収が走っているのは着地から 1.5 秒ほど。そこで区切る。
             if (fc != null && pw < 1.5f && wt >= 1.5f) { duringMs = fc.AvgStepMs; fc.ResetStepCost(); }
             yield return null;
@@ -499,7 +518,11 @@ public class ParryProbe : MonoBehaviour
             insideAtLand - insideBefore, insideAfter - insideAtLand,
             airAtLand, groundAtLand, groundAfter)
             + string.Format(" | 脱出判定 {0} | Step最大 {1:F1}ms | 回収強さ {2:F1}", escAtLand, stepPeak, recallPeak)
-            + string.Format(" | Step平均 平常{0:F2} 回収中{1:F2} 回収後{2:F2}ms", baseMs, duringMs, afterMs);
+            + string.Format(" | Step平均 平常{0:F2} 回収中{1:F2} 回収後{2:F2}ms", baseMs, duringMs, afterMs)
+            + string.Format(" | 飛沫ピーク {0} 収まるまで {1:F2}s", airPeak,
+                            airSettle >= 0f ? airSettle : 99f)
+            + string.Format(" | 最大速度 ピーク{0:F2} 平均{1:F2} m/s",
+                            spdPeak, spdN > 0 ? spdSum / spdN : 0f);
         Running = false;
     }
 
