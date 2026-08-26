@@ -416,6 +416,18 @@ public class ParryProbe : MonoBehaviour
         cc.enabled = false; transform.position = home; cc.enabled = true;
         yield return new WaitForSeconds(2.5f);
 
+        // **重さの比較用の基準。満杯・静止で測る。** ここより後に置いてはいけない:
+        // mode 2 は跳ぶ前から走り出すので、走行中の値になるうえ、
+        // 基準を測っている間に走った分だけ壺が減って回収量の計測まで狂う (実測 -2700 粒)。
+        float baseMs = 0f;
+        if (fc != null)
+        {
+            fc.ResetStepCost();
+            float bt = 0f;
+            while (bt < 1.5f) { bt += Time.unscaledDeltaTime; yield return null; }
+            baseMs = fc.AvgStepMs;
+        }
+
         if (mode == 1)
         {
             // よろけさせてから跳ぶ。外乱は入力とは別系統 (armBalance はマウスに上書きされる)。
@@ -462,13 +474,19 @@ public class ParryProbe : MonoBehaviour
         // MCP から毎フレーム読むと、その読み出し自体が数百 ms のヒッチを作って
         // 「Step 70ms」のような偽のスパイクが出る。
         float stepPeak = 0f, wt = 0f, recallPeak = 0f;
+        float duringMs = 0f, afterMs = 0f;
+        if (fc != null) fc.ResetStepCost();
         while (wt < 3.0f)
         {
+            float pw = wt;
             wt += Time.unscaledDeltaTime;
             if (fc != null && fc.LastStepMs > stepPeak) stepPeak = fc.LastStepMs;
             if (fc != null && fc.RecallStrengthNow > recallPeak) recallPeak = fc.RecallStrengthNow;
+            // 吸い寄せ + 全回収が走っているのは着地から 1.5 秒ほど。そこで区切る。
+            if (fc != null && pw < 1.5f && wt >= 1.5f) { duringMs = fc.AvgStepMs; fc.ResetStepCost(); }
             yield return null;
         }
+        if (fc != null) afterMs = fc.AvgStepMs;
         int insideAfter = fc != null ? fc.InsideCount : -1;
         int groundAfter = fc != null ? fc.GroundCount : -1;
         Trace = string.Format(
@@ -476,7 +494,8 @@ public class ParryProbe : MonoBehaviour
             mode, acts.LastParryResult, insideBefore, insideAtLand, insideAfter,
             insideAtLand - insideBefore, insideAfter - insideAtLand,
             airAtLand, groundAtLand, groundAfter)
-            + string.Format(" | 脱出判定 {0} | Step最大 {1:F1}ms | 回収強さ {2:F1}", escAtLand, stepPeak, recallPeak);
+            + string.Format(" | 脱出判定 {0} | Step最大 {1:F1}ms | 回収強さ {2:F1}", escAtLand, stepPeak, recallPeak)
+            + string.Format(" | Step平均 平常{0:F2} 回収中{1:F2} 回収後{2:F2}ms", baseMs, duringMs, afterMs);
         Running = false;
     }
 
