@@ -147,14 +147,28 @@ public class GoblinPotActions : MonoBehaviour
         LogParry($"<color=cyan>空中押し → 予約</color> (滞空 {airborneTime:F2}s 時点)");
         // 追補 19: 押した瞬間から clamp が入る (パリーの手応え)。
         // 着地判定で成立なら 0.6/0.5 へ強化、失敗なら即解除される。
+        // 2026-08-26: 保護の持続を **判定窓に合わせる**。
+        // 従来は calm 1.0 秒 / 水平化 0.5 秒 / 落下軟化 1.2 秒で、**押しさえすれば**
+        // 着地まで効果が残っていた。実測では、押した時期に関係なくこぼれ 0% で、
+        // 押さなければ -10.8%。つまり「タイミングを合わせる」ことに液体上の意味が
+        // 無かった (軟化と壺内クランプはどちらか片方効いていれば 0%、ジョルトを
+        // 0.8 倍入れても 0%、クッションの効きを 0 にしても 0%)。
+        // 窓 (0.35 秒) より少しだけ長い時間で切れるようにすると、早押しは着地時に
+        // 保護が残らない = 「成功 > 何もしない > 失敗」が液量にも出る。
         BeginFluidCalm(1.2f);
-        hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + 1.0f);
+        hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + cushionPressProtectSeconds);
         // 傾いたままのジャンプ対策: 水平化は「空中で」行う。滞空中は壺内が
         // 実効無重力で、クランプ下の回転には流体がほぼ完全に追従する
         // (着地後に回すと回転自体がスロッシュ源になる — 実測 42% で悪化した)。
-        if (rig != null) rig.CushionRecenter(0.5f);
-        // 追補 25: 膝で受ける = 残りの落下を軟化して衝撃自体を減らす
-        if (loco != null) loco.SoftenLanding(1.2f);
+        if (rig != null) rig.CushionRecenter(cushionPressProtectSeconds);
+        // 追補 25: 膝で受ける = 残りの落下を軟化して衝撃自体を減らす。
+        // 2026-08-26: 持続を 1.2 秒 → cushionSoftenSeconds (既定 0.20 秒) に短縮した。
+        // 1.2 秒だと **押しさえすれば** 着地まで軟化が残り、タイミングに関係なく
+        // 液がほぼ守られていた (実測: 軟化と壺内クランプはどちらか片方効いていれば
+        // こぼれ 0%。ジョルトを 0.8 倍入れても 0% のまま)。
+        // 0.20 秒ならジャストの窓 (0.12 秒) は覆い、グッド (0.12〜0.35 秒) では
+        // 着地までに切れる = 段の差が実際のこぼれ量になる。
+        if (loco != null) loco.SoftenLanding(cushionSoftenSeconds);
         // 2026-08-26: **高いところで押したら、その場で失敗と分かるようにする**。
         // 代償 (着地のよろけ) は着地時に払うので中身は変わらない。ここは演出だけ。
         // 窓は着地前 0.35 秒なので、足元まで cushionWhiffDistance 以上あれば
@@ -200,6 +214,18 @@ public class GoblinPotActions : MonoBehaviour
     public float cushionRecallSeconds = 0.5f;
     [Tooltip("グッド成立時のこぼれ回収の強さ。")]
     public float cushionRecallStrength = 6f;
+
+    // 2026-08-26: 青と金の差はここで作る。**吸収量ではない**。
+    // クッションの姿勢の効きを 1.0 / 0.5 / 0.0 と変えても -8.2 / -9.9 / -8.3% で差が出ず、
+    // 壺内クランプや回収を弱めても青は変わらなかった。実際に成功と失敗を分けていたのは
+    // **失敗時に流体へ入れているジョルト** (cushionMissJolt) で、これが 40 ポイントぶんの差。
+    // だからその一部を青にも入れるのが素直なレバーになる。
+    [Tooltip("グッド成立時に入れる着地ジョルトの割合 (0-1)。0 でジャストと同じ、1 で失敗と同じ。")]
+    [Range(0f, 1f)] public float cushionGoodJolt = 0.35f;
+    [Tooltip("パリー押下から落下を軟化する時間 (秒)。ジャストの窓より少し長く、グッドの窓より短くすること。")]
+    public float cushionSoftenSeconds = 0.20f;
+    [Tooltip("押した瞬間の保護 (壺の水平化・壺内クランプ) が続く時間 (秒)。窓 (cushionWindow) より少し長くすること。長いと早押しでも液が守られてタイミングの意味が消える。")]
+    public float cushionPressProtectSeconds = 0.40f;
 
     [Tooltip("成立時の壺内クランプ。滞空 calm (1.2) より強い。")]
     public float cushionCalm = 0.5f;    // 追補 25: 0.6 → 0.5 (高所パリーの吸収強化)
@@ -657,6 +683,10 @@ public class GoblinPotActions : MonoBehaviour
                              // 「クリップの終端姿勢 → 担ぎ姿勢」の受け渡しそのものが無くなる
                              // (従来はここで手が 23cm・前腕が 32cm 動いていた)。
                              additive: cushionAdditive);
+        // 青 (グッド) は着地の衝撃を **部分的に** 受ける。金 (ジャスト) は受けない。
+        if (!just && cushionGoodJolt > 0.001f && fluid != null)
+            fluid.JoltPot((Vector3.up + transform.forward * 0.8f)
+                          * (cushionMissJolt * cushionGoodJolt));
         // パリーは「自分で受けた」着地なので、素の着地反動は止める。クッションのクリップが
         // 吸収を見せる側なので、二重に沈むと腰が抜けて見える。
         if (rig != null) rig.SuppressLandRecoil(0.6f);
