@@ -486,10 +486,6 @@ public class ParryProbe : MonoBehaviour
         int airPeak = 0; float airSettle = -1f;
         // 速度そのものも見る。calm が飛沫の頭を押さえているなら、ここが上限に張り付く。
         float spdPeak = 0f, spdSum = 0f; int spdN = 0;
-        // 「ふちを伝ってスローモーションで地面へ落ちる」を直接測る。
-        // こぼれが地面に届くまでの時間 = GroundCount が最終値の 90% に達するまで。
-        var gTimes = new System.Collections.Generic.List<float>();
-        var gCounts = new System.Collections.Generic.List<int>();
         if (fc != null) fc.ResetStepCost();
         while (wt < 3.0f)
         {
@@ -502,7 +498,6 @@ public class ParryProbe : MonoBehaviour
                 int air = fc.AirborneCount;
                 if (air > airPeak) { airPeak = air; airSettle = -1f; }
                 if (airSettle < 0f && airPeak > 50 && air <= airPeak / 10) airSettle = wt;
-                gTimes.Add(wt); gCounts.Add(fc.GroundCount);
                 if (wt < 1.5f)
                 {
                     float sp2 = fc.MeasuredMaxSpeed;
@@ -515,17 +510,6 @@ public class ParryProbe : MonoBehaviour
             yield return null;
         }
         if (fc != null) afterMs = fc.AvgStepMs;
-        float groundT = 99f;
-        if (gCounts.Count > 0)
-        {
-            int g0 = gCounts[0], gEnd = gCounts[gCounts.Count - 1];
-            if (gEnd - g0 > 50)
-            {
-                int target = g0 + Mathf.RoundToInt((gEnd - g0) * 0.9f);
-                for (int k = 0; k < gCounts.Count; k++)
-                    if (gCounts[k] >= target) { groundT = gTimes[k]; break; }
-            }
-        }
         int insideAfter = fc != null ? fc.InsideCount : -1;
         int groundAfter = fc != null ? fc.GroundCount : -1;
         Trace = string.Format(
@@ -538,8 +522,7 @@ public class ParryProbe : MonoBehaviour
             + string.Format(" | 飛沫ピーク {0} 収まるまで {1:F2}s", airPeak,
                             airSettle >= 0f ? airSettle : 99f)
             + string.Format(" | 最大速度 ピーク{0:F2} 平均{1:F2} m/s",
-                            spdPeak, spdN > 0 ? spdSum / spdN : 0f)
-            + string.Format(" | こぼれ着地まで {0:F2}s", groundT);
+                            spdPeak, spdN > 0 ? spdSum / spdN : 0f);
         Running = false;
     }
 

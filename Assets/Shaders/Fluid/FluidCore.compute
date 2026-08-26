@@ -137,7 +137,7 @@ float MaxSpeedPot;
 // 高所からのこぼれが不自然に遅く落ちる。地面バンドのトンネリング防止条件
 // (v * sdt < GroundBandHeight) を満たす範囲で上げる。
 float MaxSpeedFalling;
-float MaxSpeedOutsideVessel;
+float MaxSpeedAboveRim;
 float RestoreDropHeight;  // >0 なら回収した粒子をリムの上へ置いて落とし込む (0 = 旧: 壺の中へ直接)  // 壺のリムより上に跳ね上がった液の下限クランプ (calm でも遅くしない)
 float EscapedIgnoreCalm;   // 追補 33: 1 = 脱出済み液滴に calm を掛けない
 // 追補 26: パリー成功の「回収」— 壺の近くではみ出している粒子を口へ引き戻す。
@@ -460,32 +460,8 @@ void ScatterParticles(uint3 id : SV_DispatchThreadID)
 // 壺の中とその近傍にいる粒子だけ容器の並進速度を基準にし、壺の外 (地面の水たまり、
 // こぼれて落下中の液滴) は従来どおり世界基準にする。外まで容器基準にすると、容器が
 // 速く動くたびに静止した水たまりが引きずられてしまう。ゲートはプロファイルバッファに
-// 依存しない円筒近似 (半径 1.5 倍・上下に余裕)。
-// 2026-08-26: **かつて「Integrate にはプロファイルが束縛されていないので読むな」と
-// 書いてあった。** ClampSpeedFor で外形を見る必要が出たため、kIntegrateBoundary へ
-// PotProfileBuf / PotOuterBuf を束縛した (FluidCore.cs の Bind を参照)。束縛を外すと
-// 0 が読まれて全粒子が「壺の外」= 脱出扱いになり、壺が一瞬で空になる (実測)。
-// ClampSpeedFor から呼ぶため、ここに置いてある (元は下方に定義されていた)。
-float PotRadiusAt(float localY)
-{
-    float u = saturate((localY - PotFloorY) / max(1e-5, PotRimY - PotFloorY));
-    float f = u * (float)(PotProfileCount - 1);
-    uint i0 = (uint)floor(f);
-    uint i1 = min(i0 + 1, PotProfileCount - 1);
-    return lerp(PotProfileBuf[i0], PotProfileBuf[i1], saturate(f - (float)i0));
-}
-
-// 壺の実体の外周半径。範囲外は端の値で伸ばす（壺より上には実体が無いので、
-// リムの外周をそのまま使えば「壺の真上」を正しく外側と判定できる）。
-float PotOuterAt(float localY)
-{
-    float u = saturate((localY - PotMeshMinY) / max(1e-5, PotMeshMaxY - PotMeshMinY));
-    float f = u * (float)(PotProfileCount - 1);
-    uint i0 = (uint)f;
-    uint i1 = min(i0 + 1, PotProfileCount - 1);
-    return lerp(PotOuterBuf[i0], PotOuterBuf[i1], saturate(f - (float)i0));
-}
-
+// 依存しない円筒近似 (半径 1.5 倍・上下に余裕) — Integrate には PotProfileBuf が
+// 束縛されていないので、ここでプロファイルを読んではいけない。
 bool InPotGate(float3 worldPos)
 {
     if (SafetyEnabled == 0) return false;
@@ -493,6 +469,12 @@ bool InPotGate(float3 worldPos)
     float span = max(PotRimY - PotFloorY, 1e-3);
     return pl.y > PotMeshMinY - 0.5 * span && pl.y < PotRimY + span &&
            dot(pl.xz, pl.xz) < PotMaxRadius * PotMaxRadius * 2.25;
+}
+
+// 壺ローカルの高さ。リムより上かどうかの判定に使う。
+float PotLocalY(float3 worldPos)
+{
+    return mul(WorldToPotSafety, float4(worldPos, 1.0)).y;
 }
 
 float3 SpeedClampRef(float3 worldPos)
@@ -523,22 +505,14 @@ float3 ClampSpeedFor(float3 v, float3 worldPos, uint retired)
     bool gated = !escapedFree && InPotGate(worldPos);
     float3 vref = gated ? ContainerLinearVelocity : float3(0, 0, 0);
     float lim = gated ? MaxSpeedPot : MaxSpeedFalling;
-    // 2026-08-26 (報告「跳ね上がった液がゆっくり戻る」「壺のふちを伝って
-    // スローモーションで地面に落ちていく」):
-    // 追補 33 は **脱出済み** の液滴だけを calm から外した。しかしこぼれた直後の液は
-    // まだ脱出扱いではないのに InPotGate (外形 1.5 倍・上下 1 span) の中にいるので、
-    // calm の MaxSpeedPot (パリー成立で 0.5 m/s / 1.2 秒) に頭を押さえられる。
-    // 自由落下なら 2〜3 m/s のはずの液が 0.5 m/s に張り付く。
-    // 高さだけで見ると **ふちを越えて外側の胴を伝い落ちる液** が漏れる (リムより下なので)。
-    // **壺の実体の中にいない液は「壺の中身」ではない**ので calm の対象外にする。
-    // 容器基準は保つ (世界基準にすると歩行中にこぼれだけ置き去りに見える)。
-    if (gated)
-    {
-        float3 lpC = mul(WorldToPotSafety, float4(worldPos, 1.0)).xyz;
-        bool insideVessel = lpC.y >= PotFloorY - WallTolerance && lpC.y <= PotRimY
-                            && length(lpC.xz) <= PotOuterAt(lpC.y) + WallTolerance;
-        if (!insideVessel) lim = max(lim, MaxSpeedOutsideVessel);
-    }
+    // 2026-08-26 (報告「パリーすると跳ね上がったポーションがすごくゆっくり壺に戻る」):
+    // 追補 33 は **脱出済み** の液滴だけを calm から外した。しかし着地の衝撃で跳ね上がった
+    // 直後の液は、まだ脱出扱いではないのに InPotGate (外形 1.5 倍・上下 1 span) の中にいる。
+    // パリー成立で calm が 0.5 m/s / 1.2 秒かかるため、自由落下なら 2〜3 m/s で戻るはずの
+    // 液が 0.5 m/s に張り付き、宙に浮いたままゆっくり降りてくる。
+    // **リムより上は「壺の中身」ではなく飛沫**なので calm の対象外にする。
+    // 容器基準は保つ (世界基準にすると歩行中に飛沫だけ置き去りに見える)。
+    if (gated && PotLocalY(worldPos) > PotRimY) lim = max(lim, MaxSpeedAboveRim);
     float3 rel = v - vref;
     float sp = length(rel);
     if (sp > lim) rel *= lim / sp;
@@ -859,6 +833,26 @@ float SlopeHeightAt(float worldZ)
     uint i0 = (uint)floor(f);
     uint i1 = min(i0 + 1, SlopeProfileCount - 1);
     return lerp(SlopeProfileBuf[i0], SlopeProfileBuf[i1], saturate(f - (float)i0));
+}
+
+float PotRadiusAt(float localY)
+{
+    float u = saturate((localY - PotFloorY) / max(1e-5, PotRimY - PotFloorY));
+    float f = u * (float)(PotProfileCount - 1);
+    uint i0 = (uint)floor(f);
+    uint i1 = min(i0 + 1, PotProfileCount - 1);
+    return lerp(PotProfileBuf[i0], PotProfileBuf[i1], saturate(f - (float)i0));
+}
+
+// 壺の実体の外周半径。範囲外は端の値で伸ばす（壺より上には実体が無いので、
+// リムの外周をそのまま使えば「壺の真上」を正しく外側と判定できる）。
+float PotOuterAt(float localY)
+{
+    float u = saturate((localY - PotMeshMinY) / max(1e-5, PotMeshMaxY - PotMeshMinY));
+    float f = u * (float)(PotProfileCount - 1);
+    uint i0 = (uint)f;
+    uint i1 = min(i0 + 1, PotProfileCount - 1);
+    return lerp(PotOuterBuf[i0], PotOuterBuf[i1], saturate(f - (float)i0));
 }
 
 // ギミックの箱との衝突解決（宣言部の SolidBox* の注記を参照）。
