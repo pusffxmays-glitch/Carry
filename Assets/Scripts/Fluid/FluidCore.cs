@@ -134,6 +134,21 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 地面の水たまりを回収中だけ拾い直す実装も試したが、目視でも液は戻らなかったので
     // 撤去した (シェーダの脱出・退避まわりは壊れやすいので、動かないものを残さない)。
     // ここを本当に動かすなら、脱出判定そのものの見直しが要る。
+    // 2026-08-26: ジャンプ中にこぼれた液の猶予。**踏切で飛び出した分は着地の
+    // パリーで拾い直せるべき**なのに、着地する前に地面へ着いて「水たまり」として
+    // 凍結され、回収の対象から外れていた (滞空 0.7 秒に対し、壺の高さ 1.5m からの
+    // 落下は 0.5 秒)。猶予中は地面に着いても凍結せず、Escaped のまま置いておく。
+    float spillGraceUntil;
+    /// <summary>この秒数のあいだ、こぼれた液を地面で凍結させない (拾い直せる状態で置く)。</summary>
+    public void GrantSpillGrace(float seconds) { spillGraceUntil = Time.time + seconds; }
+    /// <summary>猶予を打ち切る。パリー失敗・無押しの着地で呼ぶ = こぼれは確定する。</summary>
+    public void EndSpillGrace() { spillGraceUntil = 0f; }
+    /// <summary>診断用: 猶予が効いているか。</summary>
+    public bool SpillGraceActive => Time.time < spillGraceUntil;
+
+    /// <summary>診断用: いま回収が効いているか。</summary>
+    public float RecallStrengthNow => Time.time < recallUntil ? recallStrengthValue : 0f;
+
     public void RecallSpill(float seconds, float strength)
     {
         recallUntil = Time.time + seconds;
@@ -1599,6 +1614,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetVector("RecallTarget", potPos + potUp * 0.85f);
         fluidCompute.SetFloat("RecallMinY", potPos.y - recallMinYDrop);
         fluidCompute.SetFloat("RecallRadius", recallRadius);
+        fluidCompute.SetFloat("SpillGrace", Time.time < spillGraceUntil ? 1f : 0f);
         // 上+前方に注入する (着地の跳ね返り + 前方サージ)。下向きは圧力ソルバが床境界へ
         // 吸収し、真上だけの噴水は壺内へ落ち戻るため、どちらも実測ほぼ無効だった。
         fluidCompute.SetVector("JoltAccel",

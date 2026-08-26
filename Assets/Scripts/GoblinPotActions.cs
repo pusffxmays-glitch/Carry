@@ -386,6 +386,10 @@ public class GoblinPotActions : MonoBehaviour
                 if (airborneNow)
                 {
                     airborneTime += Time.deltaTime;
+                    // 滞空中にこぼれた分は、着地の判定が出るまで「拾い直せる」状態で
+                    // 置いておく。短いリースを毎フレーム更新するので、着地して更新が
+                    // 止まれば自然に切れる。
+                    if (fluid != null && airborneTime > 0.12f) fluid.GrantSpillGrace(0.2f);
                     // 追補 15: 空中の Space はクッション予約 (地上判定が無いのでジャンプには化けない)
                     if ((kb != null && kb.spaceKey.wasPressedThisFrame) || debugParryRequest)
                     {
@@ -652,6 +656,9 @@ public class GoblinPotActions : MonoBehaviour
             LogParry($"小落下 (滞空 {airborneTime:F2}s < {significantFallAirtime:F2}) → 掛け金なし");
             return;
         }
+        // 失敗・無押しは猶予を打ち切る = 滞空中にこぼれた分はその場で確定する。
+        if (!parried && fluid != null) fluid.EndSpillGrace();
+
         if (!parried)
         {
             hotCalmUntil = 0f;
@@ -696,6 +703,9 @@ public class GoblinPotActions : MonoBehaviour
         if (!just && cushionGoodJolt > 0.001f && fluid != null)
             fluid.JoltPot((Vector3.up + transform.forward * 0.8f)
                           * (cushionMissJolt * cushionGoodJolt));
+        // 成立したら、回収が終わるまで猶予を延ばす (拾い直しの時間を確保する)。
+        if (fluid != null)
+            fluid.GrantSpillGrace((just ? cushionJustRecallSeconds : cushionRecallSeconds) + 0.3f);
         // パリーは「自分で受けた」着地なので、素の着地反動は止める。クッションのクリップが
         // 吸収を見せる側なので、二重に沈むと腰が抜けて見える。
         if (rig != null) rig.SuppressLandRecoil(0.6f);

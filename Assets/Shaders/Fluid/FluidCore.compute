@@ -144,6 +144,7 @@ float RecallStrength;
 float3 RecallTarget;
 float RecallMinY;      // これより低い粒子 (地面の水たまり) は回収しない
 float RecallRadius;    // 回収の届く距離 (m)
+float SpillGrace;      // 1 の間はこぼれを地面で凍結させない (拾い直せる状態で置く)
 // 追補 26: パリーなし着地のジョルト — 壺内の粒子へ 1 フレームかけて速度を注入し、
 // 着地の「ドスン」を流体に伝える (加速度として渡す: dv / frameDt)。
 // 縦成分だけだと噴水が壺内へ落ち戻るので、前方成分を混ぜてリムを越えさせる。
@@ -981,7 +982,9 @@ void Finalize(uint3 id : SV_DispatchThreadID)
             p.y = max(p.y, GroundY + GroundBandHeight * 0.35);
             Positions[i] = p;
             Velocities[i] = float3(0, 0, 0);
-            RetiredFlags[i] = 2u;
+            // 猶予中 (ジャンプ中〜着地のパリー判定まで) は Escaped のまま置いておく。
+            // 2u にすると凍結して回収の対象から外れ、踏切でこぼれた分が二度と戻らない。
+            if (SpillGrace < 0.5) RetiredFlags[i] = 2u;
             return;
         }
         // ギミックの箱との衝突は SolidBoxCollide カーネルが Finalize の後に行う

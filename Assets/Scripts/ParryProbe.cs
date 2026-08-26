@@ -461,11 +461,12 @@ public class ParryProbe : MonoBehaviour
         // 回収 (RecallSpill) と沈静を待つ。**Step 時間はここでゲーム内で測る。**
         // MCP から毎フレーム読むと、その読み出し自体が数百 ms のヒッチを作って
         // 「Step 70ms」のような偽のスパイクが出る。
-        float stepPeak = 0f, wt = 0f;
+        float stepPeak = 0f, wt = 0f, recallPeak = 0f;
         while (wt < 3.0f)
         {
             wt += Time.unscaledDeltaTime;
             if (fc != null && fc.LastStepMs > stepPeak) stepPeak = fc.LastStepMs;
+            if (fc != null && fc.RecallStrengthNow > recallPeak) recallPeak = fc.RecallStrengthNow;
             yield return null;
         }
         int insideAfter = fc != null ? fc.InsideCount : -1;
@@ -475,7 +476,7 @@ public class ParryProbe : MonoBehaviour
             mode, acts.LastParryResult, insideBefore, insideAtLand, insideAfter,
             insideAtLand - insideBefore, insideAfter - insideAtLand,
             airAtLand, groundAtLand, groundAfter)
-            + string.Format(" | 脱出判定 {0} | Step最大 {1:F1}ms", escAtLand, stepPeak);
+            + string.Format(" | 脱出判定 {0} | Step最大 {1:F1}ms | 回収強さ {2:F1}", escAtLand, stepPeak, recallPeak);
         Running = false;
     }
 
