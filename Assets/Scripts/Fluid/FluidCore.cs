@@ -118,6 +118,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     Vector3 joltDeltaV;
     int joltFrame = -1;
     /// <summary>パリー成功時: 壺の近くではみ出している粒子を seconds の間、口へ吸い戻す。</summary>
+    [Tooltip("回収の届く範囲 (m)。壺の口からこの距離まで。")]
+    public float recallRadius = 2.6f;
+    [Tooltip("回収の下限 (m)。壺の位置からこれだけ下までを拾う。踏切でこぼれた分は下へ落ちるので、狭いと何も戻らない。")]
+    public float recallMinYDrop = 0.6f;
+
     public void RecallSpill(float seconds, float strength)
     {
         recallUntil = Time.time + seconds;
@@ -1581,7 +1586,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         Vector3 potUp = boundary != null ? boundary.Container.up : Vector3.up;
         fluidCompute.SetFloat("RecallStrength", Time.time < recallUntil ? recallStrengthValue : 0f);
         fluidCompute.SetVector("RecallTarget", potPos + potUp * 0.85f);
-        fluidCompute.SetFloat("RecallMinY", potPos.y - 0.6f);
+        fluidCompute.SetFloat("RecallMinY", potPos.y - recallMinYDrop);
+        fluidCompute.SetFloat("RecallRadius", recallRadius);
         // 上+前方に注入する (着地の跳ね返り + 前方サージ)。下向きは圧力ソルバが床境界へ
         // 吸収し、真上だけの噴水は壺内へ落ち戻るため、どちらも実測ほぼ無効だった。
         fluidCompute.SetVector("JoltAccel",

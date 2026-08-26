@@ -143,6 +143,7 @@ float EscapedIgnoreCalm;   // 追補 33: 1 = 脱出済み液滴に calm を掛�
 float RecallStrength;
 float3 RecallTarget;
 float RecallMinY;      // これより低い粒子 (地面の水たまり) は回収しない
+float RecallRadius;    // 回収の届く距離 (m)
 // 追補 26: パリーなし着地のジョルト — 壺内の粒子へ 1 フレームかけて速度を注入し、
 // 着地の「ドスン」を流体に伝える (加速度として渡す: dv / frameDt)。
 // 縦成分だけだと噴水が壺内へ落ち戻るので、前方成分を混ぜてリムを越えさせる。
@@ -530,7 +531,7 @@ void IntegrateAndBoundary(uint3 id : SV_DispatchThreadID)
         float3 p = Positions[i];
         float3 toT = RecallTarget - p;
         float d = length(toT);
-        if (d < 2.6 && p.y > RecallMinY && !InPotGate(p))
+        if (d < RecallRadius && p.y > RecallMinY && !InPotGate(p))
         {
             float3 dir = toT / max(d, 0.001);
             v = lerp(v, dir * 7.0, saturate(RecallStrength * DeltaTime));

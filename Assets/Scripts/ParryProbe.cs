@@ -427,8 +427,7 @@ public class ParryProbe : MonoBehaviour
             loco.debugRun = true; loco.debugMoveForward = true;
             yield return new WaitForSeconds(1.8f);
         }
-        float before = src != null ? src.FillFraction01 : -1f;
-        int groundBefore = fc != null ? fc.GroundCount : -1;
+        int insideBefore = fc != null ? fc.InsideCount : -1;
 
         loco.debugJumpRequest = true;
         float t = 0f;
@@ -452,15 +451,21 @@ public class ParryProbe : MonoBehaviour
             if (armed && cc.isGrounded && t > 0.3f) break;
             yield return null;
         }
-        float atLand = src != null ? src.FillFraction01 : -1f;
         loco.debugMoveForward = false; loco.debugRun = false;
+        // **着地の瞬間** の内訳。ここから後の増分が「飛び出した分の巻き戻し回収」。
+        int insideAtLand = fc != null ? fc.InsideCount : -1;
+        int airAtLand = fc != null ? fc.AirborneCount : -1;
+        int escAtLand = fc != null ? fc.EscapedCount : -1;
+        int groundAtLand = fc != null ? fc.GroundCount : -1;
 
         yield return new WaitForSeconds(3.0f);   // 回収 (RecallSpill) と沈静を待つ
-        float after = src != null ? src.FillFraction01 : -1f;
+        int insideAfter = fc != null ? fc.InsideCount : -1;
         int groundAfter = fc != null ? fc.GroundCount : -1;
-        Trace = string.Format("mode={0} 判定={1} before={2:F4} atLand={3:F4} after={4:F4} 差={5:+0.0;-0.0}% 地面粒子={6}→{7} (+{8})",
-                              mode, acts.LastParryResult, before, atLand, after,
-                              (after - before) * 100f, groundBefore, groundAfter, groundAfter - groundBefore);
+        Trace = string.Format(
+            "mode={0} 判定={1} 壺内 {2}→{3}→{4} | 踏切〜着地の損失 {5} | 着地後の回収 {6:+0;-0} | 着地時の空中 {7} 地面 {8}→{9}",
+            mode, acts.LastParryResult, insideBefore, insideAtLand, insideAfter,
+            insideAtLand - insideBefore, insideAfter - insideAtLand,
+            airAtLand, groundAtLand, groundAfter) + string.Format(" | 脱出判定 {0}", escAtLand);
         Running = false;
     }
 
