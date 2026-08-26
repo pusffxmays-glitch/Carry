@@ -29,7 +29,7 @@ public class DebugStepRecorder : MonoBehaviour
         // FIXED 2026-08-22: FluidCore が複数あるシーンでは壺 (ゴブリンの子) を優先。
         // 以前は滝を掴み、fill 列が滝の残量を記録していた (歩行こぼれ計測を誤らせた)。
         core = loco != null ? loco.GetComponentInChildren<FluidCore>() : null;
-        if (core == null) core = FindObjectOfType<FluidCore>();
+        if (core == null) core = FluidCore.FindPotFluid();
         boundary = core != null ? core.Boundary : FindObjectOfType<FluidBoundary>();
         pot = goblin != null ? goblin.Find("Carry_Pot") : null;
         rig = goblin != null ? goblin.GetComponent<GoblinCarryRig>() : null;

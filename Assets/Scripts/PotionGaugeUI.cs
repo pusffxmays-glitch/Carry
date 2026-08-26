@@ -132,7 +132,7 @@ public class PotionGaugeUI : MonoBehaviour
             // **ゲージが滝の残量を表示していた**。壺 (ゴブリンの子) を優先して取る。
             var gobLoco = FindFirstObjectByType<GoblinLocomotion>();
             var core = gobLoco != null ? gobLoco.GetComponentInChildren<FluidCore>() : null;
-            if (core == null) core = FindFirstObjectByType<FluidCore>();
+            if (core == null) core = FluidCore.FindPotFluid();
             source = core;
             if (core != null) potionSourceBehaviour = core;
         }

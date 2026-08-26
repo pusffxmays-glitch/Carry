@@ -28394,6 +28394,7 @@ MonoBehaviour:
   cushionJumpSuppress: 0.2
   cushionJumpSuppressParry: 0
   cushionJumpSuppressFail: 0.5
+  cushionFailTiltDeg: 8
   cushionWhiffDistance: 1.2
   cushionWhiffColor: {r: 0.45, g: 0.42, b: 0.38, a: 1}
   significantFallAirtime: 0.35
@@ -28404,6 +28405,7 @@ MonoBehaviour:
   balanceInertiaRate: 1.2
   cushionMissJolt: 5
   cushionRiseSpeed: 0.5
+  LastParryResult: 
   cushionAdditive: 1
   debugParryHud: 1
   putDownSpeed: 2
@@ -28551,11 +28553,12 @@ MonoBehaviour:
   jumpCrouchTime: 0.06
   jumpCrouchTimeMoving: 0.04
   jumpBlendInSeconds: 0.2
-  gaitSwayWalkDeg: 2
-  gaitSwayRunDeg: 6
+  gaitSwayWalkDeg: 5
+  gaitSwayRunDeg: 18
   gaitSwayRate: 5
-  gaitSwayWalkLateral: 0.02
-  gaitSwayRunLateral: 0.06
+  gaitSwayWalkLateral: 0.05
+  gaitSwayRunLateral: 0.18
+  disturbDecayDegPerSec: 14
   landRecoilPerSpeed: 0.024
   landRecoilMax: 0.17
   landRecoilMinSpeed: 2.5

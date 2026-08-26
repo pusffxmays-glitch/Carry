@@ -33,7 +33,7 @@ public class DebugGimmickWarp : MonoBehaviour
         if (target == null) target = GetComponent<CharacterController>();
         // FIXED 2026-08-22: 複数 FluidCore シーンでは壺 (自分の子) を優先 (滝を掴んでいた)
         fluid = GetComponentInChildren<FluidCore>();
-        if (fluid == null) fluid = FindObjectOfType<FluidCore>();
+        if (fluid == null) fluid = FluidCore.FindPotFluid();
         slide = GetComponent<GoblinGroundSlide>();
         RefreshPoints();
     }

@@ -436,6 +436,24 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     /// 経路は Fluid -> PotMass -> PotionVolume の一方向だけ。逆方向は存在しない。</summary>
     public float FillFraction01 => InitialTotalMass > 0f ? Mathf.Clamp01(PotMass / InitialTotalMass) : 0f;
     public FluidBoundary Boundary => boundary;
+
+    /// <summary>**壺の** 流体を返す。シーンには滝 (FluidBoundary.Mode.Box) もあるので、
+    /// `FindFirstObjectByType&lt;FluidCore&gt;()` は滝を掴むことがある。
+    /// 2026-08-22 にゲージが滝の残量を表示する不具合、2026-08-26 に計測が丸ごと滝を
+    /// 読んでいた件と、同じ取り違えを 2 度やっている。判断をここに一本化する。
+    ///
+    /// 壺は PotProfile 境界なのでそれを優先し、見つからなければ最初のものを返す。</summary>
+    public static FluidCore FindPotFluid()
+    {
+        FluidCore fallback = null;
+        foreach (var f in FindObjectsByType<FluidCore>(FindObjectsSortMode.None))
+        {
+            var b = f.GetComponent<FluidBoundary>();
+            if (b != null && b.mode == FluidBoundary.Mode.PotProfile) return f;
+            if (fallback == null) fallback = f;
+        }
+        return fallback;
+    }
     /// <summary>流体が存在しうる World 空間の領域。容器に追従する。</summary>
     public Bounds SimBounds => new Bounds(regionCenter, regionSize);
 

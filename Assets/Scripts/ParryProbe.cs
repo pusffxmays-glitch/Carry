@@ -22,6 +22,18 @@ public class ParryProbe : MonoBehaviour
         return sb.ToString();
     }
 
+    // **FindFirstObjectByType<FluidCore>() を使ってはいけない。**
+    // シーンには滝 (PotionWaterfallFluid、mode=Box、粒子 2400) と壺 (Carry_Pot、
+    // mode=PotProfile、粒子 16384) の 2 つがあり、Find は滝を掴むことがある。
+    // 実際 2026-08-26 まで、この計測はずっと滝の残量を読んでいた
+    // (壺は inside=16384 / fill=1.000 なのに、読めていたのは滝の fill=0.854)。
+    // ゲーム側 (GoblinPotActions) と同じく **子から探す**。
+    FluidCore PotFluid()
+    {
+        var f = GetComponentInChildren<FluidCore>();
+        return f != null ? f : FluidCore.FindPotFluid();
+    }
+
     public static ParryProbe Attach()
     {
         var rig = FindFirstObjectByType<GoblinCarryRig>();
@@ -48,7 +60,7 @@ public class ParryProbe : MonoBehaviour
     {
         Running = true;
         StepHealth = "";
-        var fluid = FindFirstObjectByType<FluidCore>();
+        var fluid = PotFluid();
         var vals = new System.Collections.Generic.List<float>();
         int overWatchdog = 0, longestRun = 0, run = 0, frames = 0;
 
@@ -98,7 +110,7 @@ public class ParryProbe : MonoBehaviour
         var loco = GetComponent<GoblinLocomotion>();
         var acts = GetComponent<GoblinPotActions>();
         var cc = GetComponent<CharacterController>();
-        var src = FindFirstObjectByType<FluidCore>() as IPotionVolumeSource;
+        var src = PotFluid() as IPotionVolumeSource;
 
         loco.debugMoveForward = false;
         rig.armBalance = 0f;
@@ -281,7 +293,7 @@ public class ParryProbe : MonoBehaviour
         var rig = GetComponent<GoblinCarryRig>();
         var loco = GetComponent<GoblinLocomotion>();
         var cc = GetComponent<CharacterController>();
-        var src = FindFirstObjectByType<FluidCore>() as IPotionVolumeSource;
+        var src = PotFluid() as IPotionVolumeSource;
         loco.debugMoveForward = false; loco.debugRun = false;
         rig.armBalance = 0f; rig.pitchBalance = 0f;
         cc.enabled = false; transform.position = home; cc.enabled = true;
@@ -330,7 +342,7 @@ public class ParryProbe : MonoBehaviour
         var anim = GetComponent<GoblinClipAnimator>();
         var cc = GetComponent<CharacterController>();
         var tilt = GetComponent<GoblinTerrainTilt>();
-        var fc = FindFirstObjectByType<FluidCore>();
+        var fc = PotFluid();
         var src = fc as IPotionVolumeSource;
         loco.debugMoveForward = false; loco.debugRun = false;
         rig.armBalance = 0f; rig.pitchBalance = 0f;
@@ -395,7 +407,7 @@ public class ParryProbe : MonoBehaviour
         var acts = GetComponent<GoblinPotActions>();
         var cc = GetComponent<CharacterController>();
         var tilt = GetComponent<GoblinTerrainTilt>();
-        var fc = FindFirstObjectByType<FluidCore>();
+        var fc = PotFluid();
         var src = fc as IPotionVolumeSource;
         loco.debugMoveForward = false; loco.debugRun = false;
         acts.debugParryRequest = false;
@@ -508,7 +520,7 @@ public class ParryProbe : MonoBehaviour
         var acts = GetComponent<GoblinPotActions>();
         var anim = GetComponent<GoblinClipAnimator>();
         var cc = GetComponent<CharacterController>();
-        var src = FindFirstObjectByType<FluidCore>() as IPotionVolumeSource;
+        var src = PotFluid() as IPotionVolumeSource;
         var potT = rig.transform.Find("Carry_Pot");
         var handL = GoblinBoneUtil.FindDeep(rig.transform, "LeftHand");
         var handR = GoblinBoneUtil.FindDeep(rig.transform, "RightHand");

@@ -115,7 +115,7 @@ public class GoblinPotActions : MonoBehaviour
         // 一式が滝に適用され、壺は保護ゼロだった (「歩くだけで大量にこぼれる」の真犯人)。
         // 壺は自分の子 (Carry_Pot) にあるので、そこから取る。
         fluid = GetComponentInChildren<FluidCore>();
-        if (fluid == null) fluid = FindFirstObjectByType<FluidCore>();
+        if (fluid == null) fluid = FluidCore.FindPotFluid();   // Find だと滝を掴む
 
         // 追補 24: 待機画面 (エディットモード) では壺をゴブリンの横の地面に置いて
         // 見せている (頭に壺が埋まるのを避けるため)。実行開始時は **流体の初期化前に**
@@ -685,7 +685,7 @@ public class GoblinPotActions : MonoBehaviour
         if (glowPulsing) yield break;
         // 壺自身の FluidSurface を光らせる (FindFirst だと滝の表面を掴むことがある)
         var fs = fluid != null ? fluid.GetComponent<FluidSurface>() : null;
-        if (fs == null) fs = FindFirstObjectByType<FluidSurface>();
+        if (fs == null) { var pf = FluidCore.FindPotFluid(); fs = pf != null ? pf.GetComponent<FluidSurface>() : null; }
         if (fs == null || fs.liquidMaterial == null) yield break;
         var m = fs.liquidMaterial;
         if (emissionBase < 0f) emissionBase = m.GetFloat("_EmissionStrength");

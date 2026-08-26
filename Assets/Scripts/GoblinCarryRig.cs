@@ -346,27 +346,38 @@ public class GoblinCarryRig : MonoBehaviour
     // 調べたら壺内クランプ (calm) は原因ではなかった。**calm を全部切っても走行 8.6m で
     // こぼれ 0%**。runSpeed を 5 → 2.4 に下げたので、そもそも液面がリムに届いていない。
     // 腕の振り幅も壺の追従レートも効かず、効いた唯一のレバーが「壺を左右に振ること」。
-    // 実測 (走行 2 秒、ゲージ): 揺れなし 58→56% / 揺れ 6 度 + 横 6cm で 54→38%。
-    // 歩きは同じ設定でも 38→38% で減らない = 「歩きは安全・走りは危険」が数字で出る。
-    // 6 度/6cm は 2 秒で壺が空になる勢いだったので既定はその半分にしてある。
-    // ロール成分だけでも噴き出すので、**バランス操作 (armBalance) で打ち消せる** =
+    // 値は 2026-08-26 に測り直した。それ以前の数字は **滝の流体を読んでいて無効**
+    // ([[carry-two-fluidcores]])。壺の InsideCount (満タン 16384) で、毎回プレイし直して
+    // 満タンから走行 8.6m したときのこぼれ:
+    //
+    //   揺れなし / 3度 / 6度 : 0.00%      12度: -0.41%      16度/16cm: -0.31 〜 -2.31%
+    //   20度/20cm: -20.7% (4 秒で壺が空になる)      歩き 5度/5cm: 0.00%
+    //
+    // 12〜20 度の間に崖がある。**16 度はしきい値の上に乗っていて当たり外れが大きい**
+    // (同じ設定で 0.00 / -0.29 / -0.59 / -2.31%)。18 度なら毎回 -2.3 〜 -5.1% で安定するので
+    // こちらを既定にした。走行 8.6m ごとにこれだけ減る = 30〜40m 走ると 1/4 を失う。
+    // ロールが主で横ずれが増幅する (ロール16/横6 = -0.65%、両方16 = -2.31%、
+    // ロール6/横16 = 0.00%)。**ロールはマウスで打ち消せる成分**なので、
     // 上手く操作すれば走ってもこぼれを抑えられる、という設計が成立する。
+    //
+    // 壺内クランプ (runCalmClamp) が支配的。この揺れのまま calm を切ると **-47%**。
+    // 揺れと calm はセットで調整すること。
     // そこで歩容の位相で壺の目標ロールを揺らす。**プレイヤーの入力 (armBalance) とは
     // 別系統の外乱**なので、走ると壺が揺れる → マウスで抑え込む、という操作になる。
     [Header("Gait sway (2026-08-25)")]
     [Tooltip("歩容で壺が左右に揺れる角度 (度)。歩き。0 で揺れなし。")]
-    public float gaitSwayWalkDeg = 1.0f;
+    public float gaitSwayWalkDeg = 5.0f;
     [Tooltip("同、走り。走るほうを大きくすると「速いがリスク」になる。")]
-    public float gaitSwayRunDeg = 3.0f;
+    public float gaitSwayRunDeg = 18.0f;
     [Tooltip("揺れの立ち上がり/収まりの速さ (1/s)。")]
     public float gaitSwayRate = 5f;
     // ロールだけでは液が動かない (実測: 壺を +-12 度で振っても走行 8.6m のこぼれ 0%)。
     // 中身を揺らすのは **容器の横移動**。壺の軸まわりに回すだけだと液面が傾くだけで
     // 慣性が生まれない。歩容の位相で壺を左右にずらす量をここで持つ。
     [Tooltip("歩容で壺が左右にずれる量 (m)。歩き。液を揺らすのは主にこちら。")]
-    public float gaitSwayWalkLateral = 0.01f;
+    public float gaitSwayWalkLateral = 0.05f;
     [Tooltip("同、走り。")]
-    public float gaitSwayRunLateral = 0.03f;
+    public float gaitSwayRunLateral = 0.18f;
     float gaitSwayAmp, gaitSwayLateralAmp;
 
     // 2026-08-26: 外乱 (パリー失敗など)。**NudgeBalance は使えない** — armBalance は
@@ -1038,7 +1049,12 @@ public class GoblinCarryRig : MonoBehaviour
             gaitSwayLateralAmp = Mathf.Lerp(gaitSwayLateralAmp, latTarget, k);
             float swayPhase = Mathf.Sin(walkPhase * 2f * Mathf.PI);
             float gaitSway = gaitSwayAmp * swayPhase;
-            disturbDeg = Mathf.MoveTowards(disturbDeg, 0f, disturbDecayDegPerSec * Time.deltaTime);
+            // 2026-08-26: パリーの水平化 (CushionRecenter) は armBalance しか戻していなかった。
+            // 外乱で傾いたまま着地するとその側から流れ出るので、よろけからのジャンプでは
+            // パリーが成立しても 3.4〜4.8% こぼれていた (実測、成功しても地面へ 556〜792 粒)。
+            // 水平化の間は外乱も一緒に抜く。
+            float decay = Time.time < recenterUntil ? disturbDecayDegPerSec * 6f : disturbDecayDegPerSec;
+            disturbDeg = Mathf.MoveTowards(disturbDeg, 0f, decay * Time.deltaTime);
             potLateralSlow = Mathf.Lerp(potLateralSlow, PotLateralDeg(),
                                         1f - Mathf.Exp(-1.2f * Time.deltaTime));
             Quaternion targetRot = Quaternion.AngleAxis(armRoll - potNeutralRollDeg + gaitSway + disturbDeg, fwd) * basePose;
