@@ -28382,10 +28382,20 @@ MonoBehaviour:
   debugParryRequest: 0
   cushionWindow: 0.35
   cushionJustWindow: 0.12
+  cushionJustCalmSeconds: 1.2
+  cushionCalmSeconds: 0.8
+  cushionJustRecallSeconds: 1.2
+  cushionJustRecallStrength: 16
+  cushionRecallSeconds: 0.5
+  cushionRecallStrength: 6
   cushionCalm: 0.8
   cushionJustCalm: 0.5
-  cushionFailNudge: 0.25
+  cushionFailNudge: 0.5
   cushionJumpSuppress: 0.2
+  cushionJumpSuppressParry: 0
+  cushionJumpSuppressFail: 0.5
+  cushionWhiffDistance: 1.2
+  cushionWhiffColor: {r: 0.45, g: 0.42, b: 0.38, a: 1}
   significantFallAirtime: 0.35
   rampCalmClamp: 0.5
   walkCalmClamp: 1
@@ -28541,6 +28551,11 @@ MonoBehaviour:
   jumpCrouchTime: 0.06
   jumpCrouchTimeMoving: 0.04
   jumpBlendInSeconds: 0.2
+  gaitSwayWalkDeg: 2
+  gaitSwayRunDeg: 6
+  gaitSwayRate: 5
+  gaitSwayWalkLateral: 0.02
+  gaitSwayRunLateral: 0.06
   landRecoilPerSpeed: 0.024
   landRecoilMax: 0.17
   landRecoilMinSpeed: 2.5

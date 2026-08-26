@@ -155,6 +155,20 @@ public class GoblinPotActions : MonoBehaviour
         if (rig != null) rig.CushionRecenter(0.5f);
         // 追補 25: 膝で受ける = 残りの落下を軟化して衝撃自体を減らす
         if (loco != null) loco.SoftenLanding(1.2f);
+        // 2026-08-26: **高いところで押したら、その場で失敗と分かるようにする**。
+        // 代償 (着地のよろけ) は着地時に払うので中身は変わらない。ここは演出だけ。
+        // 窓は着地前 0.35 秒なので、足元まで cushionWhiffDistance 以上あれば
+        // まず間に合わない = 押した瞬間に「早い」と言い切れる。
+        // 「高い位置」だけでは足りない。**離陸直後は低いのに一番早い押し**なので、
+        // 上昇中かどうかも見る。上がっている最中に押したら 0.35 秒以内には着地しない。
+        bool rising = loco != null && loco.VerticalVelocity > 0.5f;
+        bool tooHigh = terrainTilt != null && terrainTilt.GroundDistance > cushionWhiffDistance;
+        if (rising || tooHigh)
+        {
+            LogParry($"<color=grey>空振り確定 ({(rising ? "上昇中" : "高い")}, 足元まで "
+                     + $"{(terrainTilt != null ? terrainTilt.GroundDistance : -1f):F2}m)</color>");
+            ParryRingFX.Spawn(transform.position + Vector3.up * 0.15f, cushionWhiffColor);
+        }
     }
 
     /// <summary>計測用: 次に空中判定になったフレームでパリーを押したことにする。
@@ -171,6 +185,22 @@ public class GoblinPotActions : MonoBehaviour
     public float cushionJustWindow = 0.12f;
     // 実測 (満杯・定速走りジャンプ): なし 88-89% / グッド (0.6) 92% / ジャスト (0.5) 99%。
     // 0.8 だとグッドが「なし」と差別化できなかった (89%) ため 0.6 に強化 (追補 16)。
+    // 2026-08-25 (報告「青パリーと黄パリーの違いが分からない」)。実測でも青と金の残量差が
+    // 1 回ごとのばらつき (±1〜4%) に埋もれていた。方針は **金 = そのランディングのこぼれを
+    // ゼロにする / 青 = 軽減のみ**。差が数字で出るよう、鎮め時間と回収も外に出す。
+    [Tooltip("ジャスト成立時に壺内を鎮める時間 (秒)。")]
+    public float cushionJustCalmSeconds = 1.2f;
+    [Tooltip("グッド成立時に壺内を鎮める時間 (秒)。")]
+    public float cushionCalmSeconds = 0.8f;
+    [Tooltip("ジャスト成立時のこぼれ回収の長さ (秒)。")]
+    public float cushionJustRecallSeconds = 1.2f;
+    [Tooltip("ジャスト成立時のこぼれ回収の強さ。")]
+    public float cushionJustRecallStrength = 16f;
+    [Tooltip("グッド成立時のこぼれ回収の長さ (秒)。")]
+    public float cushionRecallSeconds = 0.5f;
+    [Tooltip("グッド成立時のこぼれ回収の強さ。")]
+    public float cushionRecallStrength = 6f;
+
     [Tooltip("成立時の壺内クランプ。滞空 calm (1.2) より強い。")]
     public float cushionCalm = 0.5f;    // 追補 25: 0.6 → 0.5 (高所パリーの吸収強化)
     [Tooltip("ジャスト時の壺内クランプ。")]
@@ -179,6 +209,18 @@ public class GoblinPotActions : MonoBehaviour
     public float cushionFailNudge = 0.25f;
     [Tooltip("着地後のジャンプ抑止時間 (秒)。惜しい遅押しの誤ジャンプ防止。")]
     public float cushionJumpSuppress = 0.2f;
+    [Tooltip("パリー成立時に着地直後のジャンプを抑止する秒数。0 でそのまま跳び継げる。")]
+    public float cushionJumpSuppressParry = 0f;
+    // 望ましい優劣: パリー成功 > 何もしない > パリー失敗。
+    // 成功は即跳べる / 何もしなければ従来どおり / 失敗は立て直しに時間が要る。
+    [Tooltip("パリー失敗時に着地直後のジャンプを抑止する秒数。よろけの立て直しぶん。")]
+    public float cushionJumpSuppressFail = 0.5f;
+    [Tooltip("パリー失敗時に壺へ与える外乱 (度)。プレイヤーはマウスで打ち消す。armBalance +1 が約 15 度。")]
+    public float cushionFailTiltDeg = 8f;
+    [Tooltip("この距離より高い位置で押したら、その場で空振りと分かる演出を出す (m)。")]
+    public float cushionWhiffDistance = 1.2f;
+    [Tooltip("空振り演出の色。成功のリング (シアン/金) と区別がつく鈍い色にすること。")]
+    public Color cushionWhiffColor = new Color(0.45f, 0.42f, 0.38f, 1f);
     // 追補 27 (2026-08-21): 道の段差 (15-25cm) を降りるだけで「生着地」となり、通常ジャンプ用の
     // 掛け金 (cushionMissJolt) が発火して不自然に大量にこぼれていた (実測: 橋→道進入の直線
     // 歩行だけで 45% 喪失、滞空 0.13-0.24s の生着地が 3-4 回)。実際のジャンプの滞空は 0.6s
@@ -206,6 +248,9 @@ public class GoblinPotActions : MonoBehaviour
     [Range(0.2f, 1f)] public float cushionRiseSpeed = 0.5f;
 
     bool cushionPressed;         // この滞空中に Space を押したか
+    bool cushionPressUsed;       // この滞空でパリー入力を使い切ったか (1 滞空 1 回)
+    /// <summary>直近の着地判定 ("just" / "good" / "fail" / "none")。計測用。</summary>
+    public string LastParryResult = "";
     float cushionPressTime = -999f;
 
     [Tooltip("着地クッションを加算再生する (担ぎ姿勢からの差分)。切ると従来の絶対再生に戻る。A/B 用。")]
@@ -310,7 +355,16 @@ public class GoblinPotActions : MonoBehaviour
                     if ((kb != null && kb.spaceKey.wasPressedThisFrame) || debugParryRequest)
                     {
                         debugParryRequest = false;
-                        PressCushion();
+                        // 2026-08-26: **1 回の滞空につき 1 回だけ**。従来は空中の Space を
+                        // 毎回無条件に受け、判定は「最後の押しから着地まで」だったので、
+                        // **連打すれば必ずジャストになった** (早押しの罰も実質発生しない)。
+                        if (cushionPressUsed)
+                            LogParry("<color=grey>空中押し (この滞空ではもう使った → 無視)</color>");
+                        else
+                        {
+                            cushionPressUsed = true;
+                            PressCushion();
+                        }
                     }
                 }
                 else
@@ -326,6 +380,7 @@ public class GoblinPotActions : MonoBehaviour
                     else if (airborneTime > 0f)
                         LogParry($"接地 (滞空 {airborneTime:F2}s < 0.12 → 判定なし)");
                     airborneTime = 0f;
+                    cushionPressUsed = false;   // 次の滞空でまた 1 回使える
                 }
                 // 追補 16→19 改訂: calm は「離陸直後 0.35 秒 (上昇の保護 = 理不尽なし)」と
                 // 「パリー押下後」だけ。降下中は素通しにして揺れを再発達させる。
@@ -508,10 +563,7 @@ public class GoblinPotActions : MonoBehaviour
             return;
         }
 
-        // 惜しい遅押しが誤ジャンプに化けないよう、着地直後のジャンプを抑止
-        if (loco != null) loco.jumpSuppressedUntil = Time.time + cushionJumpSuppress;
-
-        bool parried = false;
+        bool parried = false, failed = false;
         if (cushionPressed)
         {
             cushionPressed = false;
@@ -519,24 +571,41 @@ public class GoblinPotActions : MonoBehaviour
             if (sincePress <= cushionJustWindow)
             {
                 LogParry($"<color=yellow>着地: {sincePress:F2}s 前の押し → ジャスト!</color> (窓 {cushionJustWindow:F2})");
-                DoCushion(just: true); parried = true;
+                DoCushion(just: true); parried = true; LastParryResult = "just";
             }
             else if (sincePress <= cushionWindow)
             {
                 LogParry($"<color=cyan>着地: {sincePress:F2}s 前の押し → グッド</color> (窓 {cushionWindow:F2})");
-                DoCushion(just: false); parried = true;
+                DoCushion(just: false); parried = true; LastParryResult = "good";
             }
             else
             {
-                LogParry($"<color=orange>着地: {sincePress:F2}s 前の押し → 早すぎ</color> (窓 {cushionWindow:F2} + よろけ)");
+                // 2026-08-26: 失敗の代償は **押した時期に関わらず同じ**。上体のよろけ
+                // (よろけ 1 段目) を確実に出し、立て直すまで次のジャンプを止める。
+                // 踏み替え (2 段目) は横へ 27cm 動いてしまい、足場から落ちる事故が増えるので使わない。
+                LogParry($"<color=orange>着地: {sincePress:F2}s 前の押し → 失敗</color> (窓 {cushionWindow:F2} + よろけ)");
                 if (rig != null)
+                {
+                    rig.DisturbPotOutward(cushionFailTiltDeg);   // マウス操作でも効く外乱
                     rig.NudgeBalance((Random.value < 0.5f ? -1f : 1f) * cushionFailNudge);
+                }
+                ParryRingFX.Spawn(transform.position, cushionWhiffColor);
+                failed = true; LastParryResult = "fail";
             }
         }
         else
         {
             LogParry($"着地: 押しなし (滞空 {airborneTime:F2}s) → 生着地");
+            LastParryResult = "none";
         }
+        // 2026-08-26: 次のジャンプまでの間を **結果で変える**。
+        // 成功したらそのまま跳び継げる (リズムが繋がるのがパリーの報酬)。
+        // 失敗は体勢が崩れているのですぐには跳べない。
+        if (loco != null)
+            loco.jumpSuppressedUntil = Time.time
+                + (parried ? cushionJumpSuppressParry
+                           : failed ? cushionJumpSuppressFail : cushionJumpSuppress);
+
         // 追補 19: パリーなし (または失敗) の着地は、その瞬間に滞空 calm を解いて
         // 衝撃をそのまま受ける。従来は calm が着地後 0.6 秒残り、パリーなしでも
         // ほぼこぼれず「パリーの意味がない」状態だった (ユーザー指摘)。
@@ -593,9 +662,12 @@ public class GoblinPotActions : MonoBehaviour
         if (rig != null) rig.SuppressLandRecoil(0.6f);
         // 滞空 calm (1.2) よりさらに強く絞って着地衝撃を吸収する
         BeginFluidCalm(just ? cushionJustCalm : cushionCalm);
-        hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + (just ? 1.0f : 0.8f));
+        hotCalmUntil = Mathf.Max(hotCalmUntil,
+            Time.time + (just ? cushionJustCalmSeconds : cushionCalmSeconds));
         // 追補 26: はみ出して落下中のポーションを口へ吸い戻す (パリーの嬉しさ演出も兼ねる)
-        if (fluid != null) fluid.RecallSpill(just ? 0.7f : 0.5f, just ? 10f : 6f);
+        if (fluid != null)
+            fluid.RecallSpill(just ? cushionJustRecallSeconds : cushionRecallSeconds,
+                              just ? cushionJustRecallStrength : cushionRecallStrength);
         StartCoroutine(GlowPulse(just ? 6.5f : 4.5f, 0.25f));
         // 追補 20: 足元リング衝撃波 (グッド = シアン / ジャスト = 金、HDR で Bloom が滲む)
         ParryRingFX.Spawn(transform.position,

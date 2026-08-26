@@ -102,6 +102,10 @@ public class ParryProbe : MonoBehaviour
 
         loco.debugMoveForward = false;
         rig.armBalance = 0f;
+        // 前回の走行で消費されずに残った予約を捨てる。残っていると次のジャンプの
+        // 最初のフレームで消費され、1 滞空 1 回の制限に引っかかって本命の押しが無視される。
+        var actsClear = GetComponent<GoblinPotActions>();
+        if (actsClear != null) actsClear.debugParryRequest = false;
         cc.enabled = false; transform.position = home; cc.enabled = true;
         yield return new WaitForSeconds(2.5f);          // 液面が静定するまで待つ
 
@@ -226,6 +230,10 @@ public class ParryProbe : MonoBehaviour
         var hips  = GoblinBoneUtil.FindDeep(rig.transform, "Hips");
         loco.debugMoveForward = false;
         rig.armBalance = 0f;
+        // 前回の走行で消費されずに残った予約を捨てる。残っていると次のジャンプの
+        // 最初のフレームで消費され、1 滞空 1 回の制限に引っかかって本命の押しが無視される。
+        var actsClear = GetComponent<GoblinPotActions>();
+        if (actsClear != null) actsClear.debugParryRequest = false;
         cc.enabled = false; transform.position = home; cc.enabled = true;
         yield return new WaitForSeconds(2.0f);
 
@@ -258,6 +266,192 @@ public class ParryProbe : MonoBehaviour
         Running = false;
     }
 
+    /// <summary>一定時間まっすぐ歩く/走るだけ。移動そのもののこぼれ量を測る。</summary>
+    public void RunSteady(Vector3 home, float seconds, bool running, float swayAmp = 0f, float swayHz = 1.2f)
+    {
+        if (Running) return;
+        StopAllCoroutines();
+        StartCoroutine(SteadySequence(home, seconds, running, swayAmp, swayHz));
+    }
+
+    IEnumerator SteadySequence(Vector3 home, float seconds, bool running, float swayAmp, float swayHz)
+    {
+        Running = true;
+        Trace = "";
+        var rig = GetComponent<GoblinCarryRig>();
+        var loco = GetComponent<GoblinLocomotion>();
+        var cc = GetComponent<CharacterController>();
+        var src = FindFirstObjectByType<FluidCore>() as IPotionVolumeSource;
+        loco.debugMoveForward = false; loco.debugRun = false;
+        rig.armBalance = 0f; rig.pitchBalance = 0f;
+        cc.enabled = false; transform.position = home; cc.enabled = true;
+        yield return new WaitForSeconds(2.5f);
+        float before = src != null ? src.FillFraction01 : -1f;
+        Vector3 p0 = transform.position;
+
+        loco.debugRun = running;
+        loco.debugMoveForward = true;
+        float t = 0f;
+        float maxSpd = 0f;
+        while (t < seconds)
+        {
+            t += Time.unscaledDeltaTime;
+            // 歩容由来の揺れを模す。歩幅の周期で壺を左右に振る。
+            if (swayAmp > 0.0001f) rig.armBalance = Mathf.Sin(t * Mathf.PI * 2f * swayHz) * swayAmp;
+            if (loco.CurrentSpeed > maxSpd) maxSpd = loco.CurrentSpeed;
+            yield return null;
+        }
+        rig.armBalance = 0f;
+        loco.debugMoveForward = false; loco.debugRun = false;
+        yield return new WaitForSeconds(1.5f);
+        float after = src != null ? src.FillFraction01 : -1f;
+        float dist = Vector3.ProjectOnPlane(transform.position - p0, Vector3.up).magnitude;
+        Trace = string.Format("steady run={0} sway={1:F2} before={2:F4} after={3:F4} loss={4:F1}% dist={5:F1}m maxSpeed={6:F2}",
+                              running, swayAmp, before, after, (before - after) * 100f, dist, maxSpd);
+        Running = false;
+    }
+
+    /// <summary>ジャンプ中に壺を振ってこぼしてから着地でパリーする。
+    /// 青 (グッド) と金 (ジャスト) の回収量の違いを測るためのもの。</summary>
+    public void RunSpillParry(Vector3 home, float shakeAmp)
+    {
+        if (Running) return;
+        StopAllCoroutines();
+        StartCoroutine(SpillParrySequence(home, shakeAmp));
+    }
+
+    IEnumerator SpillParrySequence(Vector3 home, float shakeAmp)
+    {
+        Running = true;
+        Trace = "";
+        var rig = GetComponent<GoblinCarryRig>();
+        var loco = GetComponent<GoblinLocomotion>();
+        var acts = GetComponent<GoblinPotActions>();
+        var anim = GetComponent<GoblinClipAnimator>();
+        var cc = GetComponent<CharacterController>();
+        var tilt = GetComponent<GoblinTerrainTilt>();
+        var fc = FindFirstObjectByType<FluidCore>();
+        var src = fc as IPotionVolumeSource;
+        loco.debugMoveForward = false; loco.debugRun = false;
+        rig.armBalance = 0f; rig.pitchBalance = 0f;
+        cc.enabled = false; transform.position = home; cc.enabled = true;
+        yield return new WaitForSeconds(2.5f);
+        float before = src != null ? src.FillFraction01 : -1f;
+
+        loco.debugJumpRequest = true;
+        float t = 0f;
+        while (cc.isGrounded && t < 1.5f) { t += Time.deltaTime; yield return null; }
+
+        // 滞空中に壺を振ってこぼす。balanceInertiaRate を超える速さで振らないと
+        // calm が掛かったままで慣性が死ぬので、1 往復 0.25 秒で振る。
+        float shakeT = 0f, maxGd = 0f, prevY = transform.position.y;
+        bool pressed = false;
+        t = 0f;
+        while (t < 4f)
+        {
+            float dt = Time.deltaTime;
+            t += dt; shakeT += dt;
+            rig.armBalance = Mathf.Sin(shakeT * Mathf.PI * 8f) * shakeAmp;
+            float gd = tilt != null ? tilt.GroundDistance : (cc.isGrounded ? 0f : 9f);
+            if (gd > maxGd) maxGd = gd;
+            bool descending = transform.position.y < prevY - 0.001f;
+            prevY = transform.position.y;
+            if (!pressed && t > 0.40f && descending && maxGd > 0.35f
+                && gd < Mathf.Max(0.22f, maxGd * 0.45f))
+            { acts.debugParryRequest = true; pressed = true; }
+            if (pressed && cc.isGrounded && t > 0.5f) break;
+            yield return null;
+        }
+        rig.armBalance = 0f;
+        float atLand = src != null ? src.FillFraction01 : -1f;
+        int escAtLand = fc != null ? fc.EscapedCount : -1;
+
+        // 回収 (RecallSpill) が効き切るまで待つ
+        yield return new WaitForSeconds(2.5f);
+        float after = src != null ? src.FillFraction01 : -1f;
+        bool cushion = anim != null && anim.CurrentOneShot != null;
+        Trace = string.Format("spillparry before={0:F4} atLand={1:F4} after={2:F4} 回収={3:F1}% escaped={4} pressed={5} clip={6}",
+                              before, atLand, after, (after - atLand) * 100f, escAtLand, pressed, cushion);
+        Running = false;
+    }
+
+    /// <summary>パリー成功が状況ごとに本当に回収できているかを測る。
+    /// mode 0 = 大きく揺らしてから (こぼしそうな状態でのパリー)
+    /// mode 1 = よろけた状態からのジャンプ
+    /// mode 2 = 走りジャンプ</summary>
+    public void RunParryCase(Vector3 home, int mode)
+    {
+        if (Running) return;
+        StopAllCoroutines();
+        StartCoroutine(ParryCaseSequence(home, mode));
+    }
+
+    IEnumerator ParryCaseSequence(Vector3 home, int mode)
+    {
+        Running = true;
+        Trace = "";
+        var rig = GetComponent<GoblinCarryRig>();
+        var loco = GetComponent<GoblinLocomotion>();
+        var acts = GetComponent<GoblinPotActions>();
+        var cc = GetComponent<CharacterController>();
+        var tilt = GetComponent<GoblinTerrainTilt>();
+        var fc = FindFirstObjectByType<FluidCore>();
+        var src = fc as IPotionVolumeSource;
+        loco.debugMoveForward = false; loco.debugRun = false;
+        acts.debugParryRequest = false;
+        acts.LastParryResult = "";
+        rig.armBalance = 0f; rig.pitchBalance = 0f;
+        cc.enabled = false; transform.position = home; cc.enabled = true;
+        yield return new WaitForSeconds(2.5f);
+
+        if (mode == 1)
+        {
+            // よろけさせてから跳ぶ。外乱は入力とは別系統 (armBalance はマウスに上書きされる)。
+            rig.DisturbPotOutward(14f);
+            yield return new WaitForSeconds(0.35f);
+        }
+        if (mode == 2)
+        {
+            loco.debugRun = true; loco.debugMoveForward = true;
+            yield return new WaitForSeconds(1.8f);
+        }
+        float before = src != null ? src.FillFraction01 : -1f;
+        int groundBefore = fc != null ? fc.GroundCount : -1;
+
+        loco.debugJumpRequest = true;
+        float t = 0f;
+        bool airborneSeen = false, armed = false;
+        float shakeT = 0f;
+        while (t < 4f)
+        {
+            float dt = Time.deltaTime;
+            t += dt; shakeT += dt;
+            float gd = tilt != null ? tilt.GroundDistance : (cc.isGrounded ? 0f : 9f);
+            if (gd > 0.70f) airborneSeen = true;
+            // mode 0: 滞空中ずっと壺を揺らして「こぼしそう」を作る
+            if (mode == 0 && airborneSeen && shakeT > 0.09f)
+            { rig.DisturbPot(Mathf.Sin(t * 22f) * 9f); shakeT = 0f; }
+            // **接地中も VerticalVelocity は -1**。滞空を見てから押すこと。
+            // しきい値 0.42m は低すぎた。20fps では 1 フレーム 0.2m 落ちるので、
+            // 予約が消費される前に接地して丸ごと無視されていた (判定=none が 9/9)。
+            // 0.75m なら SoftenLanding (3.5 m/s) で着地まで 0.21 秒 = グッドの窓の内側。
+            if (airborneSeen && loco.VerticalVelocity < -0.2f && gd < 0.75f && !cc.isGrounded)
+            { acts.debugParryRequest = true; armed = true; }
+            if (armed && cc.isGrounded && t > 0.3f) break;
+            yield return null;
+        }
+        float atLand = src != null ? src.FillFraction01 : -1f;
+        loco.debugMoveForward = false; loco.debugRun = false;
+
+        yield return new WaitForSeconds(3.0f);   // 回収 (RecallSpill) と沈静を待つ
+        float after = src != null ? src.FillFraction01 : -1f;
+        int groundAfter = fc != null ? fc.GroundCount : -1;
+        Trace = string.Format("mode={0} 判定={1} before={2:F4} atLand={3:F4} after={4:F4} 差={5:+0.0;-0.0}% 地面粒子={6}→{7} (+{8})",
+                              mode, acts.LastParryResult, before, atLand, after,
+                              (after - before) * 100f, groundBefore, groundAfter, groundAfter - groundBefore);
+        Running = false;
+    }
+
     /// <summary>比較対照: パリーを挟まずに、その場から歩き出すだけ。
     /// 「歩き出しの遅延」がパリー由来なのか、もともとの加速ランプなのかを分ける。</summary>
     public void RunWalkStart(Vector3 home)
@@ -277,6 +471,10 @@ public class ParryProbe : MonoBehaviour
         var rig = GetComponent<GoblinCarryRig>();
         loco.debugMoveForward = false;
         rig.armBalance = 0f;
+        // 前回の走行で消費されずに残った予約を捨てる。残っていると次のジャンプの
+        // 最初のフレームで消費され、1 滞空 1 回の制限に引っかかって本命の押しが無視される。
+        var actsClear = GetComponent<GoblinPotActions>();
+        if (actsClear != null) actsClear.debugParryRequest = false;
         cc.enabled = false; transform.position = home; cc.enabled = true;
         yield return new WaitForSeconds(2.5f);
 
@@ -319,6 +517,10 @@ public class ParryProbe : MonoBehaviour
 
         loco.debugMoveForward = false;
         rig.armBalance = 0f;
+        // 前回の走行で消費されずに残った予約を捨てる。残っていると次のジャンプの
+        // 最初のフレームで消費され、1 滞空 1 回の制限に引っかかって本命の押しが無視される。
+        var actsClear = GetComponent<GoblinPotActions>();
+        if (actsClear != null) actsClear.debugParryRequest = false;
         cc.enabled = false; transform.position = home; cc.enabled = true;
         yield return new WaitForSeconds(2.5f);
         float before = src != null ? src.FillFraction01 : -1f;
@@ -368,11 +570,20 @@ public class ParryProbe : MonoBehaviour
                 // 0.15 秒だと離陸直後の足元レイのばらつきで「滞空 0.03〜0.10 秒で押す」が
                 // 起き、5 回中 4 回が「早すぎ」で不成立になっていた。成功した回の押下は
                 // どれも滞空 0.76 秒以降なので、頂点を過ぎたことをはっきり確かめてから押す。
-                if (air > 0.40f && descending && maxGd > 0.35f
-                    && gd < Mathf.Max(0.22f, maxGd * 0.45f)) break;
+                if (air > 0.25f && descending && maxGd > 0.35f
+                    && gd < Mathf.Max(0.30f, maxGd * 0.5f)) break;
                 yield return null;
             }
             ApexGroundDistance = maxGd;
+            // 予約が 1 フレームで消費されないことがある (低フレームレートだと、条件を
+            // 満たした次のフレームにはもう接地している)。接地するまで毎フレーム立て直す。
+            // ゲーム側が 1 滞空 1 回に制限しているので、実際に押されるのは最初の 1 回だけ。
+            while (!cc.isGrounded && t < 4f)
+            {
+                acts.debugParryRequest = true;
+                t += Time.deltaTime;
+                yield return null;
+            }
         }
         acts.debugParryRequest = true;
         t = 0f;

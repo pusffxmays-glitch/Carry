@@ -342,6 +342,64 @@ public class GoblinCarryRig : MonoBehaviour
     //
     // バネは **陰解法** で進めること。明示オイラーだとエディタの 20fps (w*dt > 1) で
     // 1 フレームで符号が反転し、沈むどころか腰が跳ね上がる (実測 -6.7cm)。
+    // 2026-08-25 (報告「ジャンプ以外の挙動でのこぼれ量が少ない。走ってもほとんどこぼれない」)。
+    // 調べたら壺内クランプ (calm) は原因ではなかった。**calm を全部切っても走行 8.6m で
+    // こぼれ 0%**。runSpeed を 5 → 2.4 に下げたので、そもそも液面がリムに届いていない。
+    // 腕の振り幅も壺の追従レートも効かず、効いた唯一のレバーが「壺を左右に振ること」。
+    // 実測 (走行 2 秒、ゲージ): 揺れなし 58→56% / 揺れ 6 度 + 横 6cm で 54→38%。
+    // 歩きは同じ設定でも 38→38% で減らない = 「歩きは安全・走りは危険」が数字で出る。
+    // 6 度/6cm は 2 秒で壺が空になる勢いだったので既定はその半分にしてある。
+    // ロール成分だけでも噴き出すので、**バランス操作 (armBalance) で打ち消せる** =
+    // 上手く操作すれば走ってもこぼれを抑えられる、という設計が成立する。
+    // そこで歩容の位相で壺の目標ロールを揺らす。**プレイヤーの入力 (armBalance) とは
+    // 別系統の外乱**なので、走ると壺が揺れる → マウスで抑え込む、という操作になる。
+    [Header("Gait sway (2026-08-25)")]
+    [Tooltip("歩容で壺が左右に揺れる角度 (度)。歩き。0 で揺れなし。")]
+    public float gaitSwayWalkDeg = 1.0f;
+    [Tooltip("同、走り。走るほうを大きくすると「速いがリスク」になる。")]
+    public float gaitSwayRunDeg = 3.0f;
+    [Tooltip("揺れの立ち上がり/収まりの速さ (1/s)。")]
+    public float gaitSwayRate = 5f;
+    // ロールだけでは液が動かない (実測: 壺を +-12 度で振っても走行 8.6m のこぼれ 0%)。
+    // 中身を揺らすのは **容器の横移動**。壺の軸まわりに回すだけだと液面が傾くだけで
+    // 慣性が生まれない。歩容の位相で壺を左右にずらす量をここで持つ。
+    [Tooltip("歩容で壺が左右にずれる量 (m)。歩き。液を揺らすのは主にこちら。")]
+    public float gaitSwayWalkLateral = 0.01f;
+    [Tooltip("同、走り。")]
+    public float gaitSwayRunLateral = 0.03f;
+    float gaitSwayAmp, gaitSwayLateralAmp;
+
+    // 2026-08-26: 外乱 (パリー失敗など)。**NudgeBalance は使えない** — armBalance は
+    // マウスバランスが毎フレーム上書きするので、外から足しても次のフレームで消える
+    // (実測: NudgeBalance(0.5) を入れても armBalance は -0.01 のまま動かなかった)。
+    // 歩容の揺れと同じく、入力とは別系統で壺の目標ロールへ足す。
+    // 壺が傾けば staggerIntensity が上がるので、上体のよろけは既存の系が出してくれる。
+    [Tooltip("外乱が収まる速さ (度/秒)。小さいほど長く尾を引く。")]
+    public float disturbDecayDegPerSec = 14f;
+    float disturbDeg;
+    float potLateralSlow;   // PotLateralDeg の低域通過。外乱の向きを決めるのに使う
+    /// <summary>壺に外乱を与える (度)。プレイヤーはマウスで打ち消す。</summary>
+    public void DisturbPot(float deg) { disturbDeg = Mathf.Clamp(disturbDeg + deg, -30f, 30f); }
+    /// <summary>いま倒れている側へ外乱を与える。向きをランダムにすると、たまたま
+    /// 壺を水平へ戻す方向に入って **よろけが出ない** 回ができる (実測: stagger 0.23 → 0.00)。
+    /// 必ず不利な向きへ押す。</summary>
+    public void DisturbPotOutward(float deg)
+    {
+        // **符号は逆**。実測: DisturbPot(+12) で PotLateralDeg が -9.7 → -24.8
+        // (stagger 0.23 → 1.00)、-12 で +2.7 (stagger 0.00)。
+        // つまり「いま傾いている側へさらに押す」= -Sign(PotLateralDeg)。
+        //
+        // ただし **着地の瞬間の値を使ってはいけない**。その一瞬だけ傾きが逆へ振れて
+        // いることがあり、外乱が壺を水平へ戻してしまう回ができる
+        // (実測: 2 回に 1 回 stagger が 0.23 → 0.04 と下がった)。
+        // 担ぎ姿勢の偏りを表す **平滑化した値** で向きを決める。
+        float side = Mathf.Abs(potLateralSlow) > 0.5f ? -Mathf.Sign(potLateralSlow)
+                                                      : (Random.value < 0.5f ? -1f : 1f);
+        DisturbPot(side * Mathf.Abs(deg));
+    }
+    /// <summary>診断用: いまの外乱 (度)。</summary>
+    public float PotDisturbDeg => disturbDeg;
+
     [Header("Landing recoil (2026-08-25)")]
     [Tooltip("着地の衝撃量。落下速度 1 m/s あたり。0 で無効。")]
     public float landRecoilPerSpeed = 0.024f;
@@ -969,8 +1027,25 @@ public class GoblinCarryRig : MonoBehaviour
             // そのぶん壺が傾いたままになり、片側だけ傾けられる量が少なくなっていた
             // (実測: 入力 +1 で +13.4 度に対し -1 で -20.2 度。「右傾きだけ段階を感じない」)。
             // ここで打ち消すと、中立で壺が水平になり、左右の可動域も揃う。
-            Quaternion targetRot = Quaternion.AngleAxis(armRoll - potNeutralRollDeg, fwd) * basePose;
+            // 歩容由来の揺れ。左右の踏み替えで 1 周なので位相は 1 サイクル 1 往復。
+            // walkIntensity が 0 (静止) なら 0 に収束するので、止まれば揺れない。
+            float swayTarget = (locomotion != null && locomotion.IsRunning ? gaitSwayRunDeg : gaitSwayWalkDeg)
+                             * Mathf.Clamp01(walkIntensity);
+            float latTarget = (locomotion != null && locomotion.IsRunning ? gaitSwayRunLateral : gaitSwayWalkLateral)
+                            * Mathf.Clamp01(walkIntensity);
+            float k = 1f - Mathf.Exp(-gaitSwayRate * Time.deltaTime);
+            gaitSwayAmp = Mathf.Lerp(gaitSwayAmp, swayTarget, k);
+            gaitSwayLateralAmp = Mathf.Lerp(gaitSwayLateralAmp, latTarget, k);
+            float swayPhase = Mathf.Sin(walkPhase * 2f * Mathf.PI);
+            float gaitSway = gaitSwayAmp * swayPhase;
+            disturbDeg = Mathf.MoveTowards(disturbDeg, 0f, disturbDecayDegPerSec * Time.deltaTime);
+            potLateralSlow = Mathf.Lerp(potLateralSlow, PotLateralDeg(),
+                                        1f - Mathf.Exp(-1.2f * Time.deltaTime));
+            Quaternion targetRot = Quaternion.AngleAxis(armRoll - potNeutralRollDeg + gaitSway + disturbDeg, fwd) * basePose;
             Vector3 localTarget = root.InverseTransformPoint(handMid);
+            // 横ずれは root ローカルの X。低域通過 (potFollowRate 15 = 2.4Hz) を通るので
+            // 歩容 (~1.2Hz) はほぼそのまま残る。
+            localTarget.x += gaitSwayLateralAmp * swayPhase;
             Quaternion localTargetRot = Quaternion.Inverse(root.rotation) * targetRot;
             if (!potFollowInit)
             {
