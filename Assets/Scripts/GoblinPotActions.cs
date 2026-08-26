@@ -219,6 +219,8 @@ public class GoblinPotActions : MonoBehaviour
     // 段階的に (青 0.5秒/6、金 1.2秒/16) 差をつけようとしたが、回収量のばらつき
     // (同条件で +90 〜 +649) が差より大きく、体感も数値も区別できなかった。
     // 「金は取り返せる / 青は着地を守るだけ」という **有無の差** なら見た目でも分かる。
+    [Tooltip("ジャスト成立時に、このジャンプでこぼれた分を全部壺へ戻す。")]
+    public bool cushionJustRestoreAll = true;
     [Tooltip("グッド成立時のこぼれ回収の長さ (秒)。0 で回収しない。")]
     public float cushionRecallSeconds = 0f;
     [Tooltip("グッド成立時のこぼれ回収の強さ。0 で回収しない。")]
@@ -703,6 +705,9 @@ public class GoblinPotActions : MonoBehaviour
         if (!just && cushionGoodJolt > 0.001f && fluid != null)
             fluid.JoltPot((Vector3.up + transform.forward * 0.8f)
                           * (cushionMissJolt * cushionGoodJolt));
+        // ジャストは **このジャンプでこぼれた分を全部戻す**。グッドは戻さない。
+        // (吸い寄せでは最終残量に差が出なかったので、明示的に戻す)
+        if (just && cushionJustRestoreAll && fluid != null) fluid.RestoreSpilledToPot();
         // 成立したら、回収が終わるまで猶予を延ばす (拾い直しの時間を確保する)。
         if (fluid != null)
             fluid.GrantSpillGrace((just ? cushionJustRecallSeconds : cushionRecallSeconds) + 0.3f);

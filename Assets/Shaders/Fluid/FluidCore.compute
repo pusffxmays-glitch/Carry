@@ -145,6 +145,7 @@ float3 RecallTarget;
 float RecallMinY;      // これより低い粒子 (地面の水たまり) は回収しない
 float RecallRadius;    // 回収の届く距離 (m)
 float SpillGrace;      // 1 の間はこぼれを地面で凍結させない (拾い直せる状態で置く)
+float RestoreEscaped;  // >0 の間、この割合で「このジャンプでこぼれた分」を壺へ戻す
 // 追補 26: パリーなし着地のジョルト — 壺内の粒子へ 1 フレームかけて速度を注入し、
 // 着地の「ドスン」を流体に伝える (加速度として渡す: dv / frameDt)。
 // 縦成分だけだと噴水が壺内へ落ち戻るので、前方成分を混ぜてリムを越えさせる。
@@ -972,6 +973,38 @@ void Finalize(uint3 id : SV_DispatchThreadID)
 
     if (state == 3u)
     {
+        // 2026-08-26 ジャストパリーの全回収。**このジャンプでこぼれた分だけ**を壺へ戻す。
+        // 猶予 (SpillGrace) 中の粒子だけが state 3 のままなので、ジャンプ前から
+        // 地面にあったこぼれ (state 2) は対象にならない。
+        // 吸い寄せ (RecallSpill) では最終残量が変わらなかった (金と青で差が出ない) ため、
+        // 物理ではなく明示的に戻す。
+        if (RestoreEscaped > 0.001 && SafetyEnabled != 0)
+        {
+            uint rh2 = i * 2654435761u + FrameSeed * 9781u;
+            rh2 ^= rh2 >> 16; rh2 *= 2246822519u; rh2 ^= rh2 >> 13;
+            // **一度に全部戻さない。** 1 フレームでまとめて壺へテレポートすると
+            // 圧力が暴れて逆に噴き出す (実測: ジャスト成立後に壺内が 4330 粒減った)。
+            // 毎フレーム抽選で少しずつ戻す = 注ぎ直されるように見える。
+            float pick0 = frac((float)(rh2 & 0xFFFFu) / 65536.0);
+            if (pick0 >= RestoreEscaped) { /* このフレームは戻さない */ }
+            else {
+            rh2 = rh2 * 747796405u + 2891336453u;
+            float u1 = frac((float)(rh2 & 0xFFFFu) / 65536.0);
+            rh2 = rh2 * 747796405u + 2891336453u;
+            float u2 = frac((float)(rh2 & 0xFFFFu) / 65536.0);
+            rh2 = rh2 * 747796405u + 2891336453u;
+            float u3 = frac((float)(rh2 & 0xFFFFu) / 65536.0);
+            float ly = lerp(PotFloorY + 0.02, PotRimY - 0.02, u1);
+            float lr = PotRadiusAt(ly) * 0.85 * sqrt(u2);
+            float la = u3 * 6.2831853;
+            float3 lpR = float3(lr * cos(la), ly, lr * sin(la));
+            Positions[i] = mul(PotToWorldSafety, float4(lpR, 1.0)).xyz;
+            Velocities[i] = ContainerLinearVelocity;
+            RetiredFlags[i] = 0u;
+            Ages[i] = 0.0;
+            return;
+            }
+        }
         // 壺のふちを越えた液体。壁とも他の粒子とも相互作用せず、重力で落ちるだけ。
         // 地面に着いたらその場に残す。
         if (p.y <= GroundY + GroundBandHeight)
