@@ -1496,30 +1496,67 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
             Ages[i] = 0.0;
             return;
         }
+        // 2026-08-27 (コマ送りで確認した収束の破綻):
+        // こぼれは壺の胴を伝って出るので、軌跡を最後まで忠実に逆再生すると
+        // **胴を這い上がり、壁を突き抜けて消える** (口から入る絵が無い)。
+        // 壺の近くまで戻ったら軌跡を離れ、**口の上へ回り込んで注ぎ込む**。
+        //
+        // 座標のアンカーは実証済みの 2 つだけを使うこと:
+        //  - RecallTarget: C# が世界座標で作る「口の少し上」。
+        //  - 履歴サンプル: 記録と同じ行列で往復するので常に正しい。
+        // **壺ローカルの定数 (PotRimY 等) に自前のオフセットを足して世界座標を合成しては
+        // いけない。** スケールの食い違いで実際の壺より 1.1m 上を指した (実測)。
+        // HistCount == 1 を「口フェーズ」の印として使う。
+        if (n > 1u && distance(Positions[i], RecallTarget) < 0.9) { n = 1u; HistCount[i] = 1u; }
+
+        if (n == 1u)
+        {
+            // --- 口フェーズ: RecallTarget (口の上、世界座標) へ寄せ、届いたら内側で合流 ---
+            uint rw = i * 2246822519u; rw ^= rw >> 15; rw *= 2654435761u; rw ^= rw >> 13;
+            float w1 = frac((float)(rw & 0xFFFFu) / 65536.0);
+            rw = rw * 747796405u + 2891336453u;
+            float w2 = frac((float)(rw & 0xFFFFu) / 65536.0);
+            float aT = w2 * 6.2831853;
+            float rT = 0.12 * sqrt(w1);
+            float3 tgtM = RecallTarget + float3(rT * cos(aT), 0.0, rT * sin(aT));
+            float3 curM = Positions[i];
+            float3 dM = tgtM - curM;
+            float distM = length(dM);
+            // **壺と並走しながら**口へ寄る。固定速度の追跡だと、着地後に壺が動き続ける
+            // 場面 (斜面滑りなど) で永久に追いつけず、窓が閉じて全損する (実測 369 粒)。
+            float dtM = max(HistDt, 1e-4);
+            float stepM = 6.0 * dtM;   // 壺基準で 6 m/s
+            curM += ContainerLinearVelocity * dtM;
+            // 窓の終端 (RewindStep が HistCap に達した合図) は追跡を打ち切って即合流。
+            if (distM <= stepM || distM < 1e-4 || RewindStep >= HistCap)
+            {
+                // 内側の着地点は自分の履歴サンプル 0 (こぼれた地点、正しいローカル系) を
+                // 軸へ寄せて作る。必ず空洞の中に入る。
+                float3 lp0 = HistPos[base];
+                lp0.y = clamp(lp0.y, PotFloorY + 0.05, PotRimY - 0.05);
+                lp0.xz *= 0.55;
+                Positions[i] = mul(PotToWorldSafety, float4(lp0, 1.0)).xyz;
+                RetiredFlags[i] = 0u;
+                Velocities[i] = ContainerLinearVelocity;
+                Ages[i] = 0.0;
+                HistCount[i] = 0u;
+            }
+            else
+            {
+                Positions[i] = curM + dM * (stepM / distM);
+                Velocities[i] = ContainerLinearVelocity + dM * (6.0 / distM);
+            }
+            return;
+        }
+
         uint stepN = max(RewindStep, 1u);
-        uint newN = n > stepN ? n - stepN : 1u;
+        uint newN = n > stepN + 1u ? n - stepN : 1u;   // 1 は口フェーズに予約
         float3 cur = Positions[i];
         float3 tgt = mul(PotToWorldSafety, float4(HistPos[base + (newN - 1u)], 1.0)).xyz;
         Positions[i] = tgt;
         // 描画・整合のための見かけ速度 (実移動 / 実フレーム時間)
         Velocities[i] = (tgt - cur) / max(HistDt, 1e-4);
         HistCount[i] = newN;
-        if (newN <= 1u)
-        {
-            // 履歴の先頭 = こぼれた地点。ただし脱出判定はリムの **外** で発火するので、
-            // そのまま合流させると次のフレームでまた脱出してしまう (今度は印なしで凍結)。
-            // 壺の内側へ引き込んでから合流する。
-            float3 lp0 = HistPos[base];
-            lp0.y = clamp(lp0.y, PotFloorY + 0.05, PotRimY - 0.05);
-            float r0 = length(lp0.xz);
-            float rIn0 = PotRadiusAt(lp0.y) * 0.8;
-            if (r0 > rIn0) lp0.xz *= rIn0 / max(r0, 1e-4);
-            Positions[i] = mul(PotToWorldSafety, float4(lp0, 1.0)).xyz;
-            RetiredFlags[i] = 0u;
-            Velocities[i] = ContainerLinearVelocity;
-            Ages[i] = 0.0;
-            HistCount[i] = 0u;
-        }
         return;
     }
 

@@ -1698,7 +1698,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetVector("RecallTarget", potPos + potUp * 0.85f);
         fluidCompute.SetFloat("RecallMinY", potPos.y - recallMinYDrop);
         fluidCompute.SetFloat("RecallRadius", recallRadius);
-        bool rewinding = Time.time >= rewindFrom && Time.time < rewindUntil;
+        // 窓を 0.5 秒延長して口フェーズを完走させる (残っていなければ何もしない)
+        bool rewinding = Time.time >= rewindFrom && Time.time < rewindUntil + 0.5f;
         fluidCompute.SetInt("HistCap", histCap);
         fluidCompute.SetFloat("HistDt", Mathf.Max(Time.deltaTime, 1e-3f));
         fluidCompute.SetFloat("RewindPlayback", rewinding ? 1f : 0f);

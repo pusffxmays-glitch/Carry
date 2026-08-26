@@ -766,7 +766,9 @@ public class GoblinPotActions : MonoBehaviour
         {
             // 着地の飛沫 (パリー直後に噴き出す分) も「このジャンプの分」。
             // 巻き戻しが始まるまで印を張り続ける。
-            if (cushionJustRewind) fluid.BeginSpillEpoch(fluid.rewindDelay + 0.15f);
+            // 印は巻き戻しが終わるまで張り続ける。切れた後の飛沫が印なし (state 3) に
+            // なると、回収されずに壺の胴を這い降りて「入らない液滴」として残る (実測 17 粒)。
+            if (cushionJustRewind) fluid.BeginSpillEpoch(fluid.rewindDelay + cushionJustRewindSeconds + 0.3f);
             if (cushionJustRewind) fluid.RewindSpilledToPot(cushionJustRewindSeconds);
             else if (cushionJustRestoreAll) fluid.RestoreSpilledToPot();
         }

@@ -458,7 +458,7 @@ public class ParryProbe : MonoBehaviour
             if (gd > 0.70f) airborneSeen = true;
             // mode 0: 滞空中ずっと壺を揺らして「こぼしそう」を作る
             if (mode == 0 && airborneSeen && shakeT > 0.09f)
-            { rig.DisturbPot(Mathf.Sin(t * 22f) * 9f); shakeT = 0f; }
+            { rig.DisturbPot(Mathf.Sin(t * 22f) * 28f); shakeT = 0f; }   // 28°: 大量こぼれの再現用
             // **接地中も VerticalVelocity は -1**。滞空を見てから押すこと。
             // しきい値 0.42m は低すぎた。20fps では 1 フレーム 0.2m 落ちるので、
             // 予約が消費される前に接地して丸ごと無視されていた (判定=none が 9/9)。
