@@ -469,7 +469,10 @@ public class ParryProbe : MonoBehaviour
             { acts.debugParryRequest = true; armed = true; }
             // 0.75m はエディタが重いと 1 フレームで跨いで押し損ねる (実測 4 連続 none)。
             // 空振り確定は 1.2m 以上なので、1.0m まで上げても「早すぎ」にはならない。
-            else if (mode != 3 && airborneSeen && loco.VerticalVelocity < -0.2f && gd < 1.0f && !cc.isGrounded)
+            // gd (terrainTilt.GroundDistance) は森のステージで中空でも 0.02 を返す
+            // (実測)。降下速度でも押せるようにする: -3 m/s を跨ぐのは接地の 0.2〜0.3 秒前。
+            else if (mode != 3 && airborneSeen && !cc.isGrounded
+                     && ((loco.VerticalVelocity < -0.2f && gd < 1.0f) || loco.VerticalVelocity < -3.0f))
             { acts.debugParryRequest = true; armed = true; }
             if (armed && cc.isGrounded && t > 0.3f) break;
             yield return null;

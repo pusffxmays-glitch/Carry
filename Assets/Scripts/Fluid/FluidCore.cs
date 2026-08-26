@@ -147,13 +147,22 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public void GrantSpillGrace(float seconds) { spillGraceUntil = Time.time + seconds; }
     /// <summary>猶予を打ち切る。パリー失敗・無押しの着地で呼ぶ = こぼれは確定する。</summary>
     public void EndSpillGrace() { spillGraceUntil = 0f; }
-    // ---- 早巻き戻し (2026-08-26) ----
-    // 力で吸い寄せると calm や SPH と喧嘩して届かない。脱出済みの粒子は単独で
-    // 落ちているだけなので、位置を直接壺の口へパンさせる。必ず届く。
-    float rewindUntil;
-    [Tooltip("早巻き戻しの速さ (m/s)。距離 2m なら 8 m/s で 0.25 秒。")]
-    public float rewindSpeed = 9f;
-    public void RewindSpilledToPot(float seconds) { rewindUntil = Time.time + seconds; }
+    // ---- 軌跡巻き戻し (2026-08-26、ユーザー案「軌跡を管理して逆戻しする」) ----
+    // こぼれた粒子 (state 4) の位置を毎フレーム記録し、パリー成立で逆再生する。
+    // 口へ直線的にパンする旧方式は経路がバラバラの直線になり「飛び散って」見えた。
+    float rewindFrom, rewindUntil;
+    [Tooltip("巻き戻し開始までの間 (秒)。着地の飛沫が飛び出す絵を一拍見せてから巻き戻す。")]
+    public float rewindDelay = 0.15f;
+    [Tooltip("粒子ごとの軌跡サンプル数の上限。満杯になったら 2 つに 1 つへ間引く。")]
+    public int histCap = 48;
+    [Tooltip("1 フレームに巻き戻すサンプル数。大きいほど速い巻き戻し。")]
+    public int rewindStep = 5;
+    GraphicsBuffer histPos, histCount;
+    public void RewindSpilledToPot(float seconds)
+    {
+        rewindFrom = Time.time + rewindDelay;
+        rewindUntil = rewindFrom + seconds;
+    }
 
     // 「このジャンプでこぼれた分」の印。踏切から着地の判定までの間だけ立てる。
     // 猶予 (SpillGrace) で代用してはいけない: 猶予は地面のこぼれも保持するので、
@@ -584,6 +593,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     // 2026-08-21 ディスパッチ対策③: UpdateBoundary+Integrate / ClearCellCounts+BuildSortPositions /
     // ComputeVelocity+ComputeNormals をそれぞれ 1 カーネルに結合 (計算内容は不変)。
+    int kSpillHistory;
     int kIntegrateBoundary, kClearBuildSort, kCount, kScanLocal, kScanBlocks, kScanAdd, kScatter;
     int kDensityLambda, kDeltaP, kApplyDeltaP, kVelNormals, kViscTension, kFinalize, kClassify;
     int kTeleport, kSolidBoxCollide;
@@ -640,6 +650,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         kFinalize = fluidCompute.FindKernel("Finalize");
         kClassify = fluidCompute.FindKernel("ClassifyRegions");
         kTeleport = fluidCompute.FindKernel("TeleportFluid");
+        kSpillHistory = fluidCompute.FindKernel("SpillHistory");
         kSolidBoxCollide = fluidCompute.FindKernel("SolidBoxCollide");
 
         fluidCount = Mathf.Max(Threads, particleCount);
@@ -859,10 +870,17 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         regionRingIndex = 0;
 
         ages?.Release(); retiredFlags?.Release();
+        histPos?.Release(); histPos = null; histCount?.Release(); histCount = null;
         ages = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount, sizeof(float));
         retiredFlags = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount, sizeof(uint));
         ages.SetData(new float[fluidCount]);
         retiredFlags.SetData(new uint[fluidCount]);
+
+        histCap = Mathf.Max(8, histCap);
+        histPos?.Release(); histCount?.Release();
+        histPos = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount * histCap, sizeof(float) * 3);
+        histCount = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount, sizeof(uint));
+        histCount.SetData(new uint[fluidCount]);   // 未初期化のゴミを再生しないよう必ずゼロに
 
         potProfile?.Release();
         potOuterProfile?.Release();
@@ -1104,6 +1122,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     {
 
         positions?.Release(); positions = null;
+        histPos?.Release(); histPos = null;
+        histCount?.Release(); histCount = null;
         predicted?.Release(); predicted = null;
         velocities?.Release(); velocities = null;
         deltaP?.Release(); deltaP = null;
@@ -1339,6 +1359,18 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         float sdt = dt / sub;
         BindAll();   // フレームに 1 回。サブステップで変わる分は SubStep 側で設定する
         for (int s = 0; s < sub; s++) SubStep(sdt, (s + 1) / (float)sub);
+
+        // 軌跡の記録・逆再生 (フレームに 1 回、サブステップの後 = その日の最終位置を記録)
+        if (histPos != null)
+        {
+            Bind(kSpillHistory, ("Positions", positions), ("Velocities", velocities),
+                                ("RetiredFlags", retiredFlags), ("Ages", ages),
+                                ("HistPos", histPos), ("HistCount", histCount),
+                                // 合流時の引き込みで PotRadiusAt を読む。束縛しないと 0 が
+                                // 読まれて全粒子が壺の軸上に積み上がる (前科: 束縛漏れで壺が空に)
+                                ("PotProfileBuf", potProfile), ("PotOuterBuf", potOuterProfile));
+            fluidCompute.Dispatch(kSpillHistory, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
+        }
 
         // 領域分類は観測のみで、位置・速度には触れない (§14/追加修正1)。
         // 同期読み戻しが高くつくため classifyInterval フレームに 1 回に間引く (宣言部の注記)。
@@ -1666,7 +1698,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetVector("RecallTarget", potPos + potUp * 0.85f);
         fluidCompute.SetFloat("RecallMinY", potPos.y - recallMinYDrop);
         fluidCompute.SetFloat("RecallRadius", recallRadius);
-        fluidCompute.SetFloat("RewindSpeed", Time.time < rewindUntil ? rewindSpeed : 0f);
+        bool rewinding = Time.time >= rewindFrom && Time.time < rewindUntil;
+        fluidCompute.SetInt("HistCap", histCap);
+        fluidCompute.SetFloat("HistDt", Mathf.Max(Time.deltaTime, 1e-3f));
+        fluidCompute.SetFloat("RewindPlayback", rewinding ? 1f : 0f);
+        // 窓の終盤は残りを一気に戻す (低 fps で戻し切れない取りこぼしを出さない)
+        bool flush = rewinding && Time.time >= rewindUntil - 0.15f;
+        fluidCompute.SetInt("RewindStep", flush ? histCap : Mathf.Max(1, rewindStep));
         fluidCompute.SetFloat("MarkSpillEpoch", Time.time < markEpochUntil ? 1f : 0f);
         fluidCompute.SetFloat("SpillGrace", Time.time < spillGraceUntil ? 1f : 0f);
         // 実測 (走りジャンプの金パリー、着地後 1.5 秒の最大速度の平均):

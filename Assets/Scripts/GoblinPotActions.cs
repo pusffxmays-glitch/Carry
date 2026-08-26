@@ -396,6 +396,19 @@ public class GoblinPotActions : MonoBehaviour
                 bool airborneNow = !inWaterCushion && (terrainTilt != null
                     ? terrainTilt.GroundDistance > 0.15f
                     : (cc != null && !cc.isGrounded));
+                // 2026-08-26: 印と猶予は **ジャンプ状態そのもの** で張る。
+                // airborneNow (terrainTilt.GroundDistance > 0.15) は森のステージで
+                // 中空なのに 0.00 を返し (木にレイが当たる?)、飛行のほぼ全区間で偽だった。
+                // その結果、印も猶予も張られず、こぼれが 3 のまま凍結して回収 0 になった
+                // (実測: 印残り/猶予残りが飛行中ずっと負)。
+                // リースは **最悪フレームより長く** (エディタは 1 フレーム 0.36 秒まで
+                // 伸びる実測がある。0.25 秒だとフレーム間で失効し、その瞬間の
+                // こぼれが印なしになる)。次のフレームで必ず更新されるので長くても害はない。
+                if (fluid != null && loco != null && loco.InJumpState)
+                {
+                    fluid.GrantSpillGrace(0.6f);
+                    fluid.BeginSpillEpoch(0.6f);
+                }
                 if (airborneNow)
                 {
                     airborneTime += Time.deltaTime;
@@ -751,6 +764,9 @@ public class GoblinPotActions : MonoBehaviour
         // 位置を直接パンさせれば必ず届き、絵も巻き戻しになる。
         if (just && fluid != null)
         {
+            // 着地の飛沫 (パリー直後に噴き出す分) も「このジャンプの分」。
+            // 巻き戻しが始まるまで印を張り続ける。
+            if (cushionJustRewind) fluid.BeginSpillEpoch(fluid.rewindDelay + 0.15f);
             if (cushionJustRewind) fluid.RewindSpilledToPot(cushionJustRewindSeconds);
             else if (cushionJustRestoreAll) fluid.RestoreSpilledToPot();
         }

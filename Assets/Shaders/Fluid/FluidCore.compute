@@ -37,6 +37,7 @@
 #pragma kernel SolidBoxCollide
 #pragma kernel ClassifyRegions
 #pragma kernel TeleportFluid
+#pragma kernel SpillHistory
 
 #define THREADS 256
 #define SCAN_BLOCK 256
@@ -146,7 +147,16 @@ float RecallStrength;
 float3 RecallTarget;
 float RecallMinY;      // これより低い粒子 (地面の水たまり) は回収しない
 float RecallRadius;    // 回収の届く距離 (m)
-float RewindSpeed;     // >0 の間、印の付いた液を壺の口へ直接パンさせる (m/s)
+// --- 軌跡巻き戻し (2026-08-26、ユーザー案「ポーションの軌跡を管理して逆戻しする」) ---
+// こぼれた粒子 (state 4) の位置を毎フレーム記録し、パリー成立でその軌跡を逆再生する。
+// 口へ直線的にパンする旧方式は経路がバラバラの直線になり「飛び散って」見えた。
+// 逆再生なら、こぼれたときの絵がそのまま巻き戻る。
+uint  HistCap;         // 粒子ごとの履歴サンプル数上限
+float HistDt;          // 1 フレームの実時間 (記録・再生はフレーム単位)
+float RewindPlayback;  // >0.5 = 逆再生中
+uint  RewindStep;      // 1 フレームに戻るサンプル数 (大きいほど速い巻き戻し)
+RWStructuredBuffer<float3> HistPos;   // [particle * HistCap + k]
+RWStructuredBuffer<uint>   HistCount; // 粒子ごとの記録済みサンプル数
 float MarkSpillEpoch;  // 1 の間にこぼれた液に「このジャンプの分」の印 (state 4) を付ける
 float SpillGrace;      // 1 の間はこぼれを地面で凍結させない (拾い直せる状態で置く)
 float RestoreEscaped;  // >0 の間、この割合で「このジャンプでこぼれた分」を壺へ戻す
@@ -999,46 +1009,9 @@ void Finalize(uint3 id : SV_DispatchThreadID)
 
     if (state == 3u)
     {
-        // 2026-08-26 **早巻き戻し** (ユーザー指定「ジャンプキーが押された後にツボから
-        // 出たポーションを全部早巻き戻しでツボの中に戻す」)。
-        // 力で吸い寄せる (RecallSpill) と calm クランプや SPH と喧嘩して届かず、
-        // 弱いと「ゆっくり漂って戻る」絵になる。**脱出済みの粒子は他の粒子とも壁とも
-        // 相互作用せず単独で落ちているだけ**なので、位置を直接パンさせてよい。
-        // 対象は猶予 (SpillGrace) 中の粒子だけ = このジャンプでこぼれた分だけ。
-        if (RewindSpeed > 0.001 && RetiredFlags[i] == 4u)
-        {
-            // **行き先は粒子ごとに散らす。** 全部を 1 点へ集めると、そこで密度が
-            // 爆発して壺の中身ごと吹き飛ぶ (実測: 最終差 -2239、Step 22→48ms)。
-            // 口の少し下の円盤に散らして着地させ、あとは自然に液面へ落とす。
-            // ハッシュは i だけから作る (FrameSeed を混ぜると行き先が毎フレーム
-            // 変わって粒子が迷走する)。
-            uint rw = i * 2246822519u; rw ^= rw >> 15; rw *= 2654435761u; rw ^= rw >> 13;
-            float w1 = frac((float)(rw & 0xFFFFu) / 65536.0);
-            rw = rw * 747796405u + 2891336453u;
-            float w2 = frac((float)(rw & 0xFFFFu) / 65536.0);
-            float tyL = PotRimY - 0.05;
-            float trL = PotRadiusAt(tyL) * 0.7 * sqrt(w1);
-            float taL = w2 * 6.2831853;
-            float3 tgt = mul(PotToWorldSafety,
-                             float4(trL * cos(taL), tyL, trL * sin(taL), 1.0)).xyz;
-            float3 d = tgt - p;
-            float dist = length(d);
-            float stepLen = RewindSpeed * DeltaTime;
-            if (dist <= stepLen || dist < 1e-4)
-            {
-                // 口まで届いた。壺の中身として合流させる。
-                Positions[i] = tgt;
-                Velocities[i] = ContainerLinearVelocity;
-                RetiredFlags[i] = 0u;
-                Ages[i] = 0.0;
-                return;
-            }
-            p += d * (stepLen / dist);
-            Positions[i] = p;
-            // 見かけの速度も入れておく (描画の伸び・次フレームの整合のため)
-            Velocities[i] = d * (RewindSpeed / dist);
-            return;
-        }
+        // 逆再生中の粒子は SpillHistory カーネルが専有する。ここで重力や地面判定を
+        // 掛けると、巻き戻した位置に毎フレーム落下が上書きされて軌跡が乱れる。
+        if (RewindPlayback > 0.5 && RetiredFlags[i] == 4u) return;
 
         // 2026-08-26 ジャストパリーの全回収。**このジャンプでこぼれた分だけ**を壺へ戻す。
         // 猶予 (SpillGrace) 中の粒子だけが state 3 のままなので、ジャンプ前から
@@ -1487,4 +1460,84 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
     }
 
     RegionFlags[i] = region | (passedRim ? FLAG_PASSED_RIM : 0u) | (everOut ? FLAG_EVER_OUT : 0u);
+}
+
+
+// 軌跡の記録と逆再生 (2026-08-26)。毎フレーム 1 回、サブステップの後に走る。
+// **Finalize に足してはいけない** (巨大カーネルへの追記で FXC がクラッシュした前例)。
+[numthreads(THREADS, 1, 1)]
+void SpillHistory(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+    uint state = RetiredFlags[i];
+    if (state != 4u)
+    {
+        // このジャンプの分でなくなったら履歴を捨てる (凍結・合流・消滅)
+        if (HistCount[i] != 0u) HistCount[i] = 0u;
+        return;
+    }
+    uint n = HistCount[i];
+    uint base = i * HistCap;
+    // 履歴は **壺ローカル座標** で持つ (2026-08-26)。ワールドで持つと、壺が移動した後の
+    // 巻き戻し先が「壺がもういない場所」になり、合流した粒子がその場で再脱出して
+    // 印なし (3) → 凍結で失われる (実測: 静止ジャンプで回収 1%、-162% の回すらあった)。
+    // ローカルなら軌跡が壺に追従し、絵としても「壺に帰る」巻き戻しになる。
+
+    if (RewindPlayback > 0.5)
+    {
+        // --- 逆再生 ---
+        if (n == 0u)
+        {
+            // 記録が無いままの粒子 (稀)。口の中心近くで合流させる。
+            Positions[i] = RecallTarget;
+            Velocities[i] = ContainerLinearVelocity;
+            RetiredFlags[i] = 0u;
+            Ages[i] = 0.0;
+            return;
+        }
+        uint stepN = max(RewindStep, 1u);
+        uint newN = n > stepN ? n - stepN : 1u;
+        float3 cur = Positions[i];
+        float3 tgt = mul(PotToWorldSafety, float4(HistPos[base + (newN - 1u)], 1.0)).xyz;
+        Positions[i] = tgt;
+        // 描画・整合のための見かけ速度 (実移動 / 実フレーム時間)
+        Velocities[i] = (tgt - cur) / max(HistDt, 1e-4);
+        HistCount[i] = newN;
+        if (newN <= 1u)
+        {
+            // 履歴の先頭 = こぼれた地点。ただし脱出判定はリムの **外** で発火するので、
+            // そのまま合流させると次のフレームでまた脱出してしまう (今度は印なしで凍結)。
+            // 壺の内側へ引き込んでから合流する。
+            float3 lp0 = HistPos[base];
+            lp0.y = clamp(lp0.y, PotFloorY + 0.05, PotRimY - 0.05);
+            float r0 = length(lp0.xz);
+            float rIn0 = PotRadiusAt(lp0.y) * 0.8;
+            if (r0 > rIn0) lp0.xz *= rIn0 / max(r0, 1e-4);
+            Positions[i] = mul(PotToWorldSafety, float4(lp0, 1.0)).xyz;
+            RetiredFlags[i] = 0u;
+            Velocities[i] = ContainerLinearVelocity;
+            Ages[i] = 0.0;
+            HistCount[i] = 0u;
+        }
+        return;
+    }
+
+    // --- 記録 (壺ローカルで) ---
+    float3 p = mul(WorldToPotSafety, float4(Positions[i], 1.0)).xyz;
+    if (n > 0u)
+    {
+        float3 last = HistPos[base + (n - 1u)];
+        float3 d = p - last;
+        if (dot(d, d) < 1e-6) return;   // 壺に対して静止中は重複記録しない
+    }
+    if (n >= HistCap)
+    {
+        // 満杯: 2 つに 1 つへ間引く (先頭 = こぼれた地点は必ず残す)
+        for (uint k = 0u; k < HistCap / 2u; k++)
+            HistPos[base + k] = HistPos[base + 2u * k];
+        n = HistCap / 2u;
+    }
+    HistPos[base + n] = p;
+    HistCount[i] = n + 1u;
 }
