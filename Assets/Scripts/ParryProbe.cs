@@ -428,6 +428,11 @@ public class ParryProbe : MonoBehaviour
             baseMs = fc.AvgStepMs;
         }
 
+        // **壺内は「停止・沈静」で採る。** 走行中は液が縁の上で揺れて InsideCount が
+        // 数百単位で振れるため、走行中の値と着地後 (停止) の値を引き算すると
+        // ±300 の偽の増減が出る (実測: 同条件で -592 / +330 / +174 / -8)。
+        int insideStill = fc != null ? fc.InsideCount : -1;
+
         if (mode == 1)
         {
             // よろけさせてから跳ぶ。外乱は入力とは別系統 (armBalance はマウスに上書きされる)。
@@ -513,10 +518,10 @@ public class ParryProbe : MonoBehaviour
         int insideAfter = fc != null ? fc.InsideCount : -1;
         int groundAfter = fc != null ? fc.GroundCount : -1;
         Trace = string.Format(
-            "mode={0} 判定={1} 壺内 {2}→{3}→{4} | 踏切〜着地の損失 {5} | 着地後の回収 {6:+0;-0} | 着地時の空中 {7} 地面 {8}→{9}",
+            "静止基準 {10} | mode={0} 判定={1} 壺内 {2}→{3}→{4} | 踏切〜着地の損失 {5} | 着地後の回収 {6:+0;-0} | 着地時の空中 {7} 地面 {8}→{9}",
             mode, acts.LastParryResult, insideBefore, insideAtLand, insideAfter,
             insideAtLand - insideBefore, insideAfter - insideAtLand,
-            airAtLand, groundAtLand, groundAfter)
+            airAtLand, groundAtLand, groundAfter, insideStill)
             + string.Format(" | 脱出判定 {0} | Step最大 {1:F1}ms | 回収強さ {2:F1}", escAtLand, stepPeak, recallPeak)
             + string.Format(" | Step平均 平常{0:F2} 回収中{1:F2} 回収後{2:F2}ms", baseMs, duringMs, afterMs)
             + string.Format(" | 飛沫ピーク {0} 収まるまで {1:F2}s", airPeak,

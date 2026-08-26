@@ -146,6 +146,8 @@ float RecallStrength;
 float3 RecallTarget;
 float RecallMinY;      // これより低い粒子 (地面の水たまり) は回収しない
 float RecallRadius;    // 回収の届く距離 (m)
+float RewindSpeed;     // >0 の間、印の付いた液を壺の口へ直接パンさせる (m/s)
+float MarkSpillEpoch;  // 1 の間にこぼれた液に「このジャンプの分」の印 (state 4) を付ける
 float SpillGrace;      // 1 の間はこぼれを地面で凍結させない (拾い直せる状態で置く)
 float RestoreEscaped;  // >0 の間、この割合で「このジャンプでこぼれた分」を壺へ戻す
 // 追補 26: パリーなし着地のジョルト — 壺内の粒子へ 1 フレームかけて速度を注入し、
@@ -908,6 +910,8 @@ void SolidBoxCollide(uint3 id : SV_DispatchThreadID)
     uint i = id.x;
     if (i >= FluidCount || SolidBoxCount == 0) return;
     uint state = RetiredFlags[i];
+    // state 4 = このジャンプでこぼれた分。落下の扱いは 3 と同じ。巻き戻しの対象だけ違う。
+    if (state == 4u) state = 3u;
     if (state == 1u || state == 2u) return;   // 消滅済み / 定着済みは動かさない
     float3 p = Positions[i];
     float3 v = Velocities[i];
@@ -917,7 +921,11 @@ void SolidBoxCollide(uint3 id : SV_DispatchThreadID)
     {
         Positions[i] = p;
         Velocities[i] = float3(0, 0, 0);
-        RetiredFlags[i] = 2u;
+        // 2026-08-26: **猶予中は定着させない。** 地面側 (Finalize) には同じ猶予判定が
+        // あるのに、コライダーの上面に乗ったときだけ無条件に 2u へ落としていた。
+        // こぼれた液が足場に触れた瞬間に巻き戻しの対象から外れるので、
+        // 回収量が「どれだけ足場に当たったか」でばらつく (実測 62% / 95% / 95%)。
+        if (SpillGrace < 0.5) RetiredFlags[i] = 2u;
         return;
     }
     // 通常粒子（跳ねて一時的に外へ出ただけ）や側面接触は押し出すだけ。
@@ -939,6 +947,8 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     // 入らず、密度場にも寄与しない（＝物理的にも視覚的にも存在しなくなる）。
     // Mass は消えるのではなく RetiredMass へ移る。収支は常に一定 (§16)。
     uint state = RetiredFlags[i];
+    // state 4 = このジャンプでこぼれた分。落下の扱いは 3 と同じ (巻き戻しの対象だけ違う)。
+    if (state == 4u) state = 3u;
     if (state == 1u)
     {
         // 安価なハッシュで粒子ごと・フレームごとに違う場所へ散らす(同じ粒子が毎回
@@ -989,6 +999,47 @@ void Finalize(uint3 id : SV_DispatchThreadID)
 
     if (state == 3u)
     {
+        // 2026-08-26 **早巻き戻し** (ユーザー指定「ジャンプキーが押された後にツボから
+        // 出たポーションを全部早巻き戻しでツボの中に戻す」)。
+        // 力で吸い寄せる (RecallSpill) と calm クランプや SPH と喧嘩して届かず、
+        // 弱いと「ゆっくり漂って戻る」絵になる。**脱出済みの粒子は他の粒子とも壁とも
+        // 相互作用せず単独で落ちているだけ**なので、位置を直接パンさせてよい。
+        // 対象は猶予 (SpillGrace) 中の粒子だけ = このジャンプでこぼれた分だけ。
+        if (RewindSpeed > 0.001 && RetiredFlags[i] == 4u)
+        {
+            // **行き先は粒子ごとに散らす。** 全部を 1 点へ集めると、そこで密度が
+            // 爆発して壺の中身ごと吹き飛ぶ (実測: 最終差 -2239、Step 22→48ms)。
+            // 口の少し下の円盤に散らして着地させ、あとは自然に液面へ落とす。
+            // ハッシュは i だけから作る (FrameSeed を混ぜると行き先が毎フレーム
+            // 変わって粒子が迷走する)。
+            uint rw = i * 2246822519u; rw ^= rw >> 15; rw *= 2654435761u; rw ^= rw >> 13;
+            float w1 = frac((float)(rw & 0xFFFFu) / 65536.0);
+            rw = rw * 747796405u + 2891336453u;
+            float w2 = frac((float)(rw & 0xFFFFu) / 65536.0);
+            float tyL = PotRimY - 0.05;
+            float trL = PotRadiusAt(tyL) * 0.7 * sqrt(w1);
+            float taL = w2 * 6.2831853;
+            float3 tgt = mul(PotToWorldSafety,
+                             float4(trL * cos(taL), tyL, trL * sin(taL), 1.0)).xyz;
+            float3 d = tgt - p;
+            float dist = length(d);
+            float stepLen = RewindSpeed * DeltaTime;
+            if (dist <= stepLen || dist < 1e-4)
+            {
+                // 口まで届いた。壺の中身として合流させる。
+                Positions[i] = tgt;
+                Velocities[i] = ContainerLinearVelocity;
+                RetiredFlags[i] = 0u;
+                Ages[i] = 0.0;
+                return;
+            }
+            p += d * (stepLen / dist);
+            Positions[i] = p;
+            // 見かけの速度も入れておく (描画の伸び・次フレームの整合のため)
+            Velocities[i] = d * (RewindSpeed / dist);
+            return;
+        }
+
         // 2026-08-26 ジャストパリーの全回収。**このジャンプでこぼれた分だけ**を壺へ戻す。
         // 猶予 (SpillGrace) 中の粒子だけが state 3 のままなので、ジャンプ前から
         // 地面にあったこぼれ (state 2) は対象にならない。
@@ -1213,7 +1264,11 @@ void Finalize(uint3 id : SV_DispatchThreadID)
         bool outsidePot = ((nearOrAboveLip || belowPotFloor) && outsideRadius) || farOutside;
         if (outsidePot)
         {
-            RetiredFlags[i] = 3u;
+            // 2026-08-26: **このジャンプでこぼれた分だけ**を巻き戻すため、
+            // こぼれた瞬間に印 (state 4) を付ける。猶予フラグで代用すると、
+            // ジャンプ前から地面にあったこぼれまで回収してしまい、
+            // **ジャンプ前より残量が増える** (実測: 地面 203 → 15、壺内 +215)。
+            RetiredFlags[i] = (MarkSpillEpoch > 0.5) ? 4u : 3u;
             Positions[i] = p;
             Velocities[i] = v;
             return;
@@ -1361,6 +1416,8 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
         // 1 = 消滅済み（待避先にいる）/ 2 = 領域外に取り残された水たまり。
         // 後者は「地面にある回収可能な液体」なので Ground として数える (§16)。
         uint d2;
+        // state 4 = このジャンプでこぼれた分。数え方は 3 と同じ (脱出扱い)。
+        if (stateIn == 4u) stateIn = 3u;
         uint reg = (stateIn == 2u) ? REGION_GROUND
                  : (stateIn == 3u) ? REGION_AIR
                  : REGION_RETIRED;

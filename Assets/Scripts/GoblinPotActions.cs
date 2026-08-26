@@ -226,6 +226,11 @@ public class GoblinPotActions : MonoBehaviour
     // 「金は取り返せる / 青は着地を守るだけ」という **有無の差** なら見た目でも分かる。
     [Tooltip("ジャスト成立時に、このジャンプでこぼれた分を全部壺へ戻す。")]
     public bool cushionJustRestoreAll = true;
+    [Tooltip("ジャストの回収を早巻き戻し (位置を直接パン) で行う。切ると壺の中へのテレポートに戻る。")]
+    public bool cushionJustRewind = true;
+    [Tooltip("早巻き戻しに掛ける時間 (秒)。この間 rewindSpeed で壺の口へ寄せる。")]
+    // 9 m/s x 0.45 秒 = 4m まで。踏切で遠くまで飛んだ分に届かせるため 0.6 秒。
+    public float cushionJustRewindSeconds = 0.6f;
     [Tooltip("グッド成立時のこぼれ回収の長さ (秒)。0 で回収しない。")]
     public float cushionRecallSeconds = 0f;
     [Tooltip("グッド成立時のこぼれ回収の強さ。0 で回収しない。")]
@@ -397,7 +402,20 @@ public class GoblinPotActions : MonoBehaviour
                     // 滞空中にこぼれた分は、着地の判定が出るまで「拾い直せる」状態で
                     // 置いておく。短いリースを毎フレーム更新するので、着地して更新が
                     // 止まれば自然に切れる。
-                    if (fluid != null && airborneTime > 0.12f) fluid.GrantSpillGrace(0.2f);
+                    // 2026-08-26: **このジャンプでこぼれた分**に印を付ける。
+                    // 巻き戻しの対象はこの印だけ。猶予で代用すると、ジャンプ前から
+                    // 地面にあったこぼれまで吸い上げて残量が増える (実測 +215)。
+                    //
+                    // **0.12 秒のゲートを掛けてはいけない。** 一番大きく飛び出すのは
+                    // 踏切直後で、そこに印が付かないと丸ごと回収から漏れる
+                    // (実測: 5 本中 1 本が -947。他の 3 本は -15/-31/-78)。
+                    // ゲートは歩行中の isGrounded ちらつき除け。印は誤って付いても
+                    // リース 0.2 秒で切れるので、こちらには要らない。
+                    if (fluid != null)
+                    {
+                        if (airborneTime > 0.12f) fluid.GrantSpillGrace(0.2f);
+                        fluid.BeginSpillEpoch(0.2f);
+                    }
                     // 追補 15: 空中の Space はクッション予約 (地上判定が無いのでジャンプには化けない)
                     if ((kb != null && kb.spaceKey.wasPressedThisFrame) || debugParryRequest)
                     {
@@ -724,12 +742,26 @@ public class GoblinPotActions : MonoBehaviour
             fluid.JoltPot((Vector3.up + transform.forward * 0.8f)
                           * (cushionMissJolt * cushionGoodJolt));
         // ジャストは **このジャンプでこぼれた分を全部戻す**。グッドは戻さない。
-        // (吸い寄せでは最終残量に差が出なかったので、明示的に戻す)
-        if (just && cushionJustRestoreAll && fluid != null) fluid.RestoreSpilledToPot();
+        // 2026-08-26: 戻し方を **早巻き戻し** にした (ユーザー指定「ジャンプキーが
+        // 押された後にツボから出たポーションを全部早巻き戻しでツボの中に戻す」)。
+        //  - 力で吸い寄せる (RecallSpill) は calm や SPH と喧嘩して届かず、
+        //    弱いと「ゆっくり漂って戻る」絵になる。
+        //  - 壺の中へテレポートする (RestoreSpilledToPot) は量は戻るが
+        //    「巻き戻し」に見えず、液の詰まった所へ差し込むと しぶきが弾ける。
+        // 位置を直接パンさせれば必ず届き、絵も巻き戻しになる。
+        if (just && fluid != null)
+        {
+            if (cushionJustRewind) fluid.RewindSpilledToPot(cushionJustRewindSeconds);
+            else if (cushionJustRestoreAll) fluid.RestoreSpilledToPot();
+        }
         // 成立したら、回収が終わるまで猶予を延ばす (拾い直しの時間を確保する)。
         if (fluid != null)
-            fluid.GrantSpillGrace(Mathf.Max(just ? cushionJustRecallSeconds : cushionRecallSeconds,
-                                            just && cushionJustRestoreAll ? fluid.RestoreTotalSeconds : 0f) + 0.3f);
+        {
+            float need = just ? cushionJustRecallSeconds : cushionRecallSeconds;
+            if (just && cushionJustRewind) need = Mathf.Max(need, cushionJustRewindSeconds);
+            else if (just && cushionJustRestoreAll) need = Mathf.Max(need, fluid.RestoreTotalSeconds);
+            fluid.GrantSpillGrace(need + 0.3f);
+        }
         // パリーは「自分で受けた」着地なので、素の着地反動は止める。クッションのクリップが
         // 吸収を見せる側なので、二重に沈むと腰が抜けて見える。
         if (rig != null) rig.SuppressLandRecoil(0.6f);
@@ -738,7 +770,8 @@ public class GoblinPotActions : MonoBehaviour
         hotCalmUntil = Mathf.Max(hotCalmUntil,
             Time.time + (just ? cushionJustCalmSeconds : cushionCalmSeconds));
         // 追補 26: はみ出して落下中のポーションを口へ吸い戻す (パリーの嬉しさ演出も兼ねる)
-        if (fluid != null)
+        // 早巻き戻しを使うときは力での吸い寄せは要らない (二重に効かせない)。
+        if (fluid != null && !(just && cushionJustRewind))
             fluid.RecallSpill(just ? cushionJustRecallSeconds : cushionRecallSeconds,
                               just ? cushionJustRecallStrength : cushionRecallStrength);
         StartCoroutine(GlowPulse(just ? 6.5f : 4.5f, 0.25f));

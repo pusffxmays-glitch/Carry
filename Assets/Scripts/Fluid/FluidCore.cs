@@ -147,6 +147,22 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public void GrantSpillGrace(float seconds) { spillGraceUntil = Time.time + seconds; }
     /// <summary>猶予を打ち切る。パリー失敗・無押しの着地で呼ぶ = こぼれは確定する。</summary>
     public void EndSpillGrace() { spillGraceUntil = 0f; }
+    // ---- 早巻き戻し (2026-08-26) ----
+    // 力で吸い寄せると calm や SPH と喧嘩して届かない。脱出済みの粒子は単独で
+    // 落ちているだけなので、位置を直接壺の口へパンさせる。必ず届く。
+    float rewindUntil;
+    [Tooltip("早巻き戻しの速さ (m/s)。距離 2m なら 8 m/s で 0.25 秒。")]
+    public float rewindSpeed = 9f;
+    public void RewindSpilledToPot(float seconds) { rewindUntil = Time.time + seconds; }
+
+    // 「このジャンプでこぼれた分」の印。踏切から着地の判定までの間だけ立てる。
+    // 猶予 (SpillGrace) で代用してはいけない: 猶予は地面のこぼれも保持するので、
+    // **ジャンプ前から地面にあった液まで巻き戻して残量が増える** (実測 +215)。
+    float markEpochUntil;
+    public void BeginSpillEpoch(float seconds) { markEpochUntil = Time.time + seconds; }
+    public void EndSpillEpoch() { markEpochUntil = 0f; }
+    public bool RewindActive => Time.time < rewindUntil;
+
     float restoreFrom, restoreUntil;
     // 見た目は「飛んで帰ってくる」ほうが良い (ユーザー指定) ので、まず吸い寄せ
     // (RecallSpill) で液滴を壺へ向かわせ、**間に合わなかった分だけ**を少し遅れて戻す。
@@ -1650,6 +1666,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetVector("RecallTarget", potPos + potUp * 0.85f);
         fluidCompute.SetFloat("RecallMinY", potPos.y - recallMinYDrop);
         fluidCompute.SetFloat("RecallRadius", recallRadius);
+        fluidCompute.SetFloat("RewindSpeed", Time.time < rewindUntil ? rewindSpeed : 0f);
+        fluidCompute.SetFloat("MarkSpillEpoch", Time.time < markEpochUntil ? 1f : 0f);
         fluidCompute.SetFloat("SpillGrace", Time.time < spillGraceUntil ? 1f : 0f);
         // 実測 (走りジャンプの金パリー、着地後 1.5 秒の最大速度の平均):
         //   0.5 (= calm のまま) 0.68 m/s / 4.0 → 1.39 / 14 (落下と同じ) → 1.82
