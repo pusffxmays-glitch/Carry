@@ -215,10 +215,14 @@ public class GoblinPotActions : MonoBehaviour
     public float cushionJustRecallSeconds = 1.2f;
     [Tooltip("ジャスト成立時のこぼれ回収の強さ。")]
     public float cushionJustRecallStrength = 16f;
-    [Tooltip("グッド成立時のこぼれ回収の長さ (秒)。")]
-    public float cushionRecallSeconds = 0.5f;
-    [Tooltip("グッド成立時のこぼれ回収の強さ。")]
-    public float cushionRecallStrength = 6f;
+    // 2026-08-26: **青は回収しない。** 金だけがこぼれた分を吸い戻す。
+    // 段階的に (青 0.5秒/6、金 1.2秒/16) 差をつけようとしたが、回収量のばらつき
+    // (同条件で +90 〜 +649) が差より大きく、体感も数値も区別できなかった。
+    // 「金は取り返せる / 青は着地を守るだけ」という **有無の差** なら見た目でも分かる。
+    [Tooltip("グッド成立時のこぼれ回収の長さ (秒)。0 で回収しない。")]
+    public float cushionRecallSeconds = 0f;
+    [Tooltip("グッド成立時のこぼれ回収の強さ。0 で回収しない。")]
+    public float cushionRecallStrength = 0f;
 
     // 2026-08-26: 青と金の差はここで作る。**吸収量ではない**。
     // クッションの姿勢の効きを 1.0 / 0.5 / 0.0 と変えても -8.2 / -9.9 / -8.3% で差が出ず、

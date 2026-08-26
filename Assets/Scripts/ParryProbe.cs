@@ -458,14 +458,24 @@ public class ParryProbe : MonoBehaviour
         int escAtLand = fc != null ? fc.EscapedCount : -1;
         int groundAtLand = fc != null ? fc.GroundCount : -1;
 
-        yield return new WaitForSeconds(3.0f);   // 回収 (RecallSpill) と沈静を待つ
+        // 回収 (RecallSpill) と沈静を待つ。**Step 時間はここでゲーム内で測る。**
+        // MCP から毎フレーム読むと、その読み出し自体が数百 ms のヒッチを作って
+        // 「Step 70ms」のような偽のスパイクが出る。
+        float stepPeak = 0f, wt = 0f;
+        while (wt < 3.0f)
+        {
+            wt += Time.unscaledDeltaTime;
+            if (fc != null && fc.LastStepMs > stepPeak) stepPeak = fc.LastStepMs;
+            yield return null;
+        }
         int insideAfter = fc != null ? fc.InsideCount : -1;
         int groundAfter = fc != null ? fc.GroundCount : -1;
         Trace = string.Format(
             "mode={0} 判定={1} 壺内 {2}→{3}→{4} | 踏切〜着地の損失 {5} | 着地後の回収 {6:+0;-0} | 着地時の空中 {7} 地面 {8}→{9}",
             mode, acts.LastParryResult, insideBefore, insideAtLand, insideAfter,
             insideAtLand - insideBefore, insideAfter - insideAtLand,
-            airAtLand, groundAtLand, groundAfter) + string.Format(" | 脱出判定 {0}", escAtLand);
+            airAtLand, groundAtLand, groundAfter)
+            + string.Format(" | 脱出判定 {0} | Step最大 {1:F1}ms", escAtLand, stepPeak);
         Running = false;
     }
 

@@ -28386,8 +28386,11 @@ MonoBehaviour:
   cushionCalmSeconds: 0.8
   cushionJustRecallSeconds: 1.2
   cushionJustRecallStrength: 16
-  cushionRecallSeconds: 0.5
-  cushionRecallStrength: 6
+  cushionRecallSeconds: 0
+  cushionRecallStrength: 0
+  cushionGoodJolt: 0.35
+  cushionSoftenSeconds: 0.2
+  cushionPressProtectSeconds: 0.4
   cushionCalm: 0.8
   cushionJustCalm: 0.5
   cushionFailNudge: 0.5
@@ -32407,6 +32410,9 @@ MonoBehaviour:
   maxSpeed: 8
   maxSpeedFalling: 14
   maxSpeedInPot: -1
+  recallRadius: 2.6
+  recallMinYDrop: 0.6
+  recallReclaimChance: 0.08
   fillFraction: 0.03
   initialSettleSeconds: 0.7
   startupCalmSimSeconds: 1.5
@@ -60509,6 +60515,9 @@ MonoBehaviour:
   maxSpeed: 5
   maxSpeedFalling: 14
   maxSpeedInPot: -1
+  recallRadius: 2.6
+  recallMinYDrop: 0.6
+  recallReclaimChance: 0.08
   fillFraction: 0.88
   initialSettleSeconds: 0.7
   startupCalmSimSeconds: 30
