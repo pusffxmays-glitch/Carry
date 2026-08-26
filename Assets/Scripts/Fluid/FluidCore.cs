@@ -69,10 +69,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Range(0.5f, 6f)] public float emergencyTravelSpacing = 1.5f;
     [Tooltip("追補 33: 壺から出た液滴に calm (壺内の速度制限) を掛けない。OFF にすると、こぼれた液体が壺の近くにいる間だけゆっくり落ちる旧挙動に戻る。")]
     public bool escapedIgnoreCalm = true;
-    [Tooltip("壺のリムより上に跳ね上がった液の速度下限。calm 中でもここまでは出せる " +
-             "(0.5 m/s の calm に張り付いてスローモーションで戻るのを防ぐ)。" +
-             "0 なら maxSpeedFalling と同じ = リムより上は落下中の液と同じ扱い。")]
-    public float maxSpeedAboveRim = 0f;
+    [Tooltip("壺の実体の外にある液 (跳ね上がった飛沫・ふちを伝い落ちるこぼれ) の速度下限。" +
+             "calm 中でもここまでは出せる (0.5 m/s に張り付いてスローモーションになるのを防ぐ)。" +
+             "0 なら maxSpeedFalling と同じ = 壺の外は落下中の液と同じ扱い。")]
+    public float maxSpeedOutsideVessel = 0f;
 
     [Header("Material")]
     [Range(1.5f, 3f)] public float kernelRadiusScale = 2f;
@@ -1551,7 +1551,13 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
                                  ("Positions", positions), ("PredictedPositions", predicted),
                                  ("Velocities", velocities), ("SafetyCorrection", safety),
                                  // 追補 33: 脱出済み判定を積分側でも見る (ClampSpeedFor の注記)
-                                 ("RetiredFlagsIn", retiredFlags));
+                                 ("RetiredFlagsIn", retiredFlags),
+                                 // 2026-08-26: ClampSpeedFor が「壺の実体の中にいるか」を
+                                 // 外形半径で判定するようになったので、積分側にも
+                                 // プロファイルを束縛する。**束縛しないと 0 が読まれて
+                                 // 全粒子が「壺の外」= 脱出扱いになり、壺が一瞬で空になる。**
+                                 ("PotProfileBuf", potProfile),
+                                 ("PotOuterBuf", potOuterProfile));
 
         Bind(kClearBuildSort, ("CellCounts", cellCounts),
                               ("SortPositions", sortPositions), ("PredictedPositions", predicted),
@@ -1656,8 +1662,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // 壺の残量はどれも満杯のまま (最終差 +188 / +144 / +145) だったので、
         // **速くしても損はしない**。既定は落下と同じ扱いにする。
         fluidCompute.SetFloat("RestoreDropHeight", restoreDropHeight);
-        fluidCompute.SetFloat("MaxSpeedAboveRim",
-            maxSpeedAboveRim > 0f ? maxSpeedAboveRim : maxSpeedFalling);
+        fluidCompute.SetFloat("MaxSpeedOutsideVessel",
+            maxSpeedOutsideVessel > 0f ? maxSpeedOutsideVessel : maxSpeedFalling);
         bool restoring = Time.time >= restoreFrom && Time.time < restoreUntil;
         float restoreTau = Mathf.Max(0.02f, restoreSeconds / Mathf.Max(0.5f, restoreRateFactor));
         fluidCompute.SetFloat("RestoreEscaped",
