@@ -1677,7 +1677,7 @@ public static class CarryBuildTerrainForest
         var center = new Vector2(LakeCenterX, LakeCenterZ);
 
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
-        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var rootCluster2Prefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "root_cluster_02/root_cluster_02_decimated.fbx");
         float rootCluster2BottomY = GetPrefabBottomLocalY(rootCluster2Prefab);
         var boulder = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "boulder_01/boulder_01_2k.fbx");
@@ -1928,7 +1928,7 @@ public static class CarryBuildTerrainForest
         // throughout this stage, so nothing floats. Parented to bridgeRoot (unscaled), NOT the
         // visual wrapper, so their own uniform scale isn't distorted by the wrapper's non-uniform one. ----
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
-        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var mossSets = LoadIndividualMossRocks();
         const float rootsTopLocal = 0.122f;
         var embRng = new System.Random(3344);
@@ -2321,7 +2321,7 @@ public static class CarryBuildTerrainForest
         // measured-topLocal placement technique (proven not to float) so the bridge's footprint
         // reads as embedded in the bank rather than a prefab dropped on top of the terrain. ----
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
-        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var mossSets = LoadIndividualMossRocks();
         const float rootsTopLocal = 0.122f;
         var embRng = new System.Random(9911);
@@ -2977,7 +2977,7 @@ public static class CarryBuildTerrainForest
         // Moss/rock/root dressing flanking the stairs so they read as embedded in the cliff,
         // not stuck on top of it, using the same proven (fixed-height) placement as the bridge.
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
-        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var mossSets = LoadIndividualMossRocks();
         const float rootsTopLocal = 0.122f;
         Vector2 sideDir = new Vector2(-climbDir.y, climbDir.x);
@@ -3016,7 +3016,7 @@ public static class CarryBuildTerrainForest
         var boulder = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "boulder_01/boulder_01_2k.fbx");
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
         var logPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "dead_tree_trunk_02/dead_tree_trunk_02_2k.fbx");
-        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var ruinSlab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/ExternalAssets/KenneyNatureKit/Models/FBX format/path_stone.fbx");
         var mossSets = LoadIndividualMossRocks();
         var dirtMat = GetOrCreateMat("Mat_DirtMound", AssetDatabase.LoadAssetAtPath<Texture2D>(PH + "mud_forest/mud_forest_diff_2k.jpg"), new Vector2(2f, 2f));
@@ -4219,10 +4219,10 @@ public static class CarryBuildTerrainForest
         var detailRoot = new GameObject("GroundDetail");
         detailRoot.transform.SetParent(root.transform, false);
 
-        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var branches = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "dry_branches_medium_01/dry_branches_medium_01_2k.fbx");
         var mossRocks = LoadIndividualMossRocks(); // see LoadIndividualMossRocks() -- was rock_moss_set_01_2k.fbx directly (a 6-rock bundle placed as one rigid prop)
-        var rootCluster = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "root_cluster_01/root_cluster_01_1k.fbx");
+        var rootCluster = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "root_cluster_01/root_cluster_01_decimated.fbx");
         // fern_02/grass_medium_01/moss_01 removed from ground litter -- these small plants
         // were showing up visibly floating above the ground from some camera angles.
         // fir_sapling/pine_sapling_small ("Sapling_*") removed entirely per feedback.
@@ -4302,9 +4302,9 @@ public static class CarryBuildTerrainForest
         var clutterRoot = new GameObject("ForestFloorClutter");
         clutterRoot.transform.SetParent(root.transform, false);
 
-        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var branches = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "dry_branches_medium_01/dry_branches_medium_01_2k.fbx");
-        var barkDebris = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "bark_debris_01/bark_debris_01_2k.fbx");
+        var barkDebris = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "bark_debris_01/bark_debris_01_decimated.fbx");
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
         var boulder = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "boulder_01/boulder_01_2k.fbx");
         var logPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "dead_tree_trunk_02/dead_tree_trunk_02_2k.fbx");
@@ -4315,8 +4315,8 @@ public static class CarryBuildTerrainForest
         // vertical CENTER of the combined pack (measured via Blender), not at the base like the
         // other props here, so placement below anchors off the pack's measured bottom-Y instead of
         // a "topLocal" offset.
-        var shrub1 = SetupShrubPrefab(PH + "shrub_01/shrub_01_1k.fbx", "shrub_01", log);
-        var shrub2 = SetupShrubPrefab(PH + "shrub_02/shrub_02_1k.fbx", "shrub_02", log);
+        var shrub1 = SetupShrubPrefab(PH + "shrub_01/shrub_01_decimated.fbx", "shrub_01", log);
+        var shrub2 = SetupShrubPrefab(PH + "shrub_02/shrub_02_decimated.fbx", "shrub_02", log);
         const float shrub1BottomY = -0.105f;
         const float shrub2BottomY = -0.939f;
         var mossSets = LoadIndividualMossRocks();

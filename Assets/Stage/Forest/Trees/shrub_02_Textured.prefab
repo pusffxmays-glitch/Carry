@@ -48,6 +48,10 @@ PrefabInstance:
       propertyPath: m_LocalEulerAnglesHint.z
       value: 0
       objectReference: {fileID: 0}
+    - target: {fileID: -8330435739339444147, guid: b99aeec0b30f6f946be8ab467e6b3f29, type: 3}
+      propertyPath: m_Mesh
+      value: 
+      objectReference: {fileID: 5495044487602968159, guid: 9828e9b5b00cdb147bd3c59b5fa78dbe, type: 3}
     - target: {fileID: -4884080186863611770, guid: b99aeec0b30f6f946be8ab467e6b3f29, type: 3}
       propertyPath: 'm_Materials.Array.data[0]'
       value: 
@@ -64,6 +68,18 @@ PrefabInstance:
       propertyPath: m_Name
       value: shrub_02_Textured
       objectReference: {fileID: 0}
+    - target: {fileID: 4022336209894954808, guid: b99aeec0b30f6f946be8ab467e6b3f29, type: 3}
+      propertyPath: m_Mesh
+      value: 
+      objectReference: {fileID: 7825718813359363595, guid: 9828e9b5b00cdb147bd3c59b5fa78dbe, type: 3}
+    - target: {fileID: 5240820053509299357, guid: b99aeec0b30f6f946be8ab467e6b3f29, type: 3}
+      propertyPath: m_Mesh
+      value: 
+      objectReference: {fileID: 3692953270095486929, guid: 9828e9b5b00cdb147bd3c59b5fa78dbe, type: 3}
+    - target: {fileID: 6198810809487556363, guid: b99aeec0b30f6f946be8ab467e6b3f29, type: 3}
+      propertyPath: m_Mesh
+      value: 
+      objectReference: {fileID: 830114310455821501, guid: 9828e9b5b00cdb147bd3c59b5fa78dbe, type: 3}
     - target: {fileID: 7529879595992642795, guid: b99aeec0b30f6f946be8ab467e6b3f29, type: 3}
       propertyPath: 'm_Materials.Array.data[0]'
       value: 
