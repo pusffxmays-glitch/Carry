@@ -48,6 +48,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 8 * (1/60) / (0.4 * spacing) ≒ 12。上限はそれを上回っている必要がある。
     // 静かなときは適応 CFL が 6 まで落とすので、常時のコストは増えない。
     [Range(1, 32)] public int maxSubSteps = 20;
+    [Tooltip("フレームがこの ms を超えている間だけ、サブステップ上限を adaptiveMaxSubSteps に絞る (0 で無効)。")]
+    public float adaptiveFrameMs = 70f;
+    [Tooltip("重いフレーム中のサブステップ上限。液は一時的に 6〜7 割速で流れるが、フリーズよりまし。")]
+    public int adaptiveMaxSubSteps = 13;
+    float smoothedFrameMs = 33f;
     [Tooltip("CFL に使う実測最大速度への安全率。実測値は 1 フレーム前のものなので、急加速に備えて余裕を持たせる。")]
     [Range(1f, 4f)] public float cflSpeedMargin = 1.6f;
     // 追補 38 (近傍グリッドのサブステップ間使い回し) は **撤去した** (2026-08-22 夕方)。
@@ -1344,6 +1349,14 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             : Mathf.Clamp(Mathf.Max(need, needStability), minSubSteps, maxSubSteps);
         // GPU 安全装置: 異常に重い状態が続いていたら、実時間性より先に GPU を守る。
         if (WatchdogTripped) sub = Mathf.Min(sub, Mathf.Max(1, watchdogSafeSubSteps));
+        // 2026-08-27 適応キャップ: フレームが重い間だけサブステップを絞る。
+        // 大こぼれ+回収などの揺れでフレームが落ちると、dt が伸びてサブステップが
+        // 上限に張り付き、さらに重くなる悪循環に入る (実機 5FPS)。閾値を超えている間は
+        // 上限を adaptiveMaxSubSteps に落とし、「フリーズ」の代わりに「その瞬間だけ
+        // 液がわずかにゆっくり」で済ませる。通常フレームでは何もしない。
+        smoothedFrameMs = Mathf.Lerp(smoothedFrameMs, Time.unscaledDeltaTime * 1000f, 0.2f);
+        if (adaptiveMaxSubSteps > 0 && smoothedFrameMs > adaptiveFrameMs)
+            sub = Mathf.Min(sub, adaptiveMaxSubSteps);
         LastRequiredSubSteps = need;
 
         // 剛体搬送は**廃止した**。

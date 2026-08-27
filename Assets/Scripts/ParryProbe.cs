@@ -283,6 +283,87 @@ public class ParryProbe : MonoBehaviour
     /// MCP から毎フレーム読むと偽ヒッチが出るので、ゲーム内で録って最後に読む。</summary>
     /// <summary>ライブのヒッチ特定: ジャンプ→ジョルト→パリーを全部ゲーム内で駆動し、
     /// フレーム時間と流体 Step を録る。トレース中の外部 (MCP) 呼び出しはゼロ。</summary>
+    /// <summary>連続大こぼれのストレステスト。ジャンプ+ジョルト+パリーを繰り返しながら
+    /// フレーム時間を録り続け、2.5 秒ごとの窓で集計する (累積悪化の検出用)。</summary>
+    public void RunSpillStressTrace(int cycles, float joltStrength, bool parry = true, float shakeDeg = 0f)
+    {
+        if (Running) return;
+        Running = true; Trace = "";
+        StartCoroutine(SpillStressSeq(cycles, joltStrength, parry, shakeDeg));
+    }
+
+    System.Collections.IEnumerator SpillStressSeq(int cycles, float joltStrength, bool doParry, float shakeDeg)
+    {
+        var fc = PotFluid();
+        var acts = FindFirstObjectByType<GoblinPotActions>();
+        var loco = acts.GetComponent<GoblinLocomotion>();
+        var cc = acts.GetComponent<CharacterController>();
+        var surf = fc != null ? fc.GetComponent<FluidSurface>() : null;
+        var win = new System.Text.StringBuilder();
+        float winStart = Time.realtimeSinceStartup;
+        float winWorst = 0f, winSum = 0f, winFluid = 0f; int winN = 0, winTris = 0;
+        float winGpu = 0f, winGpuWorst = 0f; int winGpuN = 0;
+        var timings = new UnityEngine.FrameTiming[1];
+        int windowIdx = 0;
+        System.Action flushWin = () =>
+        {
+            win.Append(string.Format("\n[{0,2}] {1:F1}s: 平均{2:F0}ms 最悪{3:F0}ms GPU平均{4:F0} GPU最悪{5:F0} 流体{6:F1} 三角{7}k 地面{8} 脱出{9}",
+                windowIdx++, Time.realtimeSinceStartup - winStart, winSum / Mathf.Max(1, winN), winWorst * 1000f,
+                winGpu / Mathf.Max(1, winGpuN), winGpuWorst,
+                winFluid / Mathf.Max(1, winN), winTris / 1000, fc.GroundCount, fc.EscapedCount));
+            winWorst = 0f; winSum = 0f; winFluid = 0f; winN = 0; winTris = 0;
+            winGpu = 0f; winGpuWorst = 0f; winGpuN = 0;
+        };
+        float lastFlush = Time.realtimeSinceStartup;
+        for (int c = 0; c < cycles; c++)
+        {
+            loco.debugJumpRequest = true;
+            bool jolted = false, pressed = false; float airT = 0f;
+            float cs = Time.realtimeSinceStartup;
+            while (Time.realtimeSinceStartup - cs < 4.5f)
+            {
+                yield return null;
+                float dt = Time.unscaledDeltaTime;
+                winSum += dt * 1000f; winN++; if (dt > winWorst) winWorst = dt;
+                winFluid += fc.LastStepMs;
+                UnityEngine.FrameTimingManager.CaptureFrameTimings();
+                if (UnityEngine.FrameTimingManager.GetLatestTimings(1, timings) > 0)
+                { float g = (float)timings[0].gpuFrameTime; winGpu += g; winGpuN++; if (g > winGpuWorst) winGpuWorst = g; }
+                if (surf != null && surf.LastTriangleCount > winTris) winTris = surf.LastTriangleCount;
+                if (Time.realtimeSinceStartup - lastFlush > 2.5f) { flushWin(); lastFlush = Time.realtimeSinceStartup; }
+                if (!cc.isGrounded) airT += Time.deltaTime;
+                // shakeDeg > 0: 滞空中ずっと壺を振る (マウスで大きくこぼす操作の再現)
+                if (shakeDeg > 0f && !cc.isGrounded)
+                {
+                    var rig = acts.GetComponent<GoblinCarryRig>();
+                    if (rig != null) rig.DisturbPot(Mathf.Sin(Time.time * 25f) * shakeDeg);
+                }
+                if (!jolted && airT > 0.15f && joltStrength > 0.01f)
+                { fc.JoltPot((Vector3.up + transform.forward * 0.8f) * joltStrength); jolted = true; }
+                if (shakeDeg > 0f) jolted = true;   // 揺さぶりモードでは押しのゲートを開ける
+                if (doParry && jolted && !pressed && loco.VerticalVelocity < -4.8f)
+                { acts.debugParryRequest = true; pressed = true; }
+            }
+        }
+        // 全サイクル後、静止で 6 秒観察 (回復するか、悪化が残るか)
+        float t0 = Time.realtimeSinceStartup;
+        while (Time.realtimeSinceStartup - t0 < 6f)
+        {
+            yield return null;
+            float dt = Time.unscaledDeltaTime;
+            winSum += dt * 1000f; winN++; if (dt > winWorst) winWorst = dt;
+            winFluid += fc.LastStepMs;
+            UnityEngine.FrameTimingManager.CaptureFrameTimings();
+            if (UnityEngine.FrameTimingManager.GetLatestTimings(1, timings) > 0)
+            { float g = (float)timings[0].gpuFrameTime; winGpu += g; winGpuN++; if (g > winGpuWorst) winGpuWorst = g; }
+            if (surf != null && surf.LastTriangleCount > winTris) winTris = surf.LastTriangleCount;
+            if (Time.realtimeSinceStartup - lastFlush > 2.5f) { flushWin(); lastFlush = Time.realtimeSinceStartup; }
+        }
+        flushWin();
+        Trace = "cycles=" + cycles + win.ToString();
+        Running = false;
+    }
+
     public void RunLiveParryTrace(float joltStrength)
     {
         if (Running) return;
