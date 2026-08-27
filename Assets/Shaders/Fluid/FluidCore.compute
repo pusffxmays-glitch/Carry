@@ -156,6 +156,7 @@ float HistDt;          // 1 フレームの実時間 (記録・再生はフレ�
 float RewindPlayback;  // >0.5 = 逆再生中
 uint  RewindStep;      // 1 フレームに戻るサンプル数 (大きいほど速い巻き戻し)
 float SpillFeedSeconds; // 口に集めた液を何秒かけて注ぎ込むか (一気に入れると沸き返す)
+float RewindRemain;     // 逆走フェーズの残り時間 (秒)。ペース配分に使う
 RWStructuredBuffer<float3> HistPos;   // [particle * HistCap + k]
 RWStructuredBuffer<uint>   HistCount; // 粒子ごとの記録済みサンプル数
 float MarkSpillEpoch;  // 1 の間にこぼれた液に「このジャンプの分」の印 (state 4) を付ける
@@ -1568,7 +1569,14 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
             return;
         }
 
-        uint stepN = max(RewindStep, 1u);
+        // 逆走のペースは **残り時間から逆算** する (2026-08-27、ユーザー指定
+        // 「1 秒くらいかけて戻るでもいい」)。固定の 5 サンプル/フレームだと
+        // 低 fps では全工程が 2〜3 描画フレームで終わり、瞬きにしか見えない。
+        // 各粒子が自分の残り履歴 n を残り時間で割って消費するので、
+        // fps がいくつでも rewindSeconds ちょうどで壺に着く。
+        uint stepN;
+        if (RewindStep >= HistCap) stepN = HistCap;          // 窓の終端: 一括
+        else stepN = max(1u, (uint)ceil((float)n * max(HistDt, 1e-4) / max(RewindRemain, 1e-3)));
         uint newN = n > stepN + 1u ? n - stepN : 1u;   // 1 は口フェーズに予約
         float3 cur = Positions[i];
         float3 tgt = mul(PotToWorldSafety, float4(HistPos[base + (newN - 1u)], 1.0)).xyz;

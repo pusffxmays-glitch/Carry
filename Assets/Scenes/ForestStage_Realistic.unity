@@ -28382,11 +28382,13 @@ MonoBehaviour:
   debugParryRequest: 0
   cushionWindow: 0.35
   cushionJustWindow: 0.12
-  cushionJustCalmSeconds: 1.2
+  cushionJustCalmSeconds: 2.6
   cushionCalmSeconds: 0.8
   cushionJustRecallSeconds: 0.5
   cushionJustRecallStrength: 40
   cushionJustRestoreAll: 1
+  cushionJustRewind: 1
+  cushionJustRewindSeconds: 0.45
   cushionRecallSeconds: 0
   cushionRecallStrength: 0
   cushionGoodJolt: 0.35
@@ -32395,6 +32397,7 @@ MonoBehaviour:
   containerTravelBudget: 1.5
   emergencyTravelSpacing: 1.5
   escapedIgnoreCalm: 1
+  maxSpeedAboveRim: 0
   kernelRadiusScale: 2
   viscosity: 1
   boundaryViscosity: 0.05
@@ -32413,9 +32416,14 @@ MonoBehaviour:
   maxSpeedInPot: -1
   recallRadius: 2.6
   recallMinYDrop: 0.6
+  rewindDelay: 0.15
+  histCap: 48
+  rewindStep: 5
+  spillFeedSeconds: 0.9
   restoreDelay: 0.35
   restoreSeconds: 0.5
   restoreRateFactor: 2.5
+  restoreDropHeight: 0.06
   fillFraction: 0.03
   initialSettleSeconds: 0.7
   startupCalmSimSeconds: 1.5
@@ -60502,6 +60510,7 @@ MonoBehaviour:
   containerTravelBudget: 1.5
   emergencyTravelSpacing: 1.5
   escapedIgnoreCalm: 1
+  maxSpeedAboveRim: 0
   kernelRadiusScale: 2
   viscosity: 4.5
   boundaryViscosity: 0.55
@@ -60520,9 +60529,14 @@ MonoBehaviour:
   maxSpeedInPot: -1
   recallRadius: 2.6
   recallMinYDrop: 0.6
+  rewindDelay: 0.15
+  histCap: 48
+  rewindStep: 5
+  spillFeedSeconds: 0.9
   restoreDelay: 0.35
   restoreSeconds: 0.5
   restoreRateFactor: 2.5
+  restoreDropHeight: 0.06
   fillFraction: 0.88
   initialSettleSeconds: 0.7
   startupCalmSimSeconds: 30

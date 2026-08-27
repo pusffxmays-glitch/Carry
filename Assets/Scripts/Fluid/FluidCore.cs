@@ -1713,6 +1713,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         bool flush = rewinding && Time.time >= rewindUntil + 2.1f;
         fluidCompute.SetInt("RewindStep", flush ? histCap : Mathf.Max(1, rewindStep));
         fluidCompute.SetFloat("SpillFeedSeconds", spillFeedSeconds);
+        fluidCompute.SetFloat("RewindRemain", Mathf.Max(rewindUntil - Time.time, 0f));
         fluidCompute.SetFloat("MarkSpillEpoch", Time.time < markEpochUntil ? 1f : 0f);
         fluidCompute.SetFloat("SpillGrace", Time.time < spillGraceUntil ? 1f : 0f);
         // 実測 (走りジャンプの金パリー、着地後 1.5 秒の最大速度の平均):
