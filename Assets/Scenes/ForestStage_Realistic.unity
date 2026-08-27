@@ -32397,7 +32397,7 @@ MonoBehaviour:
   containerTravelBudget: 1.5
   emergencyTravelSpacing: 1.5
   escapedIgnoreCalm: 1
-  maxSpeedAboveRim: 5.5
+  maxSpeedAboveRim: 3.5
   kernelRadiusScale: 2
   viscosity: 1
   boundaryViscosity: 0.05
@@ -60510,7 +60510,7 @@ MonoBehaviour:
   containerTravelBudget: 1.5
   emergencyTravelSpacing: 1.5
   escapedIgnoreCalm: 1
-  maxSpeedAboveRim: 5.5
+  maxSpeedAboveRim: 3.5
   kernelRadiusScale: 2
   viscosity: 4.5
   boundaryViscosity: 0.55

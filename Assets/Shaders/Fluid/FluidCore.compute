@@ -1595,9 +1595,15 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
                 // **現在の液面のすぐ上** にする。固定のリム直下だと満杯時は液中への
                 // 差し込みになり、圧力ソルバが暴れて重い時間帯が続く。液面より上なら
                 // 粒はただ落ちて液面に乗るだけで、圧力の喧嘩が起きない。
+                // 2026-08-27 (FPS2 対応): 液面の同じ薄い層に積むと、到着のたびに同じ帯で
+                // 局所過密が再発し、ソルバの粒あたりコストが 3 倍化する (実測 150-188ms)。
+                // **空洞全体に分散して埋め込む**: 深さも半径も粒子ごとのハッシュで散らす。
+                // 1 点あたりの過密は一瞬で解け、繰り返さない。
                 float3 lp0 = HistPos[base];
                 float surfY = lerp(PotFloorY, PotRimY, saturate(FillLevel01));
-                lp0.y = clamp(surfY + 0.03, PotFloorY + 0.05, PotRimY + 0.06);
+                float loY = PotFloorY + 0.10;
+                float hiY = max(loY + 0.02, surfY - 0.02);
+                lp0.y = lerp(loY, hiY, w3);
                 lp0.xz *= 0.2 + 0.55 * w1;
                 Positions[i] = mul(PotToWorldSafety, float4(lp0, 1.0)).xyz;
                 RetiredFlags[i] = 0u;

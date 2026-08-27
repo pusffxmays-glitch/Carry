@@ -77,7 +77,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 14 のままだとサブステップが上限に張り付き、こぼれ中〜回収中のソルバ費用が
     // 4〜7 倍になる (実機「金パリーでほぼ止まりかけ」の主犯の一つ)。
     // 見た目の落下感は 4 以上で十分 (実測: 上限 4.0 で平均 1.39 m/s、14 で 1.82)。
-    public float maxSpeedAboveRim = 5.5f;
+    public float maxSpeedAboveRim = 3.5f;
 
     [Header("Material")]
     [Range(1.5f, 3f)] public float kernelRadiusScale = 2f;
