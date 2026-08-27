@@ -1009,7 +1009,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             Vector3 worldHalf = new Vector3(lh.x * Mathf.Abs(ls.x), lh.y * Mathf.Abs(ls.y), lh.z * Mathf.Abs(ls.z));
             if (Mathf.Max(worldHalf.x, Mathf.Max(worldHalf.y, worldHalf.z)) * 2f > maxCourseBoxSize) continue;
 
-            AddCandidate(col, lc, lh, t.GetComponentInParent<SwayingBridge>() == null);
+            // 2026-08-27 (報告「回収後にポーションの粒が収束せず浮かんでいる」):
+            // 縦長のコライダー (木の幹など) の上面で定着させない。箱近似の上面は
+            // 樹冠の高さにあり、そこに乗った液滴が空中に浮いた点として永久に残る。
+            // 平たい台 (ギミックブロック) や横長 (倒木) は今までどおり定着できる。
+            bool tallThin = worldHalf.y > 0.8f && worldHalf.y > 1.5f * Mathf.Max(worldHalf.x, worldHalf.z);
+            AddCandidate(col, lc, lh, !tallThin && t.GetComponentInParent<SwayingBridge>() == null);
         }
     }
 

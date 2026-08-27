@@ -336,7 +336,7 @@ public class ParryProbe : MonoBehaviour
                 if (shakeDeg > 0f && !cc.isGrounded)
                 {
                     var rig = acts.GetComponent<GoblinCarryRig>();
-                    if (rig != null) rig.DisturbPot(Mathf.Sin(Time.time * 25f) * shakeDeg);
+                    if (rig != null) rig.DisturbPot(Mathf.Sin(Time.time * 6f) * shakeDeg);   // ゆっくり大振り (マウス相当)
                 }
                 if (!jolted && airT > 0.15f && joltStrength > 0.01f)
                 { fc.JoltPot((Vector3.up + transform.forward * 0.8f) * joltStrength); jolted = true; }
