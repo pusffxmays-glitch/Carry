@@ -161,6 +161,33 @@ public class CarryStatsWindow : EditorWindow
         Row("収支誤差", $"{pot.MassBalanceError}", Judge(pot.MassBalanceError == 0, true));
         EditorGUILayout.LabelField("  ゲージ = (壺の中 + リム + 空中) / 全粒子", EditorStyles.miniLabel);
 
+        // ---- 検証用の操作 (2026-08-27 ユーザー要望) ----
+        EditorGUILayout.Space(6);
+        EditorGUILayout.LabelField("検証", EditorStyles.boldLabel);
+        if (actions != null)
+        {
+            // パリー判定窓の変更 (プレイ中の実体を直接いじる。停止すると元に戻る)
+            EditorGUI.BeginChangeCheck();
+            float justW = EditorGUILayout.Slider("金の窓 (秒)", actions.cushionJustWindow, 0.02f, 0.9f);
+            float goodW = EditorGUILayout.Slider("青の窓 (秒)", actions.cushionWindow, 0.05f, 1.2f);
+            if (EditorGUI.EndChangeCheck())
+            {
+                actions.cushionJustWindow = justW;
+                actions.cushionWindow = Mathf.Max(goodW, justW);
+            }
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("金を出しやすく (0.35)"))
+            { actions.cushionJustWindow = 0.35f; actions.cushionWindow = Mathf.Max(actions.cushionWindow, 0.5f); }
+            if (GUILayout.Button("既定に戻す (0.12/0.35)"))
+            { actions.cushionJustWindow = 0.12f; actions.cushionWindow = 0.35f; }
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.LabelField("  プレイ中のみ有効。停止でシーンの値に戻る", EditorStyles.miniLabel);
+        }
+        EditorGUILayout.Space(2);
+        if (GUILayout.Button("ポーション残量をリセット (満タンに戻す)"))
+            pot.ResetFluid();
+        EditorGUILayout.LabelField("  リセット直後は数秒間、開始時の鎮静クランプが掛かる", EditorStyles.miniLabel);
+
         // ---- ゴブリン ----
         EditorGUILayout.Space(6);
         EditorGUILayout.LabelField("ゴブリン", EditorStyles.boldLabel);

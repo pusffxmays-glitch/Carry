@@ -1446,6 +1446,16 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         retiredFlags.SetData(zero);
         ages.SetData(new float[fluidCount]);
         foreach (var b in regionCountersRing) b?.SetData(ZeroCounters);
+        // 2026-08-27: 回収系の状態もリセットする (統計ウィンドウのリセットボタン用)。
+        // 巻き戻しの履歴・窓・印・猶予が残ったままだと、リセット直後のパリーで
+        // 前回のこぼれの軌跡を再生してしまう。
+        histCount?.SetData(zero);
+        regionFlags?.SetData(zero);
+        rewindFrom = rewindUntil = 0f;
+        restoreFrom = restoreUntil = 0f;
+        recallUntil = 0f;
+        spillGraceUntil = 0f;
+        markEpochUntil = 0f;
 
         boundary.ResyncMotion();
         UpdateGridOrigin();
