@@ -1601,7 +1601,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
                                  ("Positions", positions), ("PredictedPositions", predicted),
                                  ("Velocities", velocities), ("SafetyCorrection", safety),
                                  // 追補 33: 脱出済み判定を積分側でも見る (ClampSpeedFor の注記)
-                                 ("RetiredFlagsIn", retiredFlags));
+                                 ("RetiredFlagsIn", retiredFlags),
+                                 // 2026-08-27: ClampSpeedFor の壁外判定が PotOuterAt を読む
+                                 // (安いスカラー判定を通った少数の粒だけ)。**束縛を忘れると
+                                 // 0 が読まれて全粒子が壁外扱いになる** (前科: 壺が一瞬で空)。
+                                 ("PotProfileBuf", potProfile),
+                                 ("PotOuterBuf", potOuterProfile));
 
         Bind(kClearBuildSort, ("CellCounts", cellCounts),
                               ("SortPositions", sortPositions), ("PredictedPositions", predicted),
@@ -1640,7 +1645,9 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
                            ("SortPositionsIn", sortPositions), ("CellStartIn", cellStart),
                            ("CellCountsIn", cellCounts), ("SortedIndicesIn", sortedIndices),
                            ("BoundaryVelocities", boundaryVelocities), ("BoundaryVolumes", boundaryVolumes),
-                           ("RetiredFlagsIn", retiredFlags));
+                           ("RetiredFlagsIn", retiredFlags),
+                           // ClampSpeed → ClampSpeedFor が壁外判定で PotOuterAt を読む (束縛必須)
+                           ("PotProfileBuf", potProfile), ("PotOuterBuf", potOuterProfile));
 
         // UAV: PredictedPositions / Positions / Velocities / SafetyCounters / Ages / RetiredFlags = 6。
         // D3D11 の上限 8 に収まっている。

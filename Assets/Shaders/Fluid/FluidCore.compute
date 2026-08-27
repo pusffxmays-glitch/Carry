@@ -509,29 +509,62 @@ float3 SpeedClampRef(float3 worldPos)
 // 脱出済み (RetiredFlags != 0) の粒子は、位置がどこであろうと世界基準 +
 // MaxSpeedFalling で落とす。calm は「壺の中身を落ち着かせる」ためのものであって、
 // もう壺の外にある液体には掛けてはいけない。
+// ClampSpeedFor が外形を読むため前方定義 (元は下方)。
+float PotRadiusAt(float localY)
+{
+    float u = saturate((localY - PotFloorY) / max(1e-5, PotRimY - PotFloorY));
+    float f = u * (float)(PotProfileCount - 1);
+    uint i0 = (uint)floor(f);
+    uint i1 = min(i0 + 1, PotProfileCount - 1);
+    return lerp(PotProfileBuf[i0], PotProfileBuf[i1], saturate(f - (float)i0));
+}
+
+// 壺の実体の外周半径。範囲外は端の値で伸ばす（壺より上には実体が無いので、
+// リムの外周をそのまま使えば「壺の真上」を正しく外側と判定できる）。
+float PotOuterAt(float localY)
+{
+    float u = saturate((localY - PotMeshMinY) / max(1e-5, PotMeshMaxY - PotMeshMinY));
+    float f = u * (float)(PotProfileCount - 1);
+    uint i0 = (uint)f;
+    uint i1 = min(i0 + 1, PotProfileCount - 1);
+    return lerp(PotOuterBuf[i0], PotOuterBuf[i1], saturate(f - (float)i0));
+}
+
 float3 ClampSpeedFor(float3 v, float3 worldPos, uint retired)
 {
     // 壺内は容器基準 + MaxSpeedPot、壺外は世界基準 + MaxSpeedFalling。
     // calm (MaxSpeedPot を絞る) の間も、こぼれた液滴は通常速度で落ちる。
-    // 2026-08-22: 壺外の上限を MaxSpeed (5) から分離。橋の上 (8m) からのこぼれが
-    // 5 m/s (本来 18 m/s) で落ちて「蜜の中を落ちる」スローモーションに見えていた。
     bool escapedFree = (retired != 0u) && (EscapedIgnoreCalm > 0.5);
-    bool gated = !escapedFree && InPotGate(worldPos);
+    // ゲート判定は InPotGate と同一 (ここで pl を再利用するためインライン化)
+    float3 pl = mul(WorldToPotSafety, float4(worldPos, 1.0)).xyz;
+    float span = max(PotRimY - PotFloorY, 1e-3);
+    float r2 = dot(pl.xz, pl.xz);
+    bool gated = !escapedFree && SafetyEnabled != 0
+              && pl.y > PotMeshMinY - 0.5 * span && pl.y < PotRimY + span
+              && r2 < PotMaxRadius * PotMaxRadius * 2.25;
     float3 vref = gated ? ContainerLinearVelocity : float3(0, 0, 0);
     float lim = gated ? MaxSpeedPot : MaxSpeedFalling;
-    // 2026-08-26 (報告「パリーすると跳ね上がったポーションがすごくゆっくり壺に戻る」):
-    // 追補 33 は **脱出済み** の液滴だけを calm から外した。しかし着地の衝撃で跳ね上がった
-    // 直後の液は、まだ脱出扱いではないのに InPotGate (外形 1.5 倍・上下 1 span) の中にいる。
-    // パリー成立で calm が 0.5 m/s / 1.2 秒かかるため、自由落下なら 2〜3 m/s で戻るはずの
-    // 液が 0.5 m/s に張り付き、宙に浮いたままゆっくり降りてくる。
-    // **リムより上は「壺の中身」ではなく飛沫**なので calm の対象外にする。
-    // 容器基準は保つ (世界基準にすると歩行中に飛沫だけ置き去りに見える)。
-    if (gated && PotLocalY(worldPos) > PotRimY) lim = max(lim, MaxSpeedAboveRim);
     float3 rel = v - vref;
+    // 2026-08-27 (報告「回収後に壺の中から粒が上に飛んでいく」「左側をゆっくり落ちる」):
+    // calm の解放は **下向きの液だけ** に限定する。
+    //  - 従来はリムより上を無条件に解放していたため、液面から上に跳ねた粒が
+    //    フルスピード (14 m/s) で打ち上がって見えた。上向きは calm で抑える。
+    //  - 壺の壁の外側を伝い落ちる液は「壺の中身」ではないので解放する。外形
+    //    (PotOuterBuf) を読むのは、安いスカラー判定 (半径が最大半径の 6 割超) を
+    //    通った少数の粒だけ。全粒子で読むと Step 24→40ms に悪化する (差し戻し済みの前科)。
+    if (gated && rel.y < -0.1)
+    {
+        bool aboveRim = pl.y > PotRimY;
+        bool nearWall = r2 > 0.36 * PotMaxRadius * PotMaxRadius;
+        if (aboveRim ||
+            (nearWall && sqrt(r2) > PotOuterAt(clamp(pl.y, PotMeshMinY, PotMeshMaxY)) - 0.03))
+            lim = max(lim, MaxSpeedAboveRim);
+    }
     float sp = length(rel);
     if (sp > lim) rel *= lim / sp;
     return vref + rel;
 }
+
 
 // 壺の中身専用の呼び出し口 (脱出粒子が混ざらない経路から使う)。
 float3 ClampSpeed(float3 v, float3 worldPos) { return ClampSpeedFor(v, worldPos, 0u); }
@@ -847,26 +880,6 @@ float SlopeHeightAt(float worldZ)
     uint i0 = (uint)floor(f);
     uint i1 = min(i0 + 1, SlopeProfileCount - 1);
     return lerp(SlopeProfileBuf[i0], SlopeProfileBuf[i1], saturate(f - (float)i0));
-}
-
-float PotRadiusAt(float localY)
-{
-    float u = saturate((localY - PotFloorY) / max(1e-5, PotRimY - PotFloorY));
-    float f = u * (float)(PotProfileCount - 1);
-    uint i0 = (uint)floor(f);
-    uint i1 = min(i0 + 1, PotProfileCount - 1);
-    return lerp(PotProfileBuf[i0], PotProfileBuf[i1], saturate(f - (float)i0));
-}
-
-// 壺の実体の外周半径。範囲外は端の値で伸ばす（壺より上には実体が無いので、
-// リムの外周をそのまま使えば「壺の真上」を正しく外側と判定できる）。
-float PotOuterAt(float localY)
-{
-    float u = saturate((localY - PotMeshMinY) / max(1e-5, PotMeshMaxY - PotMeshMinY));
-    float f = u * (float)(PotProfileCount - 1);
-    uint i0 = (uint)f;
-    uint i1 = min(i0 + 1, PotProfileCount - 1);
-    return lerp(PotOuterBuf[i0], PotOuterBuf[i1], saturate(f - (float)i0));
 }
 
 // ギミックの箱との衝突解決（宣言部の SolidBox* の注記を参照）。
