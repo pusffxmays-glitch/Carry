@@ -371,8 +371,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // エディタが固まる状態は出荷できないので、既定は同期に戻してある。
     // 非同期の効果自体は実測済み（Step() の CPU コスト 13.2ms -> 0.12ms）なので、
     // 原因を特定したら既定を false に戻す。OPEN_ISSUES.md の OI-4 を参照。
-    [Tooltip("領域カウンタを同期読み戻しする。false にすると CPU が GPU を待たなくなるが、現在は再初期化でエディタが固まる不具合がある (OI-4)。")]
-    public bool synchronousReadback = true;
+    // 2026-08-27: OI-4 (非同期中の解放でデッドロック) を「解放をリクエスト完了まで
+    // 遅延する」ことで修正し、既定を非同期へ。同期のままだと、揺れ中は 3 フレームに
+    // 1 回、GPU 全体 (100-170ms) の完了をメインスレッドが待ち、これが「大きくこぼして
+    // 回収すると 5FPS」の主犯だった。
+    [Tooltip("領域カウンタを同期読み戻しする (デバッグ用)。通常は false = 非同期。")]
+    public bool synchronousReadback = false;
     // 2026-08-21 ディスパッチ対策②: 分類の同期読み戻しは「それまでに積んだ GPU 仕事全部の
     // 完了待ち」なので、毎フレーム行うと CPU メインスレッドが GPU と完全直列化する
     // (実測: Step() の CPU 時間 ≒ 自分の GPU 時間)。観測 (ゲージ/統計) 用途なので間引く。
@@ -623,11 +627,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
     void OnDestroy()
     {
-        if (regionCountersRing != null)
-        {
-            foreach (var b in regionCountersRing) b?.Release();
-            regionCountersRing = null;
-        }
+        ReleaseRegionRingSafe();   // OI-4: 飛んでいる非同期読み戻しの完了後に解放する
     }
 
     void Initialise()
@@ -1484,14 +1484,34 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         }
         else
         {
+            pendingRegionReads++;
             AsyncGPUReadback.Request(buf, req =>
             {
-                if (req.hasError || positions == null) return;
+                pendingRegionReads--;
+                if (ringReleaseQueued && pendingRegionReads <= 0) { ReleaseRegionRingNow(); return; }
+                if (req.hasError || positions == null || regionCountersRing == null) return;
                 var data = req.GetData<uint>();
                 for (int i = 0; i < 10 && i < data.Length; i++) regionRead[i] = data[i];
                 ApplyRegionCounters(regionRead);
             });
         }
+    }
+
+    // OI-4 対策 (2026-08-27): 非同期読み戻しが飛んでいる間にリングを解放すると
+    // エディタがデッドロックする。解放要求はリクエスト完了まで遅延する。
+    int pendingRegionReads;
+    bool ringReleaseQueued;
+    void ReleaseRegionRingNow()
+    {
+        if (regionCountersRing != null)
+            foreach (var b in regionCountersRing) b?.Release();
+        regionCountersRing = null;
+        ringReleaseQueued = false;
+    }
+    void ReleaseRegionRingSafe()
+    {
+        if (pendingRegionReads > 0) { ringReleaseQueued = true; return; }
+        ReleaseRegionRingNow();
     }
 
     void ApplyRegionCounters(uint[] r)
