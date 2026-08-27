@@ -1545,6 +1545,20 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
             // 1 点に集めると密度が爆発するので最低限の広がりは残す)
             float3 tgtM = RecallTarget + float3(rT * cos(aT), 0.10 * w3, rT * sin(aT));
             float3 curM = Positions[i];
+            // 2026-08-27 (報告「ポーションがツボを貫通して戻っている」):
+            // 現在地から口まで直線で飛ぶと、壺の横や下から来た粒が胴を突き抜けて見える。
+            // 口の高さより下にいる間は **胴の外側 (0.55m) を回り上がる** 経由点を目指し、
+            // リムの高さを越えてから口の点へ入る。すべて世界座標 (RecallTarget 基準) で
+            // 作る (壺ローカル定数からの合成は 1.1m ずれる前科)。
+            float3 horizM = curM - RecallTarget; horizM.y = 0.0;
+            float hdM = length(horizM);
+            bool detour = curM.y < RecallTarget.y - 0.06 && hdM < 0.55;
+            if (detour)
+            {
+                float3 dirO = hdM > 1e-3 ? horizM / hdM : float3(1.0, 0.0, 0.0);
+                tgtM = RecallTarget + dirO * 0.55;
+                tgtM.y += 0.05;
+            }
             float3 dM = tgtM - curM;
             float distM = length(dM);
             // **壺と並走しながら**口へ寄る。固定速度の追跡だと、着地後に壺が動き続ける
@@ -1553,7 +1567,8 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
             float stepM = 6.0 * dtM;   // 壺基準で 6 m/s
             curM += ContainerLinearVelocity * dtM;
             bool flushNow = RewindStep >= HistCap;   // 窓の終端: 待たせず全部入れる
-            if (distM <= stepM || distM < 1e-4 || flushNow)
+            // 経由点への到着では合流しない (口の点に着いたときだけ)。flush は無条件。
+            if ((!detour && (distM <= stepM || distM < 1e-4)) || flushNow)
             {
                 // 2026-08-27: **一気に合流させない。** 1378 粒を 0.3 秒で入れたら壺が
                 // 沸き立ち、溢れ返しが 1.5 秒続いた (実測)。口の上で順番待ちさせ、
