@@ -1552,11 +1552,16 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
             // 作る (壺ローカル定数からの合成は 1.1m ずれる前科)。
             float3 horizM = curM - RecallTarget; horizM.y = 0.0;
             float hdM = length(horizM);
-            bool detour = curM.y < RecallTarget.y - 0.06 && hdM < 0.55;
+            // **口の高さより下にいる粒は全員** 迂回する (2026-08-27 拡大)。
+            // 「近い粒だけ」に絞ると、遠くの低い位置で捕まった粒が斜めの直線で
+            // 胴を突き抜ける (報告 2 回目)。経由点は自分の方向の胴の外側
+            // (最低 0.55m、遠ければ現在の水平距離のまま = まず真上へ上がる)。
+            // リムの上の高さに達してから、口の点へ水平に渡って入る。
+            bool detour = curM.y < RecallTarget.y - 0.06;
             if (detour)
             {
                 float3 dirO = hdM > 1e-3 ? horizM / hdM : float3(1.0, 0.0, 0.0);
-                tgtM = RecallTarget + dirO * 0.55;
+                tgtM = RecallTarget + dirO * max(hdM, 0.55);
                 tgtM.y += 0.05;
             }
             float3 dM = tgtM - curM;
