@@ -28382,13 +28382,13 @@ MonoBehaviour:
   debugParryRequest: 0
   cushionWindow: 0.35
   cushionJustWindow: 0.12
-  cushionJustCalmSeconds: 2.6
+  cushionJustCalmSeconds: 1.6
   cushionCalmSeconds: 0.8
   cushionJustRecallSeconds: 0.5
   cushionJustRecallStrength: 40
   cushionJustRestoreAll: 1
   cushionJustRewind: 1
-  cushionJustRewindSeconds: 0.45
+  cushionJustRewindSeconds: 0.6
   cushionRecallSeconds: 0
   cushionRecallStrength: 0
   cushionGoodJolt: 0.35
@@ -32419,7 +32419,7 @@ MonoBehaviour:
   rewindDelay: 0.15
   histCap: 48
   rewindStep: 5
-  spillFeedSeconds: 0.9
+  spillFeedSeconds: 0.6
   restoreDelay: 0.35
   restoreSeconds: 0.5
   restoreRateFactor: 2.5
@@ -60532,7 +60532,7 @@ MonoBehaviour:
   rewindDelay: 0.15
   histCap: 48
   rewindStep: 5
-  spillFeedSeconds: 0.9
+  spillFeedSeconds: 0.6
   restoreDelay: 0.35
   restoreSeconds: 0.5
   restoreRateFactor: 2.5

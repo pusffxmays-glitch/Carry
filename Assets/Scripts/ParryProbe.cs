@@ -279,6 +279,103 @@ public class ParryProbe : MonoBehaviour
     }
 
     /// <summary>一定時間まっすぐ歩く/走るだけ。移動そのもののこぼれ量を測る。</summary>
+    /// <summary>ライブ実行のフレーム時間トレース。パリー前後のヒッチ特定用。
+    /// MCP から毎フレーム読むと偽ヒッチが出るので、ゲーム内で録って最後に読む。</summary>
+    /// <summary>ライブのヒッチ特定: ジャンプ→ジョルト→パリーを全部ゲーム内で駆動し、
+    /// フレーム時間と流体 Step を録る。トレース中の外部 (MCP) 呼び出しはゼロ。</summary>
+    public void RunLiveParryTrace(float joltStrength)
+    {
+        if (Running) return;
+        Running = true; Trace = "";
+        StartCoroutine(LiveParryTraceSeq(joltStrength));
+    }
+
+    System.Collections.IEnumerator LiveParryTraceSeq(float joltStrength)
+    {
+        var fc = PotFluid();
+        var acts = FindFirstObjectByType<GoblinPotActions>();
+        var loco = acts.GetComponent<GoblinLocomotion>();
+        var cc = acts.GetComponent<CharacterController>();
+        var dts = new System.Collections.Generic.List<float>(1024);
+        var steps = new System.Collections.Generic.List<float>(1024);
+        var marks = new System.Collections.Generic.List<string>(8);
+        string lastJ = acts.LastParryResult;
+        yield return new WaitForSeconds(1.0f);
+        float t0 = Time.realtimeSinceStartup;
+        bool jumped = false, jolted = false, pressed = false;
+        float airT = 0f;
+        while (Time.realtimeSinceStartup - t0 < 10f)
+        {
+            yield return null;
+            dts.Add(Time.unscaledDeltaTime * 1000f);
+            steps.Add(fc != null ? fc.LastStepMs : 0f);
+            if (!jumped) { loco.debugJumpRequest = true; jumped = true; marks.Add("跳び@f" + dts.Count); }
+            if (!cc.isGrounded) airT += Time.deltaTime; 
+            if (jumped && !jolted && airT > 0.15f)
+            { fc.JoltPot((Vector3.up + transform.forward * 0.8f) * joltStrength); jolted = true; marks.Add("ジョルト@f" + dts.Count); }
+            if (jolted && !pressed && loco.VerticalVelocity < -3.5f)
+            { acts.debugParryRequest = true; pressed = true; marks.Add("押し@f" + dts.Count); }
+            if (acts.LastParryResult != lastJ)
+            { lastJ = acts.LastParryResult; marks.Add("判定[" + lastJ + "]@f" + dts.Count); }
+        }
+        var order = new System.Collections.Generic.List<int>();
+        for (int i = 0; i < dts.Count; i++) order.Add(i);
+        order.Sort((a, b) => dts[b].CompareTo(dts[a]));
+        var sb = new System.Text.StringBuilder();
+        sb.Append(string.Format("frames={0} 平均={1:F0}ms | ", dts.Count, Sum(dts) / Mathf.Max(1, dts.Count)));
+        sb.Append(string.Join(" ", marks));
+        sb.Append(" | 最悪: ");
+        for (int k = 0; k < Mathf.Min(12, order.Count); k++)
+        {
+            int i = order[k];
+            sb.Append(string.Format("f{0}:{1:F0}ms(流体{2:F0}) ", i, dts[i], steps[i]));
+        }
+        Trace = sb.ToString();
+        Running = false;
+    }
+
+    public void RunFrameTrace(float seconds)
+    {
+        if (Running) return;
+        Running = true; Trace = "";
+        StartCoroutine(FrameTraceSeq(seconds));
+    }
+
+    System.Collections.IEnumerator FrameTraceSeq(float seconds)
+    {
+        var fc = PotFluid();
+        var acts = FindFirstObjectByType<GoblinPotActions>();
+        var dts = new System.Collections.Generic.List<float>(1024);
+        var steps = new System.Collections.Generic.List<float>(1024);
+        var marks = new System.Collections.Generic.List<string>(8);
+        string lastJ = acts != null ? acts.LastParryResult : "";
+        float t0 = Time.realtimeSinceStartup;
+        while (Time.realtimeSinceStartup - t0 < seconds)
+        {
+            yield return null;
+            dts.Add(Time.unscaledDeltaTime * 1000f);
+            steps.Add(fc != null ? fc.LastStepMs : 0f);
+            if (acts != null && acts.LastParryResult != lastJ)
+            { lastJ = acts.LastParryResult; marks.Add(string.Format("判定[{0}]@frame{1}", lastJ, dts.Count)); }
+        }
+        // 最悪フレーム上位と、その時点の流体 Step を並べる
+        var order = new System.Collections.Generic.List<int>();
+        for (int i = 0; i < dts.Count; i++) order.Add(i);
+        order.Sort((a, b) => dts[b].CompareTo(dts[a]));
+        var sb = new System.Text.StringBuilder();
+        sb.Append(string.Format("frames={0} 平均={1:F0}ms | ", dts.Count, Sum(dts) / Mathf.Max(1, dts.Count)));
+        sb.Append(string.Join(" ", marks));
+        sb.Append(" | 最悪: ");
+        for (int k = 0; k < Mathf.Min(10, order.Count); k++)
+        {
+            int i = order[k];
+            sb.Append(string.Format("f{0}:{1:F0}ms(流体{2:F0}) ", i, dts[i], steps[i]));
+        }
+        Trace = sb.ToString();
+        Running = false;
+    }
+    static float Sum(System.Collections.Generic.List<float> xs) { float s = 0f; foreach (var x in xs) s += x; return s; }
+
     public void RunSteady(Vector3 home, float seconds, bool running, float swayAmp = 0f, float swayHz = 1.2f)
     {
         if (Running) return;

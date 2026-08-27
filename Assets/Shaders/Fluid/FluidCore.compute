@@ -1589,9 +1589,10 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
                 }
                 // 内側の着地点は自分の履歴サンプル 0 (こぼれた地点、正しいローカル系) を
                 // 軸へ寄せて作る。必ず空洞の中に入る。
+                // 引き込み係数は粒子ごとに散らす (固定だと同一リングに落ちて過密になる)
                 float3 lp0 = HistPos[base];
                 lp0.y = clamp(lp0.y, PotFloorY + 0.05, PotRimY - 0.05);
-                lp0.xz *= 0.55;
+                lp0.xz *= 0.2 + 0.55 * w1;
                 Positions[i] = mul(PotToWorldSafety, float4(lp0, 1.0)).xyz;
                 RetiredFlags[i] = 0u;
                 Velocities[i] = ContainerLinearVelocity;
