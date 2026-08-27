@@ -226,8 +226,14 @@ public class FluidSurface : MonoBehaviour
         // (地面に落ちたこぼれはフィールド内なので見える = まさに報告どおりの症状)。
         // +1m は登坂ヘッドルーム。SimBounds は regionGrowStep (0.5m) 刻みで伸びるので、
         // 余裕を持たせて再確保 (LateUpdate のチェック) の頻度を下げる。
+        // 2026-08-27 (実機動画で特定した数秒ヒッチの正体):
+        // ヘッドルーム 1m ではジャンプ (壺 +2m + 旋回半径 + 領域の 0.5m 刻み) で
+        // 必ず不足し、**ジャンプのたびに BuildField (ブリック索引 ~15M 個 = 59MB の
+        // 再確保 + 全クリア) が複数回発火**して数秒のヒッチになる。動画のコンソールに
+        // 再構築ログが連発 (brick Y 133→139→144) していた。ジャンプ最大高さを
+        // 最初から確保する (増えるのは 4B/ブリックの索引だけ。プールは固定)。
         builtYSpan = core.SimBounds.size.y;
-        float ySpan = builtYSpan + 1.0f;
+        float ySpan = builtYSpan + 4.5f;
 
         // Brick の整数倍に切り上げる。中途半端だと端の Brick が半分だけ有効になる。
         voxelDims = new Vector3Int(
@@ -238,7 +244,15 @@ public class FluidSurface : MonoBehaviour
         UpdateFieldOrigin();
 
         brickDims = new Vector3Int(voxelDims.x / Brick, voxelDims.y / Brick, voxelDims.z / Brick);
-        brickTotal = brickDims.x * brickDims.y * brickDims.z;
+        int newBrickTotal = brickDims.x * brickDims.y * brickDims.z;
+        // 同一サイズなら再確保しない (原点の更新とスロットのリセットだけで足りる)
+        if (brickSlot != null && newBrickTotal == brickTotal)
+        {
+            ResetAllSlots();
+            BuildPotClipProfiles();
+            return;
+        }
+        brickTotal = newBrickTotal;
 
         brickSlot?.Release(); activeBricks?.Release(); allocCounter?.Release();
         brickArgs?.Release(); brickArgsSrc?.Release();
@@ -264,6 +278,8 @@ public class FluidSurface : MonoBehaviour
         BuildPotClipProfiles();
 
         float mb = (brickTotal * 4f + poolVoxels * 12f) / (1024f * 1024f);
+        if (loggedBuild) return;   // 再構築ごとのログ連発はそれ自体が編集負荷になる
+        loggedBuild = true;
         Debug.Log($"FluidSurface: voxel {voxelSize * 1000f:F1}mm / domain {domainSize} @ {fieldOrigin} " +
                   $"= {voxelDims} voxel, brick {brickDims} = {brickTotal / 1000f:F0}k, " +
                   $"pool {poolBrickCapacity} brick, markRadius {MarkRadiusVoxels} voxel, VRAM {mb:F0}MB", this);
@@ -322,6 +338,7 @@ public class FluidSurface : MonoBehaviour
     }
 
     float builtYSpan;
+    bool loggedBuild;
 
     // ---- コスト計測 (2026-08-23)。FluidCore.LastStepMs と同じ考え方で、表面生成だけの実時間を測る。
     // フレーム時間の内訳を「ソルバ / 表面生成 / 描画」に切り分けるために要る。コンポーネントを
