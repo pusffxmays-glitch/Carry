@@ -768,7 +768,11 @@ public class GoblinPotActions : MonoBehaviour
             // 巻き戻しが始まるまで印を張り続ける。
             // 印は巻き戻しが終わるまで張り続ける。切れた後の飛沫が印なし (state 3) に
             // なると、回収されずに壺の胴を這い降りて「入らない液滴」として残る (実測 17 粒)。
-            if (cushionJustRewind) fluid.BeginSpillEpoch(fluid.rewindDelay + cushionJustRewindSeconds + 0.3f);
+            // 2026-08-27: さらに **沸き返しの分** も延長でカバーする。大こぼれ (1612 粒) を
+            // 一気に合流させると壺が沸き立ち、リムから溢れ返して 158 粒 (9.8%) が
+            // 印なしで失われた (実測: 内 16091 → 15933、ゲージ 98 → 97%)。
+            // 合流後 1.2 秒は印を張り続け、溢れ返しも即座に口へ吸い戻す。
+            if (cushionJustRewind) fluid.BeginSpillEpoch(fluid.rewindDelay + cushionJustRewindSeconds + 1.5f);
             if (cushionJustRewind) fluid.RewindSpilledToPot(cushionJustRewindSeconds);
             else if (cushionJustRestoreAll) fluid.RestoreSpilledToPot();
         }
@@ -776,7 +780,7 @@ public class GoblinPotActions : MonoBehaviour
         if (fluid != null)
         {
             float need = just ? cushionJustRecallSeconds : cushionRecallSeconds;
-            if (just && cushionJustRewind) need = Mathf.Max(need, cushionJustRewindSeconds);
+            if (just && cushionJustRewind) need = Mathf.Max(need, fluid.rewindDelay + cushionJustRewindSeconds + 1.5f);
             else if (just && cushionJustRestoreAll) need = Mathf.Max(need, fluid.RestoreTotalSeconds);
             fluid.GrantSpillGrace(need + 0.3f);
         }

@@ -1698,8 +1698,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetVector("RecallTarget", potPos + potUp * 0.85f);
         fluidCompute.SetFloat("RecallMinY", potPos.y - recallMinYDrop);
         fluidCompute.SetFloat("RecallRadius", recallRadius);
-        // 窓を 0.5 秒延長して口フェーズを完走させる (残っていなければ何もしない)
-        bool rewinding = Time.time >= rewindFrom && Time.time < rewindUntil + 0.5f;
+        // 窓を 1.5 秒延長して、口フェーズの完走と **沸き返しの吸い戻し** を面倒みる。
+        // 大こぼれを一気に合流させると壺が沸き立ち、リムから溢れ返す (実測 158 粒)。
+        // 印 (epoch) も同じ長さ張られているので、溢れた分は state 4 になり、
+        // 履歴が浅いまま口フェーズに入って即座に吸い戻される。
+        bool rewinding = Time.time >= rewindFrom && Time.time < rewindUntil + 1.5f;
         fluidCompute.SetInt("HistCap", histCap);
         fluidCompute.SetFloat("HistDt", Mathf.Max(Time.deltaTime, 1e-3f));
         fluidCompute.SetFloat("RewindPlayback", rewinding ? 1f : 0f);
