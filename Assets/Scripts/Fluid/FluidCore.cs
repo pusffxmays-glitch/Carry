@@ -157,6 +157,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public int histCap = 48;
     [Tooltip("1 フレームに巻き戻すサンプル数。大きいほど速い巻き戻し。")]
     public int rewindStep = 5;
+    [Tooltip("口に集めた液を何秒かけて注ぎ込むか。一気に入れると壺が沸き立って溢れ返す。")]
+    public float spillFeedSeconds = 0.9f;
     GraphicsBuffer histPos, histCount;
     public void RewindSpilledToPot(float seconds)
     {
@@ -1702,13 +1704,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // 大こぼれを一気に合流させると壺が沸き立ち、リムから溢れ返す (実測 158 粒)。
         // 印 (epoch) も同じ長さ張られているので、溢れた分は state 4 になり、
         // 履歴が浅いまま口フェーズに入って即座に吸い戻される。
-        bool rewinding = Time.time >= rewindFrom && Time.time < rewindUntil + 1.5f;
+        bool rewinding = Time.time >= rewindFrom && Time.time < rewindUntil + 2.5f;
         fluidCompute.SetInt("HistCap", histCap);
         fluidCompute.SetFloat("HistDt", Mathf.Max(Time.deltaTime, 1e-3f));
         fluidCompute.SetFloat("RewindPlayback", rewinding ? 1f : 0f);
-        // 窓の終盤は残りを一気に戻す (低 fps で戻し切れない取りこぼしを出さない)
-        bool flush = rewinding && Time.time >= rewindUntil - 0.15f;
+        // 窓の最終盤だけ残りを一気に戻す (取りこぼしの保険)。それまでは
+        // spillFeedSeconds の注ぎ込みペースを守る (早く flush すると沸き返す)。
+        bool flush = rewinding && Time.time >= rewindUntil + 2.1f;
         fluidCompute.SetInt("RewindStep", flush ? histCap : Mathf.Max(1, rewindStep));
+        fluidCompute.SetFloat("SpillFeedSeconds", spillFeedSeconds);
         fluidCompute.SetFloat("MarkSpillEpoch", Time.time < markEpochUntil ? 1f : 0f);
         fluidCompute.SetFloat("SpillGrace", Time.time < spillGraceUntil ? 1f : 0f);
         // 実測 (走りジャンプの金パリー、着地後 1.5 秒の最大速度の平均):

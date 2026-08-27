@@ -772,7 +772,7 @@ public class GoblinPotActions : MonoBehaviour
             // 一気に合流させると壺が沸き立ち、リムから溢れ返して 158 粒 (9.8%) が
             // 印なしで失われた (実測: 内 16091 → 15933、ゲージ 98 → 97%)。
             // 合流後 1.2 秒は印を張り続け、溢れ返しも即座に口へ吸い戻す。
-            if (cushionJustRewind) fluid.BeginSpillEpoch(fluid.rewindDelay + cushionJustRewindSeconds + 1.5f);
+            if (cushionJustRewind) fluid.BeginSpillEpoch(fluid.rewindDelay + cushionJustRewindSeconds + 2.5f);
             if (cushionJustRewind) fluid.RewindSpilledToPot(cushionJustRewindSeconds);
             else if (cushionJustRestoreAll) fluid.RestoreSpilledToPot();
         }
@@ -780,7 +780,7 @@ public class GoblinPotActions : MonoBehaviour
         if (fluid != null)
         {
             float need = just ? cushionJustRecallSeconds : cushionRecallSeconds;
-            if (just && cushionJustRewind) need = Mathf.Max(need, fluid.rewindDelay + cushionJustRewindSeconds + 1.5f);
+            if (just && cushionJustRewind) need = Mathf.Max(need, fluid.rewindDelay + cushionJustRewindSeconds + 2.5f);
             else if (just && cushionJustRestoreAll) need = Mathf.Max(need, fluid.RestoreTotalSeconds);
             fluid.GrantSpillGrace(need + 0.3f);
         }

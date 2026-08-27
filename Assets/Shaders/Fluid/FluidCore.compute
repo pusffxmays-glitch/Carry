@@ -155,6 +155,7 @@ uint  HistCap;         // 粒子ごとの履歴サンプル数上限
 float HistDt;          // 1 フレームの実時間 (記録・再生はフレーム単位)
 float RewindPlayback;  // >0.5 = 逆再生中
 uint  RewindStep;      // 1 フレームに戻るサンプル数 (大きいほど速い巻き戻し)
+float SpillFeedSeconds; // 口に集めた液を何秒かけて注ぎ込むか (一気に入れると沸き返す)
 RWStructuredBuffer<float3> HistPos;   // [particle * HistCap + k]
 RWStructuredBuffer<uint>   HistCount; // 粒子ごとの記録済みサンプル数
 float MarkSpillEpoch;  // 1 の間にこぼれた液に「このジャンプの分」の印 (state 4) を付ける
@@ -1507,7 +1508,8 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
         // **壺ローカルの定数 (PotRimY 等) に自前のオフセットを足して世界座標を合成しては
         // いけない。** スケールの食い違いで実際の壺より 1.1m 上を指した (実測)。
         // HistCount == 1 を「口フェーズ」の印として使う。
-        if (n > 1u && distance(Positions[i], RecallTarget) < 0.9) { n = 1u; HistCount[i] = 1u; }
+        if (n > 1u && distance(Positions[i], RecallTarget) < 0.9)
+        { n = 1u; HistCount[i] = 1u; Ages[i] = 0.0; }   // Ages を注ぎ込みの順番待ちタイマに使う
 
         if (n == 1u)
         {
@@ -1516,9 +1518,14 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
             float w1 = frac((float)(rw & 0xFFFFu) / 65536.0);
             rw = rw * 747796405u + 2891336453u;
             float w2 = frac((float)(rw & 0xFFFFu) / 65536.0);
+            rw = rw * 747796405u + 2891336453u;
+            float w3 = frac((float)(rw & 0xFFFFu) / 65536.0);
+            rw = rw * 747796405u + 2891336453u;
+            float w4 = frac((float)(rw & 0xFFFFu) / 65536.0);
             float aT = w2 * 6.2831853;
-            float rT = 0.12 * sqrt(w1);
-            float3 tgtM = RecallTarget + float3(rT * cos(aT), 0.0, rT * sin(aT));
+            float rT = 0.25 * sqrt(w1);
+            // 口の上に少し広がって集まる (雲状に見せる。1 点に集めると密度が爆発する)
+            float3 tgtM = RecallTarget + float3(rT * cos(aT), 0.22 * w3, rT * sin(aT));
             float3 curM = Positions[i];
             float3 dM = tgtM - curM;
             float distM = length(dM);
@@ -1527,9 +1534,21 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
             float dtM = max(HistDt, 1e-4);
             float stepM = 6.0 * dtM;   // 壺基準で 6 m/s
             curM += ContainerLinearVelocity * dtM;
-            // 窓の終端 (RewindStep が HistCap に達した合図) は追跡を打ち切って即合流。
-            if (distM <= stepM || distM < 1e-4 || RewindStep >= HistCap)
+            bool flushNow = RewindStep >= HistCap;   // 窓の終端: 待たせず全部入れる
+            if (distM <= stepM || distM < 1e-4 || flushNow)
             {
+                // 2026-08-27: **一気に合流させない。** 1378 粒を 0.3 秒で入れたら壺が
+                // 沸き立ち、溢れ返しが 1.5 秒続いた (実測)。口の上で順番待ちさせ、
+                // SpillFeedSeconds かけて注ぎ込む。順番は粒子ごとのハッシュで散らす。
+                Ages[i] += dtM;
+                if (!flushNow && Ages[i] < w4 * SpillFeedSeconds)
+                {
+                    // 順番待ち: 口の上の集合点で壺と並走しながら浮かぶ
+                    Positions[i] = (distM <= stepM) ? (tgtM + ContainerLinearVelocity * dtM)
+                                                    : (curM + dM * (stepM / distM));
+                    Velocities[i] = ContainerLinearVelocity;
+                    return;
+                }
                 // 内側の着地点は自分の履歴サンプル 0 (こぼれた地点、正しいローカル系) を
                 // 軸へ寄せて作る。必ず空洞の中に入る。
                 float3 lp0 = HistPos[base];
