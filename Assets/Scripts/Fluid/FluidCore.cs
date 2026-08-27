@@ -72,7 +72,12 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     [Tooltip("壺のリムより上に跳ね上がった液の速度下限。calm 中でもここまでは出せる " +
              "(0.5 m/s の calm に張り付いてスローモーションで戻るのを防ぐ)。" +
              "0 なら maxSpeedFalling と同じ = リムより上は落下中の液と同じ扱い。")]
-    public float maxSpeedAboveRim = 0f;
+    // 2026-08-27: 既定を 14 (落下と同じ) → 5.5 に変更。リム上で解放された state-0 の
+    // 液滴は CFL の実測最大速度に入る (脱出済みと違い相互作用するので除外できない)。
+    // 14 のままだとサブステップが上限に張り付き、こぼれ中〜回収中のソルバ費用が
+    // 4〜7 倍になる (実機「金パリーでほぼ止まりかけ」の主犯の一つ)。
+    // 見た目の落下感は 4 以上で十分 (実測: 上限 4.0 で平均 1.39 m/s、14 で 1.82)。
+    public float maxSpeedAboveRim = 5.5f;
 
     [Header("Material")]
     [Range(1.5f, 3f)] public float kernelRadiusScale = 2f;
@@ -1724,6 +1729,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         fluidCompute.SetInt("RewindStep", flush ? histCap : Mathf.Max(1, rewindStep));
         fluidCompute.SetFloat("SpillFeedSeconds", spillFeedSeconds);
         fluidCompute.SetFloat("RewindRemain", Mathf.Max(rewindUntil - Time.time, 0f));
+        fluidCompute.SetFloat("FillLevel01", FillFraction01);
         fluidCompute.SetFloat("MarkSpillEpoch", Time.time < markEpochUntil ? 1f : 0f);
         fluidCompute.SetFloat("SpillGrace", Time.time < spillGraceUntil ? 1f : 0f);
         // 実測 (走りジャンプの金パリー、着地後 1.5 秒の最大速度の平均):

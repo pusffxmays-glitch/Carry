@@ -313,7 +313,7 @@ public class ParryProbe : MonoBehaviour
             if (!cc.isGrounded) airT += Time.deltaTime; 
             if (jumped && !jolted && airT > 0.15f)
             { fc.JoltPot((Vector3.up + transform.forward * 0.8f) * joltStrength); jolted = true; marks.Add("ジョルト@f" + dts.Count); }
-            if (jolted && !pressed && loco.VerticalVelocity < -3.5f)
+            if (jolted && !pressed && loco.VerticalVelocity < -4.8f)
             { acts.debugParryRequest = true; pressed = true; marks.Add("押し@f" + dts.Count); }
             if (acts.LastParryResult != lastJ)
             { lastJ = acts.LastParryResult; marks.Add("判定[" + lastJ + "]@f" + dts.Count); }

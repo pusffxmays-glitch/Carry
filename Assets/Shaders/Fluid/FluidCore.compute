@@ -157,6 +157,7 @@ float RewindPlayback;  // >0.5 = 逆再生中
 uint  RewindStep;      // 1 フレームに戻るサンプル数 (大きいほど速い巻き戻し)
 float SpillFeedSeconds; // 口に集めた液を何秒かけて注ぎ込むか (一気に入れると沸き返す)
 float RewindRemain;     // 逆走フェーズの残り時間 (秒)。ペース配分に使う
+float FillLevel01;      // 現在の残量 (0..1)。合流の着地高さを液面に合わせる
 RWStructuredBuffer<float3> HistPos;   // [particle * HistCap + k]
 RWStructuredBuffer<uint>   HistCount; // 粒子ごとの記録済みサンプル数
 float MarkSpillEpoch;  // 1 の間にこぼれた液に「このジャンプの分」の印 (state 4) を付ける
@@ -1589,9 +1590,14 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
                 }
                 // 内側の着地点は自分の履歴サンプル 0 (こぼれた地点、正しいローカル系) を
                 // 軸へ寄せて作る。必ず空洞の中に入る。
-                // 引き込み係数は粒子ごとに散らす (固定だと同一リングに落ちて過密になる)
+                // 引き込み係数は粒子ごとに散らす (固定だと同一リングに落ちて過密になる)。
+                // 2026-08-27 (実機「重いのは残量が多い時の金パリー」): 着地高さを
+                // **現在の液面のすぐ上** にする。固定のリム直下だと満杯時は液中への
+                // 差し込みになり、圧力ソルバが暴れて重い時間帯が続く。液面より上なら
+                // 粒はただ落ちて液面に乗るだけで、圧力の喧嘩が起きない。
                 float3 lp0 = HistPos[base];
-                lp0.y = clamp(lp0.y, PotFloorY + 0.05, PotRimY - 0.05);
+                float surfY = lerp(PotFloorY, PotRimY, saturate(FillLevel01));
+                lp0.y = clamp(surfY + 0.03, PotFloorY + 0.05, PotRimY + 0.06);
                 lp0.xz *= 0.2 + 0.55 * w1;
                 Positions[i] = mul(PotToWorldSafety, float4(lp0, 1.0)).xyz;
                 RetiredFlags[i] = 0u;
