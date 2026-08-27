@@ -1509,7 +1509,10 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
         // **壺ローカルの定数 (PotRimY 等) に自前のオフセットを足して世界座標を合成しては
         // いけない。** スケールの食い違いで実際の壺より 1.1m 上を指した (実測)。
         // HistCount == 1 を「口フェーズ」の印として使う。
-        if (n > 1u && distance(Positions[i], RecallTarget) < 0.9)
+        // 捕獲半径 1.4m (2026-08-27 拡大)。0.9m だと壺の胴の下側や真上の高い弧が
+        // 捕まらず、「胴に絡む液滴の鎖」「上空を単独で舞う粒」が軌跡の尻尾を
+        // 延々と逆走して見える (コマ送りで確認)。
+        if (n > 1u && distance(Positions[i], RecallTarget) < 1.4)
         { n = 1u; HistCount[i] = 1u; Ages[i] = 0.0; }   // Ages を注ぎ込みの順番待ちタイマに使う
 
         if (n == 1u)
@@ -1524,9 +1527,10 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
             rw = rw * 747796405u + 2891336453u;
             float w4 = frac((float)(rw & 0xFFFFu) / 65536.0);
             float aT = w2 * 6.2831853;
-            float rT = 0.25 * sqrt(w1);
-            // 口の上に少し広がって集まる (雲状に見せる。1 点に集めると密度が爆発する)
-            float3 tgtM = RecallTarget + float3(rT * cos(aT), 0.22 * w3, rT * sin(aT));
+            float rT = 0.18 * sqrt(w1);
+            // 口の上に小さくまとまって集まる (散らしすぎると個々の粒がバラけて見える。
+            // 1 点に集めると密度が爆発するので最低限の広がりは残す)
+            float3 tgtM = RecallTarget + float3(rT * cos(aT), 0.10 * w3, rT * sin(aT));
             float3 curM = Positions[i];
             float3 dM = tgtM - curM;
             float distM = length(dM);
