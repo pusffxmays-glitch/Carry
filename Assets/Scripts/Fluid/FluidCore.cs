@@ -1266,7 +1266,10 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             float currentTop = regionAnchorY + regionSize.y * 0.5f;
             if (neededTop > currentTop)
             {
-                float newTop = Mathf.Ceil(neededTop / regionGrowStep) * regionGrowStep;
+                // 2026-08-27: 0.5m 刻みで何度も作り直すと、その都度セルバッファの
+                // 再確保ヒッチが出る (ジャンプ 1 回で 3〜4 発)。ジャンプの最大高さぶん
+                // (+2m) を先読みして一度で伸ばし、発火を「新しい最高到達点ごとに 1 回」へ。
+                float newTop = Mathf.Ceil((neededTop + 2.0f) / regionGrowStep) * regionGrowStep;
                 regionSize.y = newTop - (groundY - groundMargin);
                 regionAnchorY = groundY - groundMargin + regionSize.y * 0.5f;
                 BuildGrid();
