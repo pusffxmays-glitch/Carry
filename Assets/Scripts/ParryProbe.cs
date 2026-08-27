@@ -427,6 +427,33 @@ public class ParryProbe : MonoBehaviour
         Running = false;
     }
 
+    // 検証用スクリーンレコーダ (2026-08-28): MCP を挟むと撮影ヒッチ自体が
+    // 現象を作る/隠すため、プレイ内で一定間隔にフレームを保存する。
+    public int RecFrames { get; private set; }
+    public bool Recording { get; private set; }
+    public void StartRecording(string dir, float interval, float seconds)
+    {
+        if (Recording) return;
+        StartCoroutine(RecordSeq(dir, interval, seconds));
+    }
+    System.Collections.IEnumerator RecordSeq(string dir, float interval, float seconds)
+    {
+        Recording = true; RecFrames = 0;
+        System.IO.Directory.CreateDirectory(dir);
+        float t0 = Time.realtimeSinceStartup, next = 0f;
+        while (Time.realtimeSinceStartup - t0 < seconds)
+        {
+            float el = Time.realtimeSinceStartup - t0;
+            if (el >= next)
+            {
+                ScreenCapture.CaptureScreenshot(System.IO.Path.Combine(dir, string.Format("r{0:D3}.png", RecFrames)));
+                RecFrames++; next += interval;
+            }
+            yield return null;
+        }
+        Recording = false;
+    }
+
     public void RunFrameTrace(float seconds)
     {
         if (Running) return;
