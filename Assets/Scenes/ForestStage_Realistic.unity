@@ -28291,6 +28291,7 @@ GameObject:
   - component: {fileID: 966228492}
   - component: {fileID: 966228491}
   - component: {fileID: 966228490}
+  - component: {fileID: 966228501}
   m_Layer: 0
   m_Name: Goblin
   m_TagString: Untagged
@@ -28381,7 +28382,7 @@ MonoBehaviour:
   runStride: 1.935
   debugParryRequest: 0
   cushionWindow: 0.35
-  cushionJustWindow: 0.12
+  cushionJustWindow: 0.9
   cushionJustCalmSeconds: 1.6
   cushionCalmSeconds: 0.8
   cushionJustRecallSeconds: 0.5
@@ -28671,6 +28672,23 @@ Animator:
   m_AllowConstantClipSamplingOptimization: 1
   m_KeepAnimatorStateOnDisable: 0
   m_WriteDefaultValuesOnDisable: 0
+--- !u!114 &966228501
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 966228488}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 25a79bf47014eda4e9b821c5fe48f36f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::ParryProbe
+  Result: 
+  Running: 0
+  StepHealth: 
+  Trace: 
+  ApexGroundDistance: 0
 --- !u!1 &974977237
 GameObject:
   m_ObjectHideFlags: 0
@@ -32393,6 +32411,8 @@ MonoBehaviour:
   minSubSteps: 6
   stableSubstepDt: 0.0111
   maxSubSteps: 20
+  adaptiveFrameMs: 0
+  adaptiveMaxSubSteps: 0
   cflSpeedMargin: 1.6
   containerTravelBudget: 1.5
   emergencyTravelSpacing: 1.5
@@ -32494,7 +32514,7 @@ MonoBehaviour:
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
   stepEveryNFrames: 1
-  synchronousReadback: 0
+  synchronousReadback: 1
   classifyInterval: 3
   watchdogStepMs: 120
   watchdogFrames: 5
@@ -60506,6 +60526,8 @@ MonoBehaviour:
   minSubSteps: 9
   stableSubstepDt: 0.0037
   maxSubSteps: 20
+  adaptiveFrameMs: 0
+  adaptiveMaxSubSteps: 0
   cflSpeedMargin: 1.6
   containerTravelBudget: 1.5
   emergencyTravelSpacing: 1.5
@@ -60537,7 +60559,7 @@ MonoBehaviour:
   restoreSeconds: 0.5
   restoreRateFactor: 2.5
   restoreDropHeight: 0.06
-  fillFraction: 0.88
+  fillFraction: 0.78
   initialSettleSeconds: 0.7
   startupCalmSimSeconds: 30
   startupCalmClamp: 0.6
@@ -60577,7 +60599,7 @@ MonoBehaviour:
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
   stepEveryNFrames: 1
-  synchronousReadback: 0
+  synchronousReadback: 1
   classifyInterval: 3
   watchdogStepMs: 120
   watchdogFrames: 5

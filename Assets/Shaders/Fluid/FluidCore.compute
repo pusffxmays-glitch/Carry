@@ -38,6 +38,7 @@
 #pragma kernel ClassifyRegions
 #pragma kernel TeleportFluid
 #pragma kernel SpillHistory
+#pragma kernel ClearRegionCounters
 
 #define THREADS 256
 #define SCAN_BLOCK 256
@@ -158,6 +159,7 @@ uint  RewindStep;      // 1 フレームに戻るサンプル数 (大きいほ�
 float SpillFeedSeconds; // 口に集めた液を何秒かけて注ぎ込むか (一気に入れると沸き返す)
 float RewindRemain;     // 逆走フェーズの残り時間 (秒)。ペース配分に使う
 float FillLevel01;      // 現在の残量 (0..1)。合流の着地高さを液面に合わせる
+uint ClassifyStamp;     // 分類ディスパッチのフレーム番号 (凍結診断用)
 RWStructuredBuffer<float3> HistPos;   // [particle * HistCap + k]
 RWStructuredBuffer<uint>   HistCount; // 粒子ごとの記録済みサンプル数
 float MarkSpillEpoch;  // 1 の間にこぼれた液に「このジャンプの分」の印 (state 4) を付ける
@@ -1385,11 +1387,19 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
     // CFL でカバーする必要が無い。従来は数滴のこぼれの自由落下 (クランプ 5 m/s) が
     // 計測を占有し、壺内が完全に静止していてもサブステップが 12 に張り付いていた
     // (= ソルバ費用が常時 2 倍)。
+    // 2026-08-27: **リムより上の液滴は CFL 計測から除外する**。リム上で解放された
+    // 液滴 (最大 3.5 m/s × マージン 1.6) が実測最大速度を占有し、サブステップ要求を
+    // 31〜40 に暴騰させていた (実機動画)。これらは壺の壁と相互貫通しないので
+    // CFL でカバーする必要が無い (脱出済みを除外したのと同じ理屈)。
     if (RetiredFlagsIn[i] == 0u)
     {
-        uint sp = (uint)(length(VelocitiesIn[i] - SpeedClampRef(PositionsIn[i])) * 1000.0);
-        uint old;
-        InterlockedMax(RegionCounters[7], sp, old);
+        float lpy = mul(WorldToPotSafety, float4(PositionsIn[i], 1.0)).y;
+        if (lpy <= PotRimY)
+        {
+            uint sp = (uint)(length(VelocitiesIn[i] - SpeedClampRef(PositionsIn[i])) * 1000.0);
+            uint old;
+            InterlockedMax(RegionCounters[7], sp, old);
+        }
     }
 
     float3 p = PositionsIn[i];
@@ -1419,6 +1429,7 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
         // どちらも Airborne に混ざり、残量ゲージが揺れの最中に大きく落ち込む
         // （実測: 実損失 3.3% の瞬間にゲージが 0.998 -> 0.598）。
         if (stateIn == 3u) InterlockedAdd(RegionCounters[8], 1, d2);
+        if (i == 0u) RegionCounters[9] = ClassifyStamp;   // 診断: この結果がどのフレームの分類か
         RegionFlags[i] = reg | (prev & (FLAG_PASSED_RIM | FLAG_EVER_OUT));
         return;
     }
@@ -1654,4 +1665,12 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
     }
     HistPos[base + n] = p;
     HistCount[i] = n + 1u;
+}
+
+// 領域カウンタの GPU 側ゼロクリア (2026-08-27)。CPU の SetData は飛行中の
+// 非同期読み戻しと衝突して hasError を量産する (カウンタが数秒凍る原因)。
+[numthreads(16, 1, 1)]
+void ClearRegionCounters(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < 10u) RegionCounters[id.x] = 0u;
 }

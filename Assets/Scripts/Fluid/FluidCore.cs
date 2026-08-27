@@ -48,10 +48,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 8 * (1/60) / (0.4 * spacing) ≒ 12。上限はそれを上回っている必要がある。
     // 静かなときは適応 CFL が 6 まで落とすので、常時のコストは増えない。
     [Range(1, 32)] public int maxSubSteps = 20;
-    [Tooltip("フレームがこの ms を超えている間だけ、サブステップ上限を adaptiveMaxSubSteps に絞る (0 で無効)。")]
-    public float adaptiveFrameMs = 70f;
-    [Tooltip("重いフレーム中のサブステップ上限。液は一時的に 6〜7 割速で流れるが、フリーズよりまし。")]
-    public int adaptiveMaxSubSteps = 13;
+    // 2026-08-27 撤去: 適応キャップは誤りだった。実機動画で、キャップ 13 が回収中の
+    // シミュ時間比を 0.34〜0.46 まで落とし、**比が 1 を切ると壺の動きが液に対して
+    // 実効 2〜3 倍になって壁が液を弾き出す** (歩くだけでゲージ 100→11.7% の出血)。
+    // fps を守るためにシミュを遅らせる手は、この作品では「こぼれ」という
+    // 一番大事な資源を壊す。既定 0 = 無効。
+    [Tooltip("(撤去済み・無効推奨) フレームがこの ms を超えている間だけサブステップを絞る。0 で無効。")]
+    public float adaptiveFrameMs = 0f;
+    [Tooltip("(撤去済み) 重いフレーム中のサブステップ上限。")]
+    public int adaptiveMaxSubSteps = 0;
     float smoothedFrameMs = 33f;
     [Tooltip("CFL に使う実測最大速度への安全率。実測値は 1 フレーム前のものなので、急加速に備えて余裕を持たせる。")]
     [Range(1f, 4f)] public float cflSpeedMargin = 1.6f;
@@ -535,7 +540,9 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public float AirborneMass => EscapedCount * ParticleMassValue;
     public float GroundMass => GroundCount * ParticleMassValue;
     public float RetiredMass => RetiredCount * ParticleMassValue;
-    public float InitialTotalMass => fluidCount * ParticleMassValue;
+    // ゲージの分母は「実際にシードした量」。fluidCount 固定だと、ヘッドルームの
+    // ためにシード量を減らしたとき開始ゲージが 100% にならない。
+    public float InitialTotalMass => (SeededParticles > 0 ? SeededParticles : fluidCount) * ParticleMassValue;
     public float TotalMass => PotMass + AirborneMass + GroundMass + RetiredMass;
     /// <summary>収支誤差。分類漏れがあると 0 にならない (§16 の Debug 検証)。</summary>
     public int MassBalanceError => fluidCount - (InsideCount + RimCount + AirborneCount + GroundCount + RetiredCount);
@@ -610,6 +617,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     // 2026-08-21 ディスパッチ対策③: UpdateBoundary+Integrate / ClearCellCounts+BuildSortPositions /
     // ComputeVelocity+ComputeNormals をそれぞれ 1 カーネルに結合 (計算内容は不変)。
     int kSpillHistory;
+    int kClearRegionCounters;
     int kIntegrateBoundary, kClearBuildSort, kCount, kScanLocal, kScanBlocks, kScanAdd, kScatter;
     int kDensityLambda, kDeltaP, kApplyDeltaP, kVelNormals, kViscTension, kFinalize, kClassify;
     int kTeleport, kSolidBoxCollide;
@@ -663,6 +671,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         kClassify = fluidCompute.FindKernel("ClassifyRegions");
         kTeleport = fluidCompute.FindKernel("TeleportFluid");
         kSpillHistory = fluidCompute.FindKernel("SpillHistory");
+        kClearRegionCounters = fluidCompute.FindKernel("ClearRegionCounters");
         kSolidBoxCollide = fluidCompute.FindKernel("SolidBoxCollide");
 
         fluidCount = Mathf.Max(Threads, particleCount);
@@ -875,7 +884,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         regionFlags.SetData(new uint[fluidCount]);          // 全員 Inside から開始
         if (regionCountersRing == null)
         {
-            regionCountersRing = new GraphicsBuffer[3];
+            regionCountersRing = new GraphicsBuffer[6];   // 重い GPU でも完了前再利用が起きない深さ
             for (int i = 0; i < regionCountersRing.Length; i++)
                 regionCountersRing[i] = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 10, sizeof(uint));
         }
@@ -1126,6 +1135,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             vel[i] = Vector3.zero;
         }
         SeededParticles = Mathf.Min(pts.Count, fluidCount);
+        // 2026-08-27: シードに使わなかった粒子は最初から退避 (state 1) にする。
+        // 従来は fallback (壺の中心) に積まれ、fillFraction を下げると 1 点に
+        // 数千粒重なって爆発する。退避なら物理にも描画にも入らない。
+        if (SeededParticles < fluidCount && retiredFlags != null)
+        {
+            var fl = new uint[fluidCount];
+            for (int i = SeededParticles; i < fluidCount; i++) fl[i] = 1u;
+            retiredFlags.SetData(fl);
+        }
 
         positions.SetData(pos);
         predicted.SetData(pos);
@@ -1363,7 +1381,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // 上限を adaptiveMaxSubSteps に落とし、「フリーズ」の代わりに「その瞬間だけ
         // 液がわずかにゆっくり」で済ませる。通常フレームでは何もしない。
         smoothedFrameMs = Mathf.Lerp(smoothedFrameMs, Time.unscaledDeltaTime * 1000f, 0.2f);
-        if (adaptiveMaxSubSteps > 0 && smoothedFrameMs > adaptiveFrameMs)
+        if (adaptiveMaxSubSteps > 0 && adaptiveFrameMs > 0f && smoothedFrameMs > adaptiveFrameMs)
             sub = Mathf.Min(sub, adaptiveMaxSubSteps);
         LastRequiredSubSteps = need;
 
@@ -1485,12 +1503,36 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         ClassifyAndRead();
     }
 
+    // スロットごとの「読み戻し飛行中」。飛行中のスロットに SetData すると DX12 で
+    // リクエストが黙って落ち、カウンタが数秒凍りついてから一気に跳ぶ
+    // (実機動画のゲージ乱高下 49.4→32→49.4→11.7 の正体)。CFL の実測速度も
+    // 同じカウンタなので、凍っている間は古い速度でサブステップを決めてしまう。
+    bool[] ringPending;
+    public int ClassifySkips { get; private set; }
+    public int ReadbackErrors { get; private set; }
+    public int LastClassifyStamp { get; private set; }
+
     void ClassifyAndRead()
     {
-        var buf = regionCountersRing[regionRingIndex];
-        regionRingIndex = (regionRingIndex + 1) % regionCountersRing.Length;
+        if (ringPending == null || ringPending.Length != regionCountersRing.Length)
+            ringPending = new bool[regionCountersRing.Length];
+        // 空いているスロットを探す。全部飛行中ならこの回は諦める (古い値を使い続ける
+        // 方が、リクエストを落として何秒も凍るよりまし)。
+        int slot = -1;
+        for (int k = 0; k < regionCountersRing.Length; k++)
+        {
+            int idx = (regionRingIndex + k) % regionCountersRing.Length;
+            if (!ringPending[idx]) { slot = idx; break; }
+        }
+        if (slot < 0) { ClassifySkips++; return; }
+        regionRingIndex = (slot + 1) % regionCountersRing.Length;
+        var buf = regionCountersRing[slot];
 
-        buf.SetData(ZeroCounters);
+        // ゼロクリアは GPU 側で行う。CPU の SetData は飛行中の読み戻しと衝突して
+        // hasError を量産する (カウンタ凍結の原因)。
+        fluidCompute.SetBuffer(kClearRegionCounters, "RegionCounters", buf);
+        fluidCompute.Dispatch(kClearRegionCounters, 1, 1, 1);
+        fluidCompute.SetInt("ClassifyStamp", Time.frameCount);
         Bind(kClassify, ("PositionsIn", positions), ("VelocitiesIn", velocities),
                         ("RegionFlags", regionFlags),
                         ("RegionCounters", buf), ("PotProfileBuf", potProfile),
@@ -1506,11 +1548,15 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         else
         {
             pendingRegionReads++;
+            ringPending[slot] = true;
+            int slotCaptured = slot;
             AsyncGPUReadback.Request(buf, req =>
             {
                 pendingRegionReads--;
+                if (ringPending != null && slotCaptured < ringPending.Length) ringPending[slotCaptured] = false;
                 if (ringReleaseQueued && pendingRegionReads <= 0) { ReleaseRegionRingNow(); return; }
-                if (req.hasError || positions == null || regionCountersRing == null) return;
+                if (req.hasError) { ReadbackErrors++; return; }
+                if (positions == null || regionCountersRing == null) return;
                 var data = req.GetData<uint>();
                 for (int i = 0; i < 10 && i < data.Length; i++) regionRead[i] = data[i];
                 ApplyRegionCounters(regionRead);
@@ -1546,6 +1592,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         PenetrationEvents += (int)r[6];
         MeasuredMaxSpeed = r[7] / 1000f;
         EscapedCount = (int)r[8];
+        LastClassifyStamp = (int)r[9];
     }
 
     public void ResetOverflowCounters()
