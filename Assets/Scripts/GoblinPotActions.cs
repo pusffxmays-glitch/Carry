@@ -135,6 +135,10 @@ public class GoblinPotActions : MonoBehaviour
     // 熱い床の連続バウンド用: 発射のたびに延長される calm 解除時刻 (0 = 未使用)
     // 追補 14 で通常ジャンプ・落下の滞空にも共用 (滞空中は延長され続け、着地 0.6 秒後に解除)
     float hotCalmUntil;
+    // 2026-08-28: min 固着バグ対策。パリー着地・踏切などの「保護クランプ」は期限付きで
+    // 記録し、地上移動ブランチの毎フレーム上書きがそれを踏み潰さないようにする。
+    float protectCalmClamp = -1f;
+    float protectCalmUntil;
     // 追補 22: パリーなし着地の直後は加速 calm を当てない (着地の掛け金を守る)
     float rampCalmBlockedUntil;
     float airborneTime;   // 連続滞空時間。歩行中の isGrounded ちらつきを除くゲート用
@@ -175,7 +179,7 @@ public class GoblinPotActions : MonoBehaviour
         // 0.8 倍入れても 0%、クッションの効きを 0 にしても 0%)。
         // 窓 (0.35 秒) より少しだけ長い時間で切れるようにすると、早押しは着地時に
         // 保護が残らない = 「成功 > 何もしない > 失敗」が液量にも出る。
-        BeginFluidCalm(1.2f);
+        BeginFluidCalm(1.2f, cushionPressProtectSeconds);
         hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + cushionPressProtectSeconds);
         // 傾いたままのジャンプ対策: 水平化は「空中で」行う。滞空中は壺内が
         // 実効無重力で、クランプ下の回転には流体がほぼ完全に追従する
@@ -334,9 +338,15 @@ public class GoblinPotActions : MonoBehaviour
     float emissionBase = -1f;    // 発光パルスの基準値 (初回に取得)
     bool glowPulsing;
 
-    void BeginFluidCalm(float clamp = 2.5f)
+    void BeginFluidCalm(float clamp = 2.5f, float protectSeconds = 0f)
     {
         if (fluid == null) return;
+        if (protectSeconds > 0f)
+        {
+            protectCalmClamp = (Time.time < protectCalmUntil && protectCalmClamp > 0f)
+                ? Mathf.Min(protectCalmClamp, clamp) : clamp;
+            protectCalmUntil = Mathf.Max(protectCalmUntil, Time.time + protectSeconds);
+        }
         // 2026-08-16: 全体の maxSpeed ではなく **壺内限定** の maxSpeedInPot を絞る。
         // 以前は壺外の液滴まで 1.2 m/s に制限され、こぼれた液体がスローモーションで
         // 落ちていた (ユーザー報告)。既に calm 中でも、より低いクランプ要求は上書きする。
@@ -371,7 +381,7 @@ public class GoblinPotActions : MonoBehaviour
                     // 追補 19: 従来は滞空全体 (2.2s) を calm していたが、それだと 3.6m 落下の
                     // 着地までほぼ無傷になり「パリーの意味がない」。降下は素通しにして、
                     // 着地はパリー (着地クッション) で守るゲーム性に統一する。
-                    BeginFluidCalm(1.2f);
+                    BeginFluidCalm(1.2f, 0.45f);
                     hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + 0.45f);
                     // 連続バウンドでは (前のクリップが残っていても) 頭から再生し直す
                     if (!anim.OneShotActive || anim.CurrentOneShot == GoblinClip.HotJump)
@@ -468,7 +478,7 @@ public class GoblinPotActions : MonoBehaviour
                 bool jumpJustStarted = loco != null && Time.time - loco.LastJumpStartTime < 0.35f;
                 if (jumpJustStarted)
                 {
-                    BeginFluidCalm(1.2f);
+                    BeginFluidCalm(1.2f, 0.35f);
                     hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + 0.35f);
                 }
                 // 追補 22: 地上での大きな加減速中は自動 calm (歩き出しを速くした代償を吸収)。
@@ -504,6 +514,7 @@ public class GoblinPotActions : MonoBehaviour
                     // 直前まで掛かっていた calm を即座に解く (残っていると慣性が死ぬ)
                     if (fluid != null) fluid.maxSpeedInPot = -1f;
                     hotCalmUntil = 0f;
+                    protectCalmUntil = 0f;
                 }
                 else if (loco != null && (loco.RampingHard || balanceMoving || movingOnGround) && !airborneNow
                     && Time.time >= rampCalmBlockedUntil)
@@ -511,7 +522,16 @@ public class GoblinPotActions : MonoBehaviour
                     float clamp = loco.RampingHard ? rampCalmClamp
                                : balanceMoving ? balanceCalmClamp
                                : loco.IsRunning ? runCalmClamp : walkCalmClamp;
-                    BeginFluidCalm(clamp);
+                    // 2026-08-28: min 固着バグ修正。BeginFluidCalm は「より低い値だけ採用」する
+                    // ため、歩き出しの一瞬の RampingHard で 0.5 が入ると、以後 walkCalmClamp
+                    // 1.0 を毎フレーム要求しても min(0.5, 1.0)=0.5 のまま歩行中ずっと固着して
+                    // いた (実測: 7 秒歩行でクランプ 0.50 張り付き・約 1,200 粒/秒 流出。歩行の
+                    // 縦ボブ追従には相対 ±0.6 m/s が要り、0.5 では物理的に追従できずリムから
+                    // 一歩ごとに漏れる)。地上移動中はこのブランチが毎フレーム適正値を選ぶので
+                    // 上書きが正しい。パリー等の保護クランプの期間中のみ、その下限を守る。
+                    if (Time.time < protectCalmUntil && protectCalmClamp > 0f)
+                        clamp = Mathf.Min(clamp, protectCalmClamp);
+                    if (fluid != null) fluid.maxSpeedInPot = clamp;
                     hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + 0.45f);
                 }
 
@@ -730,7 +750,7 @@ public class GoblinPotActions : MonoBehaviour
     {
         float hand = rig != null ? rig.potHandoverSeconds : 0.45f;
         float fade = anim != null ? anim.handoverFadeSeconds : 0.25f;
-        BeginFluidCalm(just ? cushionJustCalm : cushionCalm);
+        BeginFluidCalm(just ? cushionJustCalm : cushionCalm, Mathf.Max(hand, fade) + 0.2f);
         hotCalmUntil = Mathf.Max(hotCalmUntil, Time.time + Mathf.Max(hand, fade) + 0.2f);
     }
 

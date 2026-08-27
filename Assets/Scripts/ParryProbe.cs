@@ -377,6 +377,14 @@ public class ParryProbe : MonoBehaviour
         var acts = FindFirstObjectByType<GoblinPotActions>();
         var loco = acts.GetComponent<GoblinLocomotion>();
         var cc = acts.GetComponent<CharacterController>();
+        // 内訳サンプリング (重さ調査 2026-08-28)
+        FluidCore wf = null;
+        foreach (var c2 in FindObjectsByType<FluidCore>(FindObjectsSortMode.None))
+            if (c2 != fc) { wf = c2; break; }
+        var surf = fc != null ? fc.GetComponentInChildren<FluidSurface>() : null;
+        var subs = new System.Collections.Generic.List<int>(1024);
+        var wfMs = new System.Collections.Generic.List<float>(1024);
+        var surfMs = new System.Collections.Generic.List<float>(1024);
         var dts = new System.Collections.Generic.List<float>(1024);
         var steps = new System.Collections.Generic.List<float>(1024);
         var marks = new System.Collections.Generic.List<string>(8);
@@ -390,6 +398,9 @@ public class ParryProbe : MonoBehaviour
             yield return null;
             dts.Add(Time.unscaledDeltaTime * 1000f);
             steps.Add(fc != null ? fc.LastStepMs : 0f);
+            subs.Add(fc != null ? fc.LastSubStepCount : 0);
+            wfMs.Add(wf != null ? wf.LastStepMs : 0f);
+            surfMs.Add(surf != null ? surf.LastBuildMs : 0f);
             if (!jumped) { loco.debugJumpRequest = true; jumped = true; marks.Add("跳び@f" + dts.Count); }
             if (!cc.isGrounded) airT += Time.deltaTime; 
             if (jumped && !jolted && airT > 0.15f)
@@ -409,7 +420,8 @@ public class ParryProbe : MonoBehaviour
         for (int k = 0; k < Mathf.Min(12, order.Count); k++)
         {
             int i = order[k];
-            sb.Append(string.Format("f{0}:{1:F0}ms(流体{2:F0}) ", i, dts[i], steps[i]));
+            sb.Append(string.Format("f{0}:{1:F0}ms(壺{2:F0}/sub{3}/滝{4:F0}/面{5:F0}) ",
+                i, dts[i], steps[i], subs[i], wfMs[i], surfMs[i]));
         }
         Trace = sb.ToString();
         Running = false;
@@ -426,8 +438,16 @@ public class ParryProbe : MonoBehaviour
     {
         var fc = PotFluid();
         var acts = FindFirstObjectByType<GoblinPotActions>();
+        // 内訳: 壺流体 Step / サブステップ数 / 滝流体 Step / 壺サーフェス構築
+        FluidCore wf = null;
+        foreach (var c in FindObjectsByType<FluidCore>(FindObjectsSortMode.None))
+            if (c != fc) { wf = c; break; }
+        var surf = fc != null ? fc.GetComponentInChildren<FluidSurface>() : null;
         var dts = new System.Collections.Generic.List<float>(1024);
         var steps = new System.Collections.Generic.List<float>(1024);
+        var subs = new System.Collections.Generic.List<int>(1024);
+        var wfMs = new System.Collections.Generic.List<float>(1024);
+        var surfMs = new System.Collections.Generic.List<float>(1024);
         var marks = new System.Collections.Generic.List<string>(8);
         string lastJ = acts != null ? acts.LastParryResult : "";
         float t0 = Time.realtimeSinceStartup;
@@ -436,6 +456,9 @@ public class ParryProbe : MonoBehaviour
             yield return null;
             dts.Add(Time.unscaledDeltaTime * 1000f);
             steps.Add(fc != null ? fc.LastStepMs : 0f);
+            subs.Add(fc != null ? fc.LastSubStepCount : 0);
+            wfMs.Add(wf != null ? wf.LastStepMs : 0f);
+            surfMs.Add(surf != null ? surf.LastBuildMs : 0f);
             if (acts != null && acts.LastParryResult != lastJ)
             { lastJ = acts.LastParryResult; marks.Add(string.Format("判定[{0}]@frame{1}", lastJ, dts.Count)); }
         }
@@ -450,7 +473,8 @@ public class ParryProbe : MonoBehaviour
         for (int k = 0; k < Mathf.Min(10, order.Count); k++)
         {
             int i = order[k];
-            sb.Append(string.Format("f{0}:{1:F0}ms(流体{2:F0}) ", i, dts[i], steps[i]));
+            sb.Append(string.Format("f{0}:{1:F0}ms(壺{2:F0}/sub{3}/滝{4:F0}/面{5:F0}) ",
+                i, dts[i], steps[i], subs[i], wfMs[i], surfMs[i]));
         }
         Trace = sb.ToString();
         Running = false;

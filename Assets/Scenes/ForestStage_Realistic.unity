@@ -32514,7 +32514,7 @@ MonoBehaviour:
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
   stepEveryNFrames: 1
-  synchronousReadback: 1
+  synchronousReadback: 0
   classifyInterval: 3
   watchdogStepMs: 120
   watchdogFrames: 5
@@ -60599,7 +60599,7 @@ MonoBehaviour:
   fluidCompute: {fileID: 7200000, guid: be4f89fb8c6523b46aeadc11a44728c8, type: 3}
   autoStep: 1
   stepEveryNFrames: 1
-  synchronousReadback: 1
+  synchronousReadback: 0
   classifyInterval: 3
   watchdogStepMs: 120
   watchdogFrames: 5

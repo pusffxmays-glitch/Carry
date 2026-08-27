@@ -1373,6 +1373,10 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
     if (i >= FluidCount) return;
+    // 診断: この結果がどのフレームの分類か。粒子 0 の状態に依存しないよう、
+    // どの分岐にも入る前にここで書く (以前は state!=0 分岐内にあり、粒子 0 は
+    // ほぼ常に state 0 なので一度も書かれず、鮮度検証が不能だった)。
+    if (i == 0u) RegionCounters[9] = ClassifyStamp;
 
     // §3 CFL 用の実測最大速さ。次フレームのサブステップ数を決めるのに使う。
     // ここは既に全粒子を 1 回なめているので、追加のディスパッチは要らない。
@@ -1429,7 +1433,6 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
         // どちらも Airborne に混ざり、残量ゲージが揺れの最中に大きく落ち込む
         // （実測: 実損失 3.3% の瞬間にゲージが 0.998 -> 0.598）。
         if (stateIn == 3u) InterlockedAdd(RegionCounters[8], 1, d2);
-        if (i == 0u) RegionCounters[9] = ClassifyStamp;   // 診断: この結果がどのフレームの分類か
         RegionFlags[i] = reg | (prev & (FLAG_PASSED_RIM | FLAG_EVER_OUT));
         return;
     }
