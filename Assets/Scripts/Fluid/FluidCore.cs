@@ -185,28 +185,14 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public float pourPerSecond = 2600f;
     GraphicsBuffer pourTicket;
     GraphicsBuffer histPos, histCount;
-    // ---- 合流整定 (2026-08-28、実機報告「パリー後だけ重い/水玉が出る」) ----
-    // 合流は液中への埋め込みなので撹拌エネルギーが入る。従来は cushionJustCalm の
-    // 固定 1.6 秒だけが頼りで、注ぎ込み (プレイバック +1.2s 延長 + feed) の完了前に
-    // 切れていた。実測: 金パリー後、完全静止でも 15 秒以上 max 1〜3.9 m/s・CFL 要求
-    // 32 のまま減衰しない (失敗パリー = 合流なしは即座に max 0.3 で静定)。これが
-    // パリー後だけのサブステップ張り付き (重さ) と、液面から粒が弾け出る「水玉」の
-    // 正体。巻き戻し開始から合流完了後まで壺内クランプで撹拌を毎サブステップ潰し、
-    // 実測最大速度が落ち着いたら早期解除する。
-    float rewindSettleUntil;
-    [Tooltip("合流整定中の壺内クランプ (m/s)。撹拌を潰しつつ、注がれた液が液面に馴染む速さは残す。")]
-    public float rewindSettleClamp = 0.8f;
-    [Tooltip("プレイバック終了後、整定を維持する最長秒数。実測速度が下がれば早期解除。")]
-    public float rewindSettleMaxSeconds = 4f;
-    [Tooltip("この速度を下回ったら整定を早期解除する (m/s)。")]
-    public float rewindSettleReleaseSpeed = 0.8f;
-    public bool RewindSettling => Time.time < rewindSettleUntil;
+    // 合流整定 (旧設計の沸き対症) は撤去した (2026-08-28)。液中テレポート挿入を
+    // やめた新設計 (幽霊帰還 + 定量注ぎ込み) では撹拌が原理的に入らず、
+    // 逆に「パリー成功後、数秒こぼれない無敵時間」という副作用だけが残っていた
+    // (実機報告)。こぼれはこのゲームの核の資源なので保護窓は作らない。
     public void RewindSpilledToPot(float seconds)
     {
         rewindFrom = Time.time + rewindDelay;
         rewindUntil = rewindFrom + seconds;
-        // プレイバック窓 (+1.2s 延長) が閉じてから最長 rewindSettleMaxSeconds 保持
-        rewindSettleUntil = rewindUntil + 1.2f + rewindSettleMaxSeconds;
     }
 
     // 「このジャンプでこぼれた分」の印。踏切から着地の判定までの間だけ立てる。
@@ -1541,7 +1527,6 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         histCount?.SetData(zero);
         regionFlags?.SetData(zero);
         rewindFrom = rewindUntil = 0f;
-        rewindSettleUntil = 0f;
         restoreFrom = restoreUntil = 0f;
         recallUntil = 0f;
         spillGraceUntil = 0f;
@@ -1853,14 +1838,6 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         float potClamp = maxSpeedInPot > 0f ? maxSpeedInPot : maxSpeed;
         if (!startupCalmDone)   // 開始直後の波つぶし (適応型、宣言部の注記)
             potClamp = Mathf.Min(potClamp, startupCalmClamp);
-        // 合流整定 (宣言部の注記)。GoblinPotActions 側の calm と独立に、maxSpeedInPot の
-        // 上書きに関係なくここで min を取る。プレイバック終了後、実測速度が落ちたら早期解除。
-        if (Time.time < rewindSettleUntil)
-        {
-            potClamp = Mathf.Min(potClamp, rewindSettleClamp);
-            if (Time.time >= rewindUntil + 1.2f && MeasuredMaxSpeed < rewindSettleReleaseSpeed)
-                rewindSettleUntil = Mathf.Min(rewindSettleUntil, Time.time + 0.3f);
-        }
         fluidCompute.SetFloat("MaxSpeedPot", potClamp);
         // 追補 26: パリー回収 & 着地ジョルト
         Vector3 potPos = boundary != null ? boundary.Container.position : Vector3.zero;
