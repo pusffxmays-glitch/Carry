@@ -29,6 +29,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public bool ballisticMode = false;
     [Tooltip("PBF の密度投影反復数 (§7)。")]
     [Range(1, 10)] public int solverIterations = 4;
+    // 2026-08-28: このフレームで実際に回す反復数 (Step が決める)。サブステップが多い
+    // フレームは 1 歩あたりの圧力の破れが小さく、反復を絞っても非圧縮性が保てる。
+    // 反復 1 回 ≈ 0.35ms/サブステップ (4K 実測) で、サブステップ 20 のとき反復 4→2 は
+    // フレーム -15ms。低 FPS ほど流体 GPU 費用が膨らむ正帰還をここで切る。
+    int itersThisFrame = 4;
     // Phase 12 実測: サブステップ数はソルバーの収束にも効く。適応 CFL だけに任せて
     // 3 まで落とすと、静止時の液面が 0.189 -> 0.287、平均速さが 0.005 -> 0.589 m/s に
     // 悪化した（＝落ち着かない）。下限を 6 に固定すると 10 と同等の品質を保ったまま
@@ -1403,6 +1408,9 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
 
         simTimeSinceSeed += dt;
         float sdt = dt / sub;
+        // サブステップ 12 以上 = 低 FPS 圏。反復を 2 に絞って GPU 費用の伸びを止める
+        // (宣言部 itersThisFrame の注記)。通常 FPS (sub < 12) は従来どおり。
+        itersThisFrame = sub >= 12 ? Mathf.Min(solverIterations, 2) : solverIterations;
         BindAll();   // フレームに 1 回。サブステップで変わる分は SubStep 側で設定する
         for (int s = 0; s < sub; s++) SubStep(sdt, (s + 1) / (float)sub);
 
@@ -1459,6 +1467,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         float sdt = 0.4f * spacing / Mathf.Max(maxSpeed, 1e-6f);
         int steps = Mathf.Clamp(Mathf.CeilToInt(initialSettleSeconds / sdt), 1, 2000);
         settling = true;
+        itersThisFrame = solverIterations;   // 整定は品質優先で全反復
         BindAll();   // settling フラグ (EscapeEnabled) を反映してから整定を回す
         for (int i = 0; i < steps; i++) SubStep(sdt, 1f);
         settling = false;
@@ -1643,7 +1652,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
             fluidCompute.Dispatch(kScatter, totalGroups, 1, 1);
         }
 
-        for (int it = 0; it < solverIterations; it++)
+        for (int it = 0; it < itersThisFrame; it++)
         {
             fluidCompute.Dispatch(kDensityLambda, fluidGroups, 1, 1);
             fluidCompute.Dispatch(kDeltaP, fluidGroups, 1, 1);
@@ -1895,7 +1904,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         // 液滴が散らばる（実測 38 粒子）。止めれば SafetyCorrection が内側へ戻す。
         fluidCompute.SetInt("EscapeEnabled", (escapeAboveRim && !settling) ? 1 : 0);
         fluidCompute.SetFloat("EscapeMargin", boundary.mode == FluidBoundary.Mode.PotProfile
-            ? spacing * escapeMarginSpacings / Mathf.Max(1e-6f, boundary.ContainerScale) : 1e9f);        fluidCompute.SetFloat("EscapeFarMargin", potMode
+            ? spacing * escapeMarginSpacings / Mathf.Max(1e-6f, boundary.ContainerScale) : 1e9f);
+        fluidCompute.SetFloat("EscapeFarMargin", potMode
             ? spacing * escapeFarSpacings / Mathf.Max(1e-6f, boundary.ContainerScale) : 1e9f);
         fluidCompute.SetFloat("GroundLifetime", groundLifetime);
         // 待避先は領域の外。CellCoord が領域外になるので近傍探索にも密度場にも入らない。
