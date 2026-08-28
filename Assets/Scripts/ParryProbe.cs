@@ -454,6 +454,67 @@ public class ParryProbe : MonoBehaviour
         Recording = false;
     }
 
+    // ユーザーレシピ再現 (2026-08-28): 満タン → 歩行からジャンプ → 空中でマウス大振り
+    // (armBalance/pitchBalance を実際に振って大きくこぼす) → 金パリーで回収 → 着地後も歩く。
+    // before/after 比較 GIF 用に、入力列をスクリプトで完全一致させる。
+    public void RunUserRecipe(float swingAmp)
+    {
+        if (Running) return;
+        Running = true; Trace = "";
+        StartCoroutine(UserRecipeSeq(swingAmp));
+    }
+    System.Collections.IEnumerator UserRecipeSeq(float swingAmp)
+    {
+        var acts = FindFirstObjectByType<GoblinPotActions>();
+        var loco = acts.GetComponent<GoblinLocomotion>();
+        var rig = acts.GetComponent<GoblinCarryRig>();
+        var cc = acts.GetComponent<CharacterController>();
+        var fc = PotFluid();
+        var marks = new System.Collections.Generic.List<string>(16);
+        System.Action<string> mark = tag =>
+            marks.Add(string.Format("{0}@{1:F2}s 残{2}", tag, Time.time, fc != null ? fc.InsideCount : -1));
+        rig.mouseBalance = false; rig.armBalance = 0f; rig.pitchBalance = 0f;
+        mark("開始");
+        loco.debugMoveForward = true;
+        yield return new WaitForSeconds(2.5f);
+        loco.debugJumpRequest = true;
+        mark("跳び(歩行から)");
+        float airT = 0f, swingT = 0f, minVy = 0f; bool pressed = false;
+        string lastJ = acts.LastParryResult;
+        while (true)
+        {
+            yield return null;
+            if (!cc.isGrounded) airT += Time.deltaTime;
+            else if (airT > 0.4f) break;                     // 着地
+            if (airT > 3f) break;                            // 安全網
+            if (loco.VerticalVelocity < minVy) minVy = loco.VerticalVelocity;
+            if (airT > 0.1f)
+            {
+                // マウス大振り: 空中で左右に大きく振る (フルスケール ±swingAmp)
+                swingT += Time.deltaTime;
+                rig.armBalance = Mathf.Clamp(Mathf.Sin(swingT * 9f) * swingAmp, -1f, 1f);
+                rig.pitchBalance = Mathf.Clamp(Mathf.Sin(swingT * 6f + 1f) * swingAmp * 0.6f, -1f, 1f);
+            }
+            // 降下 (vy<-4.8) で押す。ちらつき等で拾えない場合も滞空 0.75s で必ず押す
+            if (!pressed && airT > 0.1f && (loco.VerticalVelocity < -4.8f || airT > 0.75f))
+            { acts.debugParryRequest = true; pressed = true; mark("押し(vy" + loco.VerticalVelocity.ToString("F1") + ")"); }
+            if (acts.LastParryResult != lastJ)
+            { lastJ = acts.LastParryResult; mark("判定[" + lastJ + "]"); }
+        }
+        // マウスを中立へ戻した想定
+        rig.armBalance = 0f; rig.pitchBalance = 0f;
+        mark("着地(滞空" + airT.ToString("F2") + "s minVy" + minVy.ToString("F1") + ")");
+        // 回収を見届けつつ歩き続ける
+        yield return new WaitForSeconds(2.5f);
+        mark("着地+2.5s");
+        yield return new WaitForSeconds(4.0f);
+        loco.debugMoveForward = false;
+        yield return new WaitForSeconds(1.5f);
+        mark("終了(後歩行6.5s)");
+        Trace = string.Join(" | ", marks);
+        Running = false;
+    }
+
     public void RunFrameTrace(float seconds)
     {
         if (Running) return;
