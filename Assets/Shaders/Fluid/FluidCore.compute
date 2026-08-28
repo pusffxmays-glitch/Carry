@@ -38,6 +38,8 @@
 #pragma kernel ClassifyRegions
 #pragma kernel TeleportFluid
 #pragma kernel SpillHistory
+#pragma kernel ClearPourTicket
+#pragma kernel PourIn
 #pragma kernel ClearRegionCounters
 
 #define THREADS 256
@@ -160,6 +162,16 @@ float SpillFeedSeconds; // 口に集めた液を何秒かけて注ぎ込むか (
 float RewindRemain;     // 逆走フェーズの残り時間 (秒)。ペース配分に使う
 float FillLevel01;      // 現在の残量 (0..1)。合流の着地高さを液面に合わせる
 uint ClassifyStamp;     // 分類ディスパッチのフレーム番号 (凍結診断用)
+// ---- 注ぎ込み (2026-08-28 巻き戻しゼロベース再設計) ----
+// 旧方式は回収粒を「本物の液体として」液中へテレポート挿入していた。圧力ソルバは
+// 位置を直接押し出すため、速度クランプでは沸きを止められず、水玉・回収漏れ・
+// 低FPSほど悪化、が原理的に残った。新方式: 口に着いた粒は state 6 (注ぎ込み待ち)
+// で待避先へ消え、PourIn が毎フレーム定量だけ液面のすぐ上へ静かに湧かせて実液体に
+// 戻す。回収の完全性は物理でなく帳簿 (state 6 の在庫) が保証する。
+RWStructuredBuffer<uint> PourTicket;   // [0] = このフレームで発行した注ぎ込み数
+uint PourBudget;        // 1 フレームに注ぐ上限
+uint PourSalt;          // 配置ハッシュの種 (フレーム番号)
+float PourLevel01;      // 現在の壺内液位 (0..1)。ゲージではなく実在庫から出す
 RWStructuredBuffer<float3> HistPos;   // [particle * HistCap + k]
 RWStructuredBuffer<uint>   HistCount; // 粒子ごとの記録済みサンプル数
 float MarkSpillEpoch;  // 1 の間にこぼれた液に「このジャンプの分」の印 (state 4) を付ける
@@ -940,7 +952,7 @@ void SolidBoxCollide(uint3 id : SV_DispatchThreadID)
     uint state = RetiredFlags[i];
     // state 4 = このジャンプでこぼれた分。落下の扱いは 3 と同じ。巻き戻しの対象だけ違う。
     if (state == 4u) state = 3u;
-    if (state == 1u || state == 2u) return;   // 消滅済み / 定着済みは動かさない
+    if (state == 1u || state == 2u || state == 6u) return;   // 消滅/定着/注ぎ込み待ちは動かさない
     float3 p = Positions[i];
     float3 v = Velocities[i];
     uint hit = ResolveSolidBoxes(p, v);
@@ -977,6 +989,13 @@ void Finalize(uint3 id : SV_DispatchThreadID)
     uint state = RetiredFlags[i];
     // state 4 = このジャンプでこぼれた分。落下の扱いは 3 と同じ (巻き戻しの対象だけ違う)。
     if (state == 4u) state = 3u;
+    if (state == 6u)
+    {
+        // 注ぎ込み待ち (PourIn が引き取る)。待避先で静止させる。
+        Positions[i] = RetiredPark;
+        Velocities[i] = float3(0, 0, 0);
+        return;
+    }
     if (state == 1u)
     {
         // 安価なハッシュで粒子ごと・フレームごとに違う場所へ散らす(同じ粒子が毎回
@@ -1420,7 +1439,10 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
         // 後者は「地面にある回収可能な液体」なので Ground として数える (§16)。
         uint d2;
         // state 4 = このジャンプでこぼれた分。数え方は 3 と同じ (脱出扱い)。
-        if (stateIn == 4u) stateIn = 3u;
+        // state 6 = 注ぎ込み待ち。空中 (戻りうる) として数え、脱出には数えない
+        // (ゲージが待ち行列のぶんだけ下振れしないように)。
+        bool pourQueued = (stateIn == 6u);
+        if (stateIn == 4u || stateIn == 6u) stateIn = 3u;
         uint reg = (stateIn == 2u) ? REGION_GROUND
                  : (stateIn == 3u) ? REGION_AIR
                  : REGION_RETIRED;
@@ -1432,7 +1454,7 @@ void ClassifyRegions(uint3 id : SV_DispatchThreadID)
         // これが無いと「跳ね上がっただけで戻ってくる液体」と「こぼれて落下中の液体」が
         // どちらも Airborne に混ざり、残量ゲージが揺れの最中に大きく落ち込む
         // （実測: 実損失 3.3% の瞬間にゲージが 0.998 -> 0.598）。
-        if (stateIn == 3u) InterlockedAdd(RegionCounters[8], 1, d2);
+        if (stateIn == 3u && !pourQueued) InterlockedAdd(RegionCounters[8], 1, d2);
         RegionFlags[i] = reg | (prev & (FLAG_PASSED_RIM | FLAG_EVER_OUT));
         return;
     }
@@ -1519,10 +1541,10 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
         // --- 逆再生 ---
         if (n == 0u)
         {
-            // 記録が無いままの粒子 (稀)。口の中心近くで合流させる。
-            Positions[i] = RecallTarget;
-            Velocities[i] = ContainerLinearVelocity;
-            RetiredFlags[i] = 0u;
+            // 記録が無いままの粒子 (稀)。注ぎ込み待ちの列へ直行する。
+            Positions[i] = RetiredPark;
+            Velocities[i] = float3(0, 0, 0);
+            RetiredFlags[i] = 6u;
             Ages[i] = 0.0;
             return;
         }
@@ -1590,38 +1612,14 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
             // 経由点への到着では合流しない (口の点に着いたときだけ)。flush は無条件。
             if ((!detour && (distM <= stepM || distM < 1e-4)) || flushNow)
             {
-                // 2026-08-27: **一気に合流させない。** 1378 粒を 0.3 秒で入れたら壺が
-                // 沸き立ち、溢れ返しが 1.5 秒続いた (実測)。口の上で順番待ちさせ、
-                // SpillFeedSeconds かけて注ぎ込む。順番は粒子ごとのハッシュで散らす。
-                Ages[i] += dtM;
-                if (!flushNow && Ages[i] < w4 * SpillFeedSeconds)
-                {
-                    // 順番待ち: 口の上の集合点で壺と並走しながら浮かぶ
-                    Positions[i] = (distM <= stepM) ? (tgtM + ContainerLinearVelocity * dtM)
-                                                    : (curM + dM * (stepM / distM));
-                    Velocities[i] = ContainerLinearVelocity;
-                    return;
-                }
-                // 内側の着地点は自分の履歴サンプル 0 (こぼれた地点、正しいローカル系) を
-                // 軸へ寄せて作る。必ず空洞の中に入る。
-                // 引き込み係数は粒子ごとに散らす (固定だと同一リングに落ちて過密になる)。
-                // 2026-08-27 (実機「重いのは残量が多い時の金パリー」): 着地高さを
-                // **現在の液面のすぐ上** にする。固定のリム直下だと満杯時は液中への
-                // 差し込みになり、圧力ソルバが暴れて重い時間帯が続く。液面より上なら
-                // 粒はただ落ちて液面に乗るだけで、圧力の喧嘩が起きない。
-                // 2026-08-27 (FPS2 対応): 液面の同じ薄い層に積むと、到着のたびに同じ帯で
-                // 局所過密が再発し、ソルバの粒あたりコストが 3 倍化する (実測 150-188ms)。
-                // **空洞全体に分散して埋め込む**: 深さも半径も粒子ごとのハッシュで散らす。
-                // 1 点あたりの過密は一瞬で解け、繰り返さない。
-                float3 lp0 = HistPos[base];
-                float surfY = lerp(PotFloorY, PotRimY, saturate(FillLevel01));
-                float loY = PotFloorY + 0.10;
-                float hiY = max(loY + 0.02, surfY - 0.02);
-                lp0.y = lerp(loY, hiY, w3);
-                lp0.xz *= 0.2 + 0.55 * w1;
-                Positions[i] = mul(PotToWorldSafety, float4(lp0, 1.0)).xyz;
-                RetiredFlags[i] = 0u;
-                Velocities[i] = ContainerLinearVelocity;
+                // ゼロベース再設計 (宣言部 PourTicket の注記): 口に着いた粒はここで
+                // 消えて注ぎ込み待ち (state 6) になる。液中テレポート挿入はしない —
+                // 圧力ソルバの位置押し出しは速度クランプで止められず、沸き (水玉)・
+                // 回収漏れ・低FPS悪化の根だった。実液体への復帰は PourIn が
+                // 毎フレーム定量、液面のすぐ上で行う。
+                Positions[i] = RetiredPark;
+                Velocities[i] = float3(0, 0, 0);
+                RetiredFlags[i] = 6u;
                 Ages[i] = 0.0;
                 HistCount[i] = 0u;
             }
@@ -1676,4 +1674,44 @@ void SpillHistory(uint3 id : SV_DispatchThreadID)
 void ClearRegionCounters(uint3 id : SV_DispatchThreadID)
 {
     if (id.x < 10u) RegionCounters[id.x] = 0u;
+}
+
+
+[numthreads(1, 1, 1)]
+void ClearPourTicket(uint3 id : SV_DispatchThreadID)
+{
+    PourTicket[0] = 0u;
+}
+
+// 注ぎ込み: state 6 (待ち) の粒を毎フレーム PourBudget 個だけ、液面のすぐ上の
+// 空いた場所に容器と同速で湧かせる。落差は数 cm なので圧力の喧嘩が起きない。
+// 予算はフレームあたりで、低 FPS でも 1 フレームに入る量が増えない (バースト禁止)。
+[numthreads(THREADS, 1, 1)]
+void PourIn(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= FluidCount) return;
+    if (RetiredFlags[i] != 6u) return;
+    uint t;
+    InterlockedAdd(PourTicket[0], 1u, t);
+    if (t >= PourBudget) return;   // 今フレームの枠は売り切れ。来フレームに再挑戦
+
+    uint h = (i * 2654435761u) ^ (PourSalt * 2246822519u);
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    float w1 = frac((float)(h & 0xFFFFu) / 65536.0);
+    h = h * 747796405u + 2891336453u;
+    float w2 = frac((float)(h & 0xFFFFu) / 65536.0);
+    h = h * 747796405u + 2891336453u;
+    float w3 = frac((float)(h & 0xFFFFu) / 65536.0);
+
+    float surfY = lerp(PotFloorY, PotRimY, saturate(PourLevel01));
+    float y = clamp(surfY + 0.04 + 0.08 * w1, PotFloorY + 0.15, PotRimY - 0.05);
+    float R = max(PotRadiusAt(y) - 0.06, 0.05);
+    float r = R * (0.15 + 0.8 * sqrt(w2));
+    float ang = w3 * 6.2831853;
+    float3 lp = float3(r * cos(ang), y, r * sin(ang));
+    Positions[i] = mul(PotToWorldSafety, float4(lp, 1.0)).xyz;
+    Velocities[i] = ContainerLinearVelocity;
+    RetiredFlags[i] = 0u;
+    Ages[i] = 0.0;
 }

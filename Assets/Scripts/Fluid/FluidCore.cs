@@ -179,6 +179,11 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     public int rewindStep = 5;
     [Tooltip("口に集めた液を何秒かけて注ぎ込むか。一気に入れると壺が沸き立って溢れ返す。")]
     public float spillFeedSeconds = 0.6f;
+    // ゼロベース再設計 (2026-08-28): 口に着いた粒は state 6 (注ぎ込み待ち) で消え、
+    // PourIn が毎フレーム定量だけ液面のすぐ上へ湧かせて実液体に戻す (シェーダの注記)。
+    [Tooltip("注ぎ込みの速さ (粒/秒)。1 フレームの投入量はこの値×dt で頭打ち。")]
+    public float pourPerSecond = 2600f;
+    GraphicsBuffer pourTicket;
     GraphicsBuffer histPos, histCount;
     // ---- 合流整定 (2026-08-28、実機報告「パリー後だけ重い/水玉が出る」) ----
     // 合流は液中への埋め込みなので撹拌エネルギーが入る。従来は cushionJustCalm の
@@ -642,6 +647,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
     int kSpillHistory;
     int kClearRegionCounters;
     int kIntegrateBoundary, kClearBuildSort, kCount, kScanLocal, kScanBlocks, kScanAdd, kScatter;
+    int kClearPourTicket, kPourIn;
     int kDensityLambda, kDeltaP, kApplyDeltaP, kVelNormals, kViscTension, kFinalize, kClassify;
     int kTeleport, kSolidBoxCollide;
 
@@ -684,6 +690,8 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         kScanBlocks = fluidCompute.FindKernel("ScanBlockSums");
         kScanAdd = fluidCompute.FindKernel("ScanAddOffsets");
         kScatter = fluidCompute.FindKernel("ScatterParticles");
+        kClearPourTicket = fluidCompute.FindKernel("ClearPourTicket");
+        kPourIn = fluidCompute.FindKernel("PourIn");
         kIntegrateBoundary = fluidCompute.FindKernel("IntegrateAndBoundary");
         kDensityLambda = fluidCompute.FindKernel("ComputeDensityLambda");
         kDeltaP = fluidCompute.FindKernel("ComputeDeltaP");
@@ -923,6 +931,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         histCap = Mathf.Max(8, histCap);
         histPos?.Release(); histCount?.Release();
         histPos = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount * histCap, sizeof(float) * 3);
+        pourTicket = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, sizeof(uint));
         histCount = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fluidCount, sizeof(uint));
         histCount.SetData(new uint[fluidCount]);   // 未初期化のゴミを再生しないよう必ずゼロに
 
@@ -1188,6 +1197,7 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
         normals?.Release(); normals = null;
         safety?.Release(); safety = null;
         densities?.Release(); densities = null;
+        pourTicket?.Release(); pourTicket = null;
         lambdas?.Release(); lambdas = null;
         boundaryLocal?.Release(); boundaryLocal = null;
         boundaryPositions?.Release(); boundaryPositions = null;
@@ -1442,6 +1452,19 @@ public class FluidCore : MonoBehaviour, IPotionVolumeSource
                                 // 読まれて全粒子が壺の軸上に積み上がる (前科: 束縛漏れで壺が空に)
                                 ("PotProfileBuf", potProfile), ("PotOuterBuf", potOuterProfile));
             fluidCompute.Dispatch(kSpillHistory, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
+
+            // 注ぎ込み (ゼロベース再設計、シェーダ PourIn の注記)。state 6 の在庫が
+            // 無ければ実質ノーオペなので毎フレーム無条件に回してよい。
+            fluidCompute.SetInt("PourBudget", Mathf.Max(1, Mathf.CeilToInt(pourPerSecond * LastSimDt)));
+            fluidCompute.SetInt("PourSalt", Time.frameCount);
+            fluidCompute.SetFloat("PourLevel01",
+                SeededParticles > 0 ? Mathf.Clamp01(InsideCount / (float)SeededParticles) : 1f);
+            fluidCompute.SetBuffer(kClearPourTicket, "PourTicket", pourTicket);
+            fluidCompute.Dispatch(kClearPourTicket, 1, 1, 1);
+            Bind(kPourIn, ("Positions", positions), ("Velocities", velocities),
+                          ("RetiredFlags", retiredFlags), ("Ages", ages),
+                          ("PourTicket", pourTicket), ("PotProfileBuf", potProfile));
+            fluidCompute.Dispatch(kPourIn, Mathf.CeilToInt(fluidCount / (float)Threads), 1, 1);
         }
 
         // 領域分類は観測のみで、位置・速度には触れない (§14/追加修正1)。
