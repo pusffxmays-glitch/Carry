@@ -50,6 +50,7 @@ public class CarryStatsWindow : EditorWindow
 
     // ---- 表示用の平滑化 (生の deltaTime は暴れるので指数平均にする) ----
     float smoothedDt = 1f / 60f;
+    bool treesHidden;
     float worstDt;
     float worstDtResetAt;
 
@@ -190,6 +191,25 @@ public class CarryStatsWindow : EditorWindow
         if (GUILayout.Button("ポーション残量をリセット (満タンに戻す)"))
             pot.ResetFluid();
         EditorGUILayout.LabelField("  リセット直後は数秒間、開始時の鎮静クランプが掛かる", EditorStyles.miniLabel);
+
+        // 木の表示 ON/OFF (2026-08-28 ユーザー要望: 重さの切り分け用)。
+        // Terrain の樹木と、名前に tree/birch/pine を含む単体 MeshRenderer の両方を切る。
+        EditorGUILayout.Space(2);
+        if (GUILayout.Button(treesHidden ? "木を表示する" : "木を消す (重さの切り分け用)"))
+        {
+            treesHidden = !treesHidden;
+            foreach (var t in Object.FindObjectsByType<Terrain>(FindObjectsSortMode.None))
+                t.drawTreesAndFoliage = !treesHidden;
+            int n = 0;
+            foreach (var mr in Object.FindObjectsByType<MeshRenderer>(FindObjectsSortMode.None))
+            {
+                var nm = mr.name.ToLower();
+                if (nm.Contains("tree") || nm.Contains("birch") || nm.Contains("pine"))
+                { mr.enabled = !treesHidden; n++; }
+            }
+            Debug.Log($"[CarryStats] 木を{(treesHidden ? "非表示" : "表示")}にした (単体レンダラ {n} 個 + Terrain)");
+        }
+        EditorGUILayout.LabelField("  プレイ中のみ有効。停止で元に戻る", EditorStyles.miniLabel);
 
         // ---- ゴブリン ----
         EditorGUILayout.Space(6);

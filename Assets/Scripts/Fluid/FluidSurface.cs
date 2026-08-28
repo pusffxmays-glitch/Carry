@@ -24,6 +24,8 @@ public class FluidSurface : MonoBehaviour
     // 実際の損失より多く見えていた。壺の中の見え方は変えずに、こぼれた分だけ絞る。
     [Tooltip("こぼれた液体 (壺の外) の描画半径倍率。1 = 従来。下げるとこぼれた見た目の量が実際の損失量に近づく。")]
     [Range(0.4f, 1f)] public float escapedSplatScale = 0.75f;
+    [Tooltip("孤立した粒 (低密度) の描画半径倍率。水玉分離の見た目を小さな液滴にする。")]
+    public float isolatedSplatScale = 0.45f;
     [Tooltip("等値面のしきい値。下げると液体が太く、上げると細くなる。")]
     [Range(0.02f, 3f)] public float isoValue = 0.45f;
     [Tooltip("密度場の平滑化回数 (§14)。0 で無効。")]
@@ -397,6 +399,8 @@ public class FluidSurface : MonoBehaviour
         cs.SetFloat("VoxelSize", voxelSize);
         cs.SetFloat("SplatRadius", splatRadius);
         cs.SetFloat("EscapedSplatScale", escapedSplatScale);
+        cs.SetFloat("SplatRestDensity", core.RestDensity);
+        cs.SetFloat("IsolatedSplatScale", isolatedSplatScale);
         cs.SetFloat("DensityScale", densityFixedPointScale);
         cs.SetFloat("IsoValue", isoValue);
         cs.SetFloat("SurfaceNormalEps", normalEpsVoxels);
@@ -435,6 +439,7 @@ public class FluidSurface : MonoBehaviour
         cs.SetBuffer(kSplat, "BrickSlotIn", brickSlot);
         cs.SetBuffer(kSplat, "Particles", core.PositionsBuffer);
         cs.SetBuffer(kSplat, "ParticleStates", core.RetiredFlagsBuffer);
+        cs.SetBuffer(kSplat, "ParticleDensities", core.DensitiesBuffer);
         cs.Dispatch(kSplat, Mathf.CeilToInt(core.FluidCount / (float)Threads), 1, 1);
 
         // 6. decode: uint -> float（Atomic 用と Visual 用の分離）

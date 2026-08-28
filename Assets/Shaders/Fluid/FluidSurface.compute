@@ -105,6 +105,13 @@ float SplatRadius;          // 密度カーネル半径 (m)
 // ここを絞ると、こぼれた見た目の量が実際の損失量に近づく。
 float EscapedSplatScale;
 StructuredBuffer<uint> ParticleStates;   // 0 = 壺のもの、それ以外 = こぼれた
+// 2026-08-28「水玉分離」対策: 空中に飛び散った直後や巻き戻し中の粒は state=0 のまま
+// なので、孤立していても半径 0.48*SplatRadius の球として描かれ「大きな水玉」に見える。
+// シミュ側の密度 = 孤立度なので、密度が低い粒ほど描画半径を縮めて小さな液滴にする。
+// 壺の液面の粒 (密度 ~0.5 rest) は縮めない下限を取ってあり、液面の見た目は変わらない。
+StructuredBuffer<float> ParticleDensities;
+float SplatRestDensity;      // シミュの基準密度
+float IsolatedSplatScale;    // 完全に孤立した粒の描画半径倍率
 float DensityScale;         // 固定小数のスケール
 float IsoValue;
 int3  BlurAxis;
@@ -280,7 +287,16 @@ void SplatDensity(uint3 id : SV_DispatchThreadID)
 
     float3 p = Particles[i];
     // 追補 36: こぼれた粒子は実体積に近い大きさで描く (宣言部の注記)。
-    float h = SplatRadius * (ParticleStates[i] != 0u ? EscapedSplatScale : 1.0);
+    // 水玉分離対策 (宣言部の注記): state=0 でも孤立した粒は密度に応じて縮める。
+    float scale;
+    if (ParticleStates[i] != 0u)
+        scale = EscapedSplatScale;
+    else
+    {
+        float k = saturate((ParticleDensities[i] / max(SplatRestDensity, 1e-6) - 0.15) / 0.30);
+        scale = lerp(IsolatedSplatScale, 1.0, k);
+    }
+    float h = SplatRadius * scale;
     float3 local = (p - FieldOrigin) / VoxelSize;
     int rad = (int)ceil(h / VoxelSize);
 
