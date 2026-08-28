@@ -515,6 +515,95 @@ public class ParryProbe : MonoBehaviour
         Running = false;
     }
 
+    // 連続パリー通し (2026-08-28): ユーザーレシピを cycles 回連続で実行し、
+    // 全フレームの dt を記録して FPS 低下 (2-5FPS 現象) を定量化する。
+    public void RunGauntlet(int cycles, float swingAmp, bool refill = false)
+    {
+        if (Running) return;
+        Running = true; Trace = "";
+        StartCoroutine(GauntletSeq(cycles, swingAmp, refill));
+    }
+    System.Collections.IEnumerator GauntletSeq(int cycles, float swingAmp, bool refill)
+    {
+        var acts = FindFirstObjectByType<GoblinPotActions>();
+        var loco = acts.GetComponent<GoblinLocomotion>();
+        var rig = acts.GetComponent<GoblinCarryRig>();
+        var cc = acts.GetComponent<CharacterController>();
+        var fc = PotFluid();
+        var dts = new System.Collections.Generic.List<float>(4096);
+        var marks = new System.Collections.Generic.List<string>(32);
+        rig.mouseBalance = false; rig.armBalance = 0f; rig.pitchBalance = 0f;
+        for (int cyc = 0; cyc < cycles; cyc++)
+        {
+            if (refill && fc != null)
+            {
+                // 「残量が多い時の金パリー」を毎周再現する
+                fc.ResetFluid();
+                float tr = 0f;
+                while (tr < 1.2f) { yield return null; tr += Time.deltaTime; }
+                dts.Add(Time.unscaledDeltaTime * 1000f);
+            }
+            int cycStart = dts.Count;
+            loco.debugMoveForward = true;
+            float tw = 0f;
+            while (tw < 1.2f) { yield return null; tw += Time.deltaTime; dts.Add(Time.unscaledDeltaTime * 1000f); }
+            loco.debugJumpRequest = true;
+            float airT = 0f, swingT = 0f; bool pressed = false;
+            while (true)
+            {
+                yield return null;
+                dts.Add(Time.unscaledDeltaTime * 1000f);
+                if (!cc.isGrounded) airT += Time.deltaTime;
+                else if (airT > 0.4f) break;
+                if (airT > 3f) break;
+                if (airT > 0.1f)
+                {
+                    swingT += Time.deltaTime;
+                    rig.armBalance = Mathf.Clamp(Mathf.Sin(swingT * 9f) * swingAmp, -1f, 1f);
+                    rig.pitchBalance = Mathf.Clamp(Mathf.Sin(swingT * 6f + 1f) * swingAmp * 0.6f, -1f, 1f);
+                }
+                if (!pressed && airT > 0.1f && (loco.VerticalVelocity < -4.8f || airT > 0.75f))
+                { acts.debugParryRequest = true; pressed = true; }
+            }
+            rig.armBalance = 0f; rig.pitchBalance = 0f;
+            // 回収を見届ける (歩き続けたまま)
+            tw = 0f;
+            while (tw < 2.6f) { yield return null; tw += Time.deltaTime; dts.Add(Time.unscaledDeltaTime * 1000f); }
+            {
+                // この周のフレーム統計 (パリー窓を含む)
+                float csum = 0f, cworst = 0f; int cn = dts.Count - cycStart, c200 = 0;
+                for (int q = cycStart; q < dts.Count; q++)
+                { csum += dts[q]; if (dts[q] > cworst) cworst = dts[q]; if (dts[q] > 200f) c200++; }
+                marks.Add(string.Format("周{0}: 残{1} 判定[{2}] 平均{3:F0}ms 最悪{4:F0}ms >200ms:{5}",
+                    cyc + 1, fc != null ? fc.InsideCount : -1, acts.LastParryResult,
+                    cn > 0 ? csum / cn : 0f, cworst, c200));
+            }
+            // 橋から出ないよう転回して往復する (立ち止まって 180 度回り、0.6 秒整定)
+            if (cyc + 1 < cycles)
+            {
+                loco.debugMoveForward = false;
+                acts.transform.Rotate(0f, 180f, 0f);
+                float ts = 0f;
+                while (ts < 0.6f) { yield return null; ts += Time.deltaTime; dts.Add(Time.unscaledDeltaTime * 1000f); }
+            }
+        }
+        loco.debugMoveForward = false;
+        float tw2 = 0f;
+        while (tw2 < 1.5f) { yield return null; tw2 += Time.deltaTime; dts.Add(Time.unscaledDeltaTime * 1000f); }
+        // 集計: 平均 / p95 / 最悪 / しきい値超えの割合
+        dts.Sort();
+        int n = dts.Count;
+        float sum = 0f; foreach (var d in dts) sum += d;
+        int over100 = 0, over200 = 0;
+        foreach (var d in dts) { if (d > 100f) over100++; if (d > 200f) over200++; }
+        var sb = new System.Text.StringBuilder();
+        sb.Append(string.Join(" | ", marks));
+        sb.AppendFormat(" || frames={0} 平均{1:F0}ms p95={2:F0}ms 最悪{3:F0}ms", n, sum / n, dts[(int)(n * 0.95f)], dts[n - 1]);
+        sb.AppendFormat(" >100ms:{0}件 >200ms:{1}件 最終残{2}", over100, over200, fc != null ? fc.InsideCount : -1);
+        Trace = sb.ToString();
+        Running = false;
+    }
+
     public void RunFrameTrace(float seconds)
     {
         if (Running) return;
