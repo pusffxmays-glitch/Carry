@@ -604,6 +604,79 @@ public class ParryProbe : MonoBehaviour
         Running = false;
     }
 
+    // 実機再現用の人工フレーム負荷 (2026-08-28): ユーザー環境の「毎フレーム重い」を
+    // 決定的に再現する。0 で無効。
+    public float debugFrameLoadMs = 0f;
+    void Update()
+    {
+        if (debugFrameLoadMs > 0f)
+            System.Threading.Thread.Sleep((int)debugFrameLoadMs);
+    }
+
+    // 実機動画の再現: ジャンプ1=早押しでパリー失敗 → ジャンプ2=金パリー → 立ち尽くす
+    public void RunVideoRepro(float swingAmp)
+    {
+        if (Running) return;
+        Running = true; Trace = "";
+        StartCoroutine(VideoReproSeq(swingAmp));
+    }
+    System.Collections.IEnumerator VideoReproSeq(float swingAmp)
+    {
+        var acts = FindFirstObjectByType<GoblinPotActions>();
+        var loco = acts.GetComponent<GoblinLocomotion>();
+        var rig = acts.GetComponent<GoblinCarryRig>();
+        var cc = acts.GetComponent<CharacterController>();
+        var fc = PotFluid();
+        var marks = new System.Collections.Generic.List<string>(16);
+        System.Action<string> mark = tag =>
+            marks.Add(string.Format("{0}@{1:F1}s 残{2}", tag, Time.time, fc != null ? fc.InsideCount : -1));
+        rig.mouseBalance = false; rig.armBalance = 0f; rig.pitchBalance = 0f;
+        for (int cyc = 0; cyc < 2; cyc++)
+        {
+            bool earlyPress = (cyc == 0);   // 1 回目は早押し = 失敗
+            loco.debugMoveForward = true;
+            float tw = 0f;
+            while (tw < 1.5f) { yield return null; tw += Time.deltaTime; }
+            loco.debugJumpRequest = true;
+            mark(earlyPress ? "跳び1(早押し=失敗狙い)" : "跳び2(金狙い)");
+            float airT = 0f, swingT = 0f; bool pressed = false;
+            string lastJ = acts.LastParryResult;
+            while (true)
+            {
+                yield return null;
+                if (!cc.isGrounded) airT += Time.deltaTime;
+                else if (airT > 0.4f) break;
+                if (airT > 3f) break;
+                if (airT > 0.1f)
+                {
+                    swingT += Time.deltaTime;
+                    rig.armBalance = Mathf.Clamp(Mathf.Sin(swingT * 9f) * swingAmp, -1f, 1f);
+                    rig.pitchBalance = Mathf.Clamp(Mathf.Sin(swingT * 6f + 1f) * swingAmp * 0.6f, -1f, 1f);
+                }
+                if (!pressed && (earlyPress ? airT > 0.15f
+                        : (airT > 0.1f && (loco.VerticalVelocity < -4.8f || airT > 0.75f))))
+                { acts.debugParryRequest = true; pressed = true; mark("押し"); }
+                if (acts.LastParryResult != lastJ)
+                { lastJ = acts.LastParryResult; mark("判定[" + lastJ + "]"); }
+            }
+            mark("着地" + (cyc + 1));
+            // 動画同様: カーソル放置相当のバランスに固定して次へ
+            rig.armBalance = -1f; rig.pitchBalance = 0.65f;
+            float tw2 = 0f;
+            while (tw2 < 2.5f) { yield return null; tw2 += Time.deltaTime; }
+        }
+        loco.debugMoveForward = false;
+        // 立ち尽くして水玉を観察 (10 秒、1 秒ごとに残量)
+        for (int k = 0; k < 10; k++)
+        {
+            float tw3 = 0f;
+            while (tw3 < 1f) { yield return null; tw3 += Time.deltaTime; }
+            mark("静止" + (k + 1) + "s (max" + (fc != null ? fc.MeasuredMaxSpeed.ToString("F1") : "?") + ")");
+        }
+        Trace = string.Join(" | ", marks);
+        Running = false;
+    }
+
     public void RunFrameTrace(float seconds)
     {
         if (Running) return;

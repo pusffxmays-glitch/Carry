@@ -60,6 +60,9 @@ public class CarryStatsWindow : EditorWindow
     {
         if (!Application.isPlaying) return;
         float dt = Time.unscaledDeltaTime;
+        // プレイ開始直後の 1 フレーム目はエディタ起動からの経過時間が入ることがある
+        // (実機動画で「直近3秒の最悪 287424 ms」と表示され続けた)。異常値は捨てる。
+        if (dt > 5f) return;
         if (dt > 1e-5f) smoothedDt = Mathf.Lerp(smoothedDt, dt, 0.1f);
         // 直近 3 秒の最悪フレームを出す (平均だけだとカクつきが見えない)
         if (Time.unscaledTime - worstDtResetAt > 3f) { worstDt = 0f; worstDtResetAt = Time.unscaledTime; }
