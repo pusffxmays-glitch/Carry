@@ -19,7 +19,15 @@ public static class CarryHeavyCapture
     static bool armed;
     static bool wasPlaying;
 
-    static CarryHeavyCapture() { EditorApplication.update += Tick; }
+    static CarryHeavyCapture()
+    {
+        // v1 の後始末: Profiler.logFile はドメインリロードを生き残る。旧版が設定した
+        // ストリーム先が残っていると、以後のプレイ全部がディスクへ垂れ流しになり
+        // (実測: 22 分で 21GB、繰り返すほど重くなる)、必ずここで無効化する。
+        UnityEngine.Profiling.Profiler.enableBinaryLog = false;
+        UnityEngine.Profiling.Profiler.logFile = "";
+        EditorApplication.update += Tick;
+    }
 
     static void Tick()
     {
@@ -27,6 +35,8 @@ public static class CarryHeavyCapture
         if (playing && !wasPlaying)
         {
             // プレイ開始: リング記録を開始し、1 プレイ 1 回の解析を武装
+            UnityEngine.Profiling.Profiler.enableBinaryLog = false;   // 常にメモリ内リングのみ
+            UnityEngine.Profiling.Profiler.logFile = "";
             ProfilerDriver.ClearAllFrames();
             ProfilerDriver.profileEditor = false;
             ProfilerDriver.enabled = true;
