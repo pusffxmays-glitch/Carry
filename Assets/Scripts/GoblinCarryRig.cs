@@ -76,6 +76,14 @@ public class GoblinCarryRig : MonoBehaviour
     public bool mouseAbsolute = true;
     [Tooltip("絶対位置モードで最大チルトになる画面中心からの距離 (px)。小さいほど敏感。")]
     public float mouseAbsoluteRangePx = 220f;
+    [Tooltip("マウスがこの秒数動いていなければ傾き指令をゆっくり水平に戻す (0 で無効)。")]
+    // 2026-08-28 ユーザー要望「マウス静止で自動水平」。カーソルを置きっぱなしにすると
+    // 絶対位置モードでは傾き指令が入り続け、満タンの壺が傾いたリムの高さまで
+    // 注ぎこぼれる (実機動画の「水玉」、実測 -8%)。静止 = 保持の意図なし、とみなす。
+    public float mouseIdleRecenterAfter = 1.5f;
+    [Tooltip("自動水平の畳み速度 (指令スケール/秒)。マウスを動かせば即座に復帰する。")]
+    public float mouseIdleRecenterSpeed = 1.2f;
+    float mouseIdleTimer; Vector2 mouseIdleLastPos; float mouseIdleAtten = 1f;
     Vector2 smoothedMouseDelta;
     bool prevCursorLocked;
     int mouseSuppressFrames;
@@ -866,10 +874,18 @@ public class GoblinCarryRig : MonoBehaviour
             bool inside = mp.x >= 0f && mp.x <= Screen.width && mp.y >= 0f && mp.y <= Screen.height;
             if (inside && Application.isFocused)   // ゲームビュー外・非フォーカス中は保持
             {
+                // マウス静止で自動水平 (宣言部の注記)。動かした瞬間に即復帰。
+                if ((mp - mouseIdleLastPos).magnitude > 2f) mouseIdleTimer = 0f;
+                else mouseIdleTimer += dt;
+                mouseIdleLastPos = mp;
+                if (mouseIdleRecenterAfter > 0f && mouseIdleTimer > mouseIdleRecenterAfter)
+                    mouseIdleAtten = Mathf.MoveTowards(mouseIdleAtten, 0f, mouseIdleRecenterSpeed * dt);
+                else
+                    mouseIdleAtten = 1f;
                 Vector2 off = (mp - new Vector2(Screen.width * 0.5f, Screen.height * 0.5f))
                               / Mathf.Max(1f, mouseAbsoluteRangePx);
-                armBalance = Mathf.Clamp(invertMouseX ? -off.x : off.x, -1f, 1f);     // 中心より右 = 右へ傾く
-                pitchBalance = Mathf.Clamp(invertMouseY ? off.y : -off.y, -1f, 1f);   // 中心より上 = 前傾
+                armBalance = Mathf.Clamp(invertMouseX ? -off.x : off.x, -1f, 1f) * mouseIdleAtten;
+                pitchBalance = Mathf.Clamp(invertMouseY ? off.y : -off.y, -1f, 1f) * mouseIdleAtten;
             }
         }
         else if (mouseBalance && mouse != null)
