@@ -46,7 +46,7 @@ public static class CarryBuildSwampFootholds
     // Weighted mix: PlankDeck is the main foothold, Log and LogBundle are mixed in ("ランダムに...織り交ぜる").
     const double WeightPlankDeck = 0.55, WeightLog = 0.25, WeightLogBundle = 0.20;
 
-    const float CollapseStandTime = 1.0f;   // LogBundle: short -- must cross quickly ("短時間で渡り切らないと")
+    const float CollapseStandTime = 2.0f;   // LogBundle: short -- must cross quickly ("短時間で渡り切らないと"); 2026-08-29: +1s per user request (was 1.0f)
     const float CollapseWarningLead = 0.4f;
 
     // 2026-08-29 (user: "落ちるギミックの地面が一個も配置されていないので...3か所ほど差し込んで"): the
