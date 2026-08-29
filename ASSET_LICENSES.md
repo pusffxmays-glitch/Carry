@@ -50,7 +50,7 @@
 - **クレジット表記**: 不要(任意でKenney / www.kenney.nlのクレジットを歓迎、との記載あり)
 - **改変**: 可
 - **格納場所**: `Assets/ExternalAssets/KenneyNatureKit/`(`Models/FBX format` のみ保持。Isometric/Sideのプレビュー画像、DAE/GLTF/OBJ/STL形式は容量削減のため削除済み)
-- **ゲーム内での使用箇所**: 通常の森ステージ ― 湖の復帰階段(`cliff_blockQuarter_stone`を階段の踏み段に使用)、`path_stone`を足場の崩れた遺跡風スラブ(RuinSlab)に使用。スタート地点の石橋は現在プロシージャル生成(コード生成メッシュ)に置き換え済みで、`bridge_center_stone`/`cliff_block_stone`は不使用(2026-08-11、湾曲アーチ橋への刷新に伴い変更)。
+- **ゲーム内での使用箇所**: 通常の森ステージ ― 湖の復帰階段(`cliff_blockQuarter_stone`を階段の踏み段に使用)、`path_stone`を足場の崩れた遺跡風スラブ(RuinSlab)に使用。スタート地点の石橋は現在プロシージャル生成(コード生成メッシュ)に置き換え済みで、`bridge_center_stone`/`cliff_block_stone`は不使用(2026-08-11、湾曲アーチ橋への刷新に伴い変更)。ステージ2(毒沼)― `bridge_center_wood`を崩落する足場(`CollapsingFoothold`)の板として使用(2026-08-29追加)。
 
 ## 5. Poly Haven CC0 素材(個別ダウンロード)― 通常の森のメインビジュアル素材
 
@@ -105,6 +105,13 @@
 - **格納場所**: `Assets/Stage/Forest/Path/MossyRockPath/` 配下。`Source/` にMeshyオリジナル(FBX 約23.1万頂点/46.2万三角形 + BaseColor/Normal/Metallic/Roughness 4枚、元ファイル名のまま無改変で保持)。`Models/Separated/` にBlenderで5分割・軸補正(Y-up)・ピボット調整(各パーツ入口中央)・デシメート軽量化済みの `MossyRockPath_NarrowLink/LongCurve/GentleCurve_A/GentleStraight/WideCurve.fbx`。`Textures/` に整理名のテクスチャコピー(`MossyRockPath_BaseColor/Normal/Metallic/Roughness.png`)+生成した `MossyRockPath_MetallicSmoothness.png`(URP Lit用にMetallic+Roughness→1枚へ合成)。`Materials/MAT_MossyRockPath.mat`。`Prefabs/PF_MossyRockPath_*.prefab` 5種(各Visual+WalkableCollisionの2階層構造)。
 - **ゲーム内での使用箇所**: 通常の森ステージ ― StoneBridgeから先のメインコース歩行面。旧来の岩・丸太を多数組み合わせた足場(`Footholds`)を全撤去し、`CarryBuildMossyRockPathCourse`エディタスクリプトが本モジュール5種を川沿いにチェーン状に自動配置(`MossyRockPath_Course`)。
 - **注記**: 実生成されたFBXの5パーツ形状は、当初のStraight/CurveLeft/CurveRight/SlopeUp/SlopeDownという想定とは異なっていたため、実形状(NarrowLink=広い足場2つを細い首がつなぐ複合形状、LongCurve=長く滑やかな曲線、GentleCurve_A/WideCurve=曲がり量が異なる曲線、GentleStraight=比較的直線)を正として命名・使用している。NarrowLinkの細い接続部(最狭部で幅約1.0〜1.2m)は意図的なゲームプレイ上のアクセントとして保持し、道幅を広げる修正は行っていない。
+
+## 10. Meshy AI 生成モデル ― MosswoodCrossing(ステージ2・毒沼の崩落する足場、2026-08-29導入)
+
+- **作成方法**: ユーザー自身がMeshyで作成した、足場3種が一体になった苔むした丸太の足場モデル。第三者配布物ではなくユーザー自身の生成物のため、外部配布ライセンスの確認対象ではないが、記録として残す。
+- **格納場所**: `Assets/Stage/Swamp/MosswoodCrossing/` 配下。`Source/` にMeshyオリジナル(`Meshy_AI_Mosswood_Crossing_0829101411_generate.fbx`、約34万頂点/68万三角形、元ファイル名のまま無改変で保持。マテリアル/UV/頂点カラーなし、ジオメトリのみ)。`Models/Separated/` にBlenderでループ(連結成分)分割・ピボット調整(各パーツ底面中央)済みの3種 ― `SwampFoothold_PlankDeck.fbx`(複数の丸太を並べた幅広のデッキ状、約17万頂点)、`SwampFoothold_Log.fbx`(単体の粗い丸太、約10.6万頂点)、`SwampFoothold_LogBundle.fbx`(短い丸太束、約6万頂点)。テクスチャ/マテリアルは元データに存在しないため未設定(Unity側は既定のLitマテリアル、灰色)。
+- **ゲーム内での使用箇所**: 未配置(分割・整理のみ完了。`CollapsingFoothold`用の見た目としてステージ2コースへ配置するのは別途対応)。
+- **注記**: 他のMeshy生成FBXと違い、分割元は5種ではなく3種一体のモデル。各パーツとも高ポリゴン(6〜17万頂点)のスキャン風メッシュのため、実配置前にデシメート軽量化を検討する(MossyRockPath/AzureCrystalと同様の方針)。
 
 ## 運用ルール
 

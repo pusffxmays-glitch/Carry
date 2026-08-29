@@ -28,7 +28,10 @@ public static class CarryBuildTerrainForest
     // ---- Terrain extents. Wide enough that panning the camera never shows open sky
     // where the forest should be, and long enough behind the start to fit the lake. ----
     const float TerrainWidth = 100f;
-    const float TerrainLength = 190f;
+    // 2026-08-29: 190 -> 330 (+140m) to make room for Stage 2 ("毒沼"/poison swamp) beyond the
+    // Stage 1 course end (Z=110). See CarryBuildSwampTransition.cs / the swamp channel functions
+    // below for what lives in the new Z=110..250ish range.
+    const float TerrainLength = 330f;
     // Raised from 16 -- the new dramatic cliff rim (see CliffRimElevation) needs real headroom
     // above water (target cliff-top heights of ~+10 to +18m above LakeWaterY, i.e. up to world
     // Y~+22); 16m of range (world Y -8..+8) would have clamped/flattened the tops of anything
@@ -38,8 +41,36 @@ public static class CarryBuildTerrainForest
     const float OriginX = -TerrainWidth * 0.5f;
     const float OriginZ = -46f;
     const float OriginY = -8f;
-    const int HeightRes = 257;
+    // 2026-08-29: 257 -> 513 alongside the TerrainLength increase -- keeping HeightRes fixed while
+    // stretching the same terrain over 330m instead of 190m would have coarsened the heightmap
+    // cell size project-wide (0.74m/cell -> 1.29m/cell), softening all the fine cliff/shore detail
+    // already tuned in Stage 1. 513 keeps cell size at ~0.64m/cell (finer than before).
+    const int HeightRes = 513;
     const int AlphaRes = 257;
+
+    // ---- Stage 2 "毒沼" (poison swamp): a slow, wide bog channel that takes over from the river
+    // once it fades out (RiverHalfWidth -> 0 by RiverZ1=120). Deliberately its own noise/shape
+    // functions (lower frequency, wider, shallower) rather than just continuing the river's own
+    // formula, so it reads as a genuinely different kind of water, not "more river." Ramps in
+    // starting just before the river's own fade-out completes so there's no dry gap between them. ----
+    const float SwampZ0 = 108f;       // where the swamp channel starts ramping in (river is still ~30% width here)
+    const float SwampRampLen = 26f;   // full swamp width reached by SwampZ0+SwampRampLen (~Z=134)
+    const float SwampDepth = 2.2f;    // shallower than RiverDepth (3.6) -- a bog, not a deep channel
+    const float SwampHalfWidthBase = 20f; // typical open-water half-width once fully ramped in
+    const float SwampZ1 = 240f; // prototype's water extent -- leaves a ~44m margin before the new terrain edge (OriginZ+TerrainLength=284) for a future course-end/far-forest buffer
+    // Gradient dressing zone (tree species mix, ground texture, water color) -- wider than the
+    // channel's own ramp so the FOREST reads as thinning out before the water itself changes.
+    const float TransitionZ0 = 100f, TransitionZ1 = 170f;
+    static float SwampBlendT(float z) => Mathf.Clamp01(Mathf.InverseLerp(TransitionZ0, TransitionZ1, z));
+
+    static float SwampX(float z) => 10f * (Mathf.PerlinNoise(z * 0.007f, 341.9f) - 0.5f) * 2f; // slow, wide meander -- lower frequency than RiverX
+    static float SwampHalfWidth(float z)
+    {
+        if (z < SwampZ0) return 0f;
+        float rampT = Mathf.Clamp01(Mathf.InverseLerp(SwampZ0, SwampZ0 + SwampRampLen, z));
+        float widthNoise = Mathf.Lerp(0.75f, 1.25f, Mathf.PerlinNoise(z * 0.02f, 512.3f)); // lazy width variation along its length
+        return SwampHalfWidthBase * rampT * widthNoise;
+    }
 
     // ---- Lake: what the river flows INTO, behind the start bridge. Player faces away
     // from it (+Z); water flows toward it (-Z) -- current and progress point opposite ways.
@@ -303,8 +334,15 @@ public static class CarryBuildTerrainForest
     // that needs a representative water height (fall-trigger placement, sweep height).
     static float WaterYAt(float z)
     {
-        float rx = RiverX(z);
-        float waterY = GroundNoise(rx, z) - RiverDepth + 1.15f;
+        // Past the river's own fade-out, the swamp channel is the one carrying water -- pick
+        // whichever of the two is actually wider at this Z (their ramps overlap slightly around
+        // SwampZ0..RiverZ1 by design, see SwampZ0's comment, so this crossover is smooth).
+        float riverHW = RiverHalfWidth(z);
+        float swampHW = SwampHalfWidth(z);
+        bool useSwamp = swampHW > riverHW;
+        float cx = useSwamp ? SwampX(z) : RiverX(z);
+        float depth = useSwamp ? SwampDepth : RiverDepth;
+        float waterY = GroundNoise(cx, z) - depth + 1.15f;
         float lakeBlend = Mathf.Clamp01(Mathf.InverseLerp(RiverMouthWidenZ0, LakeCenterZ + 2f, z));
         return Mathf.Lerp(waterY, LakeWaterY, lakeBlend);
     }
@@ -584,7 +622,11 @@ public static class CarryBuildTerrainForest
         float d = Mathf.Abs(worldX - rx);
         float riverCarve = RiverDepth * ChannelFactor(d, hw);
         float lakeCarve = LakeDepth * LakeFactor(worldX, worldZ);
-        float h = baseH - Mathf.Max(riverCarve, lakeCarve) + CliffRimElevation(worldX, worldZ);
+        float sx = SwampX(worldZ);
+        float shw = SwampHalfWidth(worldZ);
+        float sd = Mathf.Abs(worldX - sx);
+        float swampCarve = SwampDepth * ChannelFactor(sd, shw);
+        float h = baseH - Mathf.Max(riverCarve, Mathf.Max(lakeCarve, swampCarve)) + CliffRimElevation(worldX, worldZ);
 
         // Approach mound: raise (never lower) the ground right at the bridge's two ends so it
         // meets the deck without a step and the bridge's exposed underside/sides get buried.
@@ -799,7 +841,11 @@ public static class CarryBuildTerrainForest
 
                 float riverCloseness = hw > 0.01f ? Mathf.Clamp01(1f - d / (hw + BankFalloff)) : 0f;
                 float lakeCloseness = LakeFactor(worldX, worldZ);
-                float waterCloseness = Mathf.Max(riverCloseness, lakeCloseness);
+                float swHw = SwampHalfWidth(worldZ);
+                float swD = Mathf.Abs(worldX - SwampX(worldZ));
+                float swampCloseness = swHw > 0.01f ? Mathf.Clamp01(1f - swD / (swHw + BankFalloff * 1.6f)) : 0f; // wider soggy margin than the river's own bank
+                float waterCloseness = Mathf.Max(riverCloseness, Mathf.Max(lakeCloseness, swampCloseness));
+                float swampT = SwampBlendT(worldZ); // 0=forest floor, 1=full swamp -- shifts ground cover toward mud independent of literal water distance
 
                 // Threshold lowered from /28f -- moderate slopes (the rounded cliff-rim mounds
                 // around the lake, ~18-25deg) were staying dirt-dominant and, in direct sun, still
@@ -815,9 +861,12 @@ public static class CarryBuildTerrainForest
                 float mossZone = 1f - Mathf.Clamp01(Mathf.InverseLerp(0.35f, 0.65f, zoneNoise));
                 float leavesZone = Mathf.Clamp01(Mathf.InverseLerp(0.45f, 0.75f, zoneNoise));
 
-                float mossW = Mathf.Clamp01((mossZone * 0.6f + waterCloseness * 0.5f) * (1f - rockW));
-                float leavesW = Mathf.Clamp01(leavesZone * (1f - rockW) * (1f - waterCloseness * 0.6f) * 0.85f);
-                float mudW = Mathf.Clamp01(waterCloseness * (1f - rockW) * 0.4f);
+                float mossW = Mathf.Clamp01((mossZone * 0.6f + waterCloseness * 0.5f) * (1f - rockW) * (1f - swampT * 0.5f));
+                float leavesW = Mathf.Clamp01(leavesZone * (1f - rockW) * (1f - waterCloseness * 0.6f) * 0.85f * (1f - swampT * 0.8f));
+                // swampT independently pushes mud up (the whole transition zone reads as
+                // progressively boggier, not just the literal water's edge) -- per the "地面: 落ち葉/
+                // 苔テクスチャの重みをswampTに応じて泥テクスチャへシフト" plan.
+                float mudW = Mathf.Clamp01((waterCloseness * 0.4f + swampT * 0.55f) * (1f - rockW));
 
                 // Fine noise nudges the moss/leaves boundary so it isn't a clean zone edge.
                 float fineNoise = Mathf.PerlinNoise(worldX * 0.09f + 1000f, worldZ * 0.09f + 1000f);
@@ -942,9 +991,14 @@ public static class CarryBuildTerrainForest
     // Extends from deep forest all the way down past the bridge and into the lake (RiverWaterZ0
     // is deep inside the lake's radius) so it visually overlaps the lake water mesh with no gap
     // -- the river and lake read as one continuous body of water. ----
-    static void BuildWater(GameObject root, Terrain terrain, StringBuilder log)
+    // Builds one water ribbon mesh over [zFrom, zTo] and parents+names+materials it. Factored out
+    // 2026-08-29 so the river's own clear-blue water and the Stage 2 swamp's murky water can be two
+    // separate meshes/materials (a single mesh can't blend color along its length without a custom
+    // vertex-color shader) while sharing the exact same station-sampling logic. Called twice with
+    // overlapping Z ranges (see BuildWater) so there's no visible seam between them.
+    static GameObject BuildWaterRibbonMesh(GameObject root, string name, float zFrom, float zTo, Material mat)
     {
-        var mesh = new Mesh { name = "RiverWaterMesh" };
+        var mesh = new Mesh { name = name + "Mesh" };
         var verts = new List<Vector3>();
         var tris = new List<int>();
         var uvs = new List<Vector2>();
@@ -952,10 +1006,12 @@ public static class CarryBuildTerrainForest
         float step = 2f;
         int stationCount = 0;
         float v = 0f;
-        for (float z = RiverWaterZ0; z <= RiverZ1; z += step)
+        for (float z = zFrom; z <= zTo; z += step)
         {
-            float rx = RiverX(z);
-            float hw = RiverHalfWidth(z) * 0.82f;
+            float riverHWHere = RiverHalfWidth(z), swampHWHere = SwampHalfWidth(z);
+            bool useSwampHere = swampHWHere > riverHWHere;
+            float rx = useSwampHere ? SwampX(z) : RiverX(z);
+            float hw = Mathf.Max(riverHWHere, swampHWHere) * 0.82f;
             float waterY = WaterYAt(z);
 
             verts.Add(new Vector3(rx - hw, waterY, z));
@@ -978,18 +1034,34 @@ public static class CarryBuildTerrainForest
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
 
-        var go = new GameObject("RiverWater");
-        go.transform.SetParent(root.transform, false);
-        var mf = go.AddComponent<MeshFilter>();
-        mf.sharedMesh = mesh;
-        var mr = go.AddComponent<MeshRenderer>();
-        var mat = GetOrCreateMat("Mat_River", null, Vector2.one);
-        mat.color = new Color(0.14f, 0.30f, 0.28f, 0.72f);
-        if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", 0.85f);
-        SetTransparent(mat);
+        var rgo = new GameObject(name);
+        rgo.transform.SetParent(root.transform, false);
+        rgo.AddComponent<MeshFilter>().sharedMesh = mesh;
+        var mr = rgo.AddComponent<MeshRenderer>();
         mr.sharedMaterial = mat;
+        return rgo;
+    }
 
-        log.AppendLine("Water ribbon built, " + stationCount + " stations.");
+    static void BuildWater(GameObject root, Terrain terrain, StringBuilder log)
+    {
+        var riverMat = GetOrCreateMat("Mat_River", null, Vector2.one);
+        riverMat.color = new Color(0.14f, 0.30f, 0.28f, 0.72f);
+        if (riverMat.HasProperty("_Smoothness")) riverMat.SetFloat("_Smoothness", 0.85f);
+        SetTransparent(riverMat);
+
+        // 2026-08-29: murky/toxic swamp water, per the "毒沼" concept -- a duller, greener-yellow,
+        // less smooth (less mirror-like -- a stagnant bog, not clear moving water) material.
+        // Overlaps the river's own tail end (SwampZ0..RiverZ1) so the color itself blends across
+        // that stretch (both meshes render there) instead of cutting over at a hard line.
+        var swampMat = GetOrCreateMat("Mat_SwampWater", null, Vector2.one);
+        swampMat.color = new Color(0.22f, 0.26f, 0.10f, 0.88f);
+        if (swampMat.HasProperty("_Smoothness")) swampMat.SetFloat("_Smoothness", 0.35f);
+        SetTransparent(swampMat);
+
+        BuildWaterRibbonMesh(root, "RiverWater", RiverWaterZ0, RiverZ1, riverMat);
+        BuildWaterRibbonMesh(root, "SwampWater", SwampZ0, SwampZ1, swampMat);
+
+        log.AppendLine("Water ribbons built: river " + RiverWaterZ0 + ".." + RiverZ1 + ", swamp " + SwampZ0 + ".." + SwampZ1 + ".");
     }
 
     // ---- Lake water: irregular polygon fan, edge found via FindShoreAtAngle so it lines up
@@ -3469,12 +3541,44 @@ public static class CarryBuildTerrainForest
 
         var triggerGo = new GameObject("RiverTriggerVolume");
         triggerGo.transform.SetParent(riverRoot.transform, false);
+        // 2026-08-29: RiverZ1 -> SwampZ1 so falling through a collapsed Stage 2 foothold (see
+        // CollapsingFoothold.cs) out in the swamp still lands in this same trigger volume and gets
+        // swept back by RiverFlowController, same as falling anywhere on the Stage 1 river.
         float centerZ = (CourseZ0 + RiverZ1) * 0.5f;
         triggerGo.transform.position = new Vector3(0f, refWaterY - 1.3f, centerZ);
         var box = triggerGo.AddComponent<BoxCollider>();
         box.isTrigger = true;
         box.size = new Vector3(TerrainWidth - 4f, 2.4f, RiverZ1 - CourseZ0);
         triggerGo.AddComponent<RiverTriggerZone>();
+
+        // 2026-08-29 FOURTH PASS (found via live Play-mode foothold testing -- even a STABLE swamp
+        // foothold's goblin got swept away the instant it stood there): the original single
+        // fixed-height box referenced ONE water sample at the swamp's midpoint (z=174), but
+        // WaterYAt swings by over 2m across the swamp's length (measured live: -2.62 at z=110 vs.
+        // -0.48 at z=210). At most z positions that fixed box's ceiling ended up ABOVE the local
+        // foothold's underside (CarryBuildSwampFootholds sits footholds at WaterYAt(z)+0.55), so
+        // simply standing on a swamp foothold put the goblin's feet inside the "fell in water"
+        // trigger. Replaced with a chain of short segments, each sampling WaterYAt at its own z so
+        // the trigger's ceiling tracks the true local water surface everywhere along the swamp
+        // (fixed 0.25m clearance below the footholds' own underside), not just near the one
+        // reference point.
+        const float swampTriggerSegLen = 4f;
+        const float swampTriggerTopMargin = 0.15f; // stays 0.40m below the footholds' 0.55m water clearance -- extra headroom vs. the flat WaterYAt formula absorbs the small per-piece random roll/pitch tilt CarryBuildSwampFootholds applies, which can dip a long piece's lowest corner a few cm below its flat-formula height
+        const float swampTriggerHeight = 4f;
+        for (float segZ0 = RiverZ1; segZ0 < SwampZ1; segZ0 += swampTriggerSegLen)
+        {
+            float segZ1 = Mathf.Min(segZ0 + swampTriggerSegLen, SwampZ1);
+            float segCenterZ = (segZ0 + segZ1) * 0.5f;
+            float localWaterY = WaterYAt(segCenterZ);
+            var segGo = new GameObject("SwampTriggerVolume_" + Mathf.RoundToInt(segCenterZ));
+            segGo.transform.SetParent(riverRoot.transform, false);
+            float topY = localWaterY + swampTriggerTopMargin;
+            segGo.transform.position = new Vector3(0f, topY - swampTriggerHeight * 0.5f, segCenterZ);
+            var segBox = segGo.AddComponent<BoxCollider>();
+            segBox.isTrigger = true;
+            segBox.size = new Vector3(TerrainWidth - 4f, swampTriggerHeight, (segZ1 - segZ0) + 0.4f); // small Z overlap between segments so there's no seam gap
+            segGo.AddComponent<RiverTriggerZone>();
+        }
 
         var flowGo = new GameObject("RiverFlowController");
         flowGo.transform.SetParent(riverRoot.transform, false);
@@ -3735,6 +3839,8 @@ public static class CarryBuildTerrainForest
                 float rx = RiverX(jz);
                 float hw = RiverHalfWidth(jz);
                 if (hw > 0.01f && Mathf.Abs(jx - rx) < hw + BankFalloff + 2.5f + marginNoise) continue; // keep the channel + banks clear
+                float swHwHere = SwampHalfWidth(jz);
+                if (swHwHere > 0.01f && Mathf.Abs(jx - SwampX(jz)) < swHwHere + BankFalloff + 2.5f + marginNoise) continue; // keep the Stage 2 swamp channel clear too
                 float lakeF = LakeFactor(jx, jz);
                 if (lakeF > 0.08f) continue; // keep the lake and its shore clear
                 if (jz > BridgeZ0 - 3f && jz < BridgeZ1 + 3f && Mathf.Abs(jx - bridgeCenterX) < bridgeHalfSpanX) continue; // keep the (now wide) bridge crossing clear
@@ -3779,7 +3885,11 @@ public static class CarryBuildTerrainForest
                 float distToEdge = Mathf.Min(distToEdgeX, distToEdgeZ);
                 float edgeBoost = Mathf.Clamp01(Mathf.InverseLerp(30f, 6f, distToEdge)) * 0.22f;
 
-                if ((float)rng.NextDouble() > 0.58f + rimBoost + edgeBoost) continue; // thinned for the heavier realistic meshes (was 0.72 when most trees were cheap stylized ones)
+                // Stage 2 gradient: ordinary forest trees thin out as the swamp takes over (per
+                // "木: 通常の森の木の密度をswampTに応じて減らす") -- down to ~15% of normal density at
+                // full swamp, not zero, so it doesn't read as an abrupt empty clearing.
+                float swampDensityMul = 1f - SwampBlendT(jz) * 0.85f;
+                if ((float)rng.NextDouble() > (0.58f + rimBoost + edgeBoost) * swampDensityMul) continue; // thinned for the heavier realistic meshes (was 0.72 when most trees were cheap stylized ones)
 
                 // Every tree is now one of the realistic photoscan species -- no more style split
                 // between an "ordinary" cheap species and "special" realistic giants. isGiant now
