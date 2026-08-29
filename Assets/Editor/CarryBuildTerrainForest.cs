@@ -59,7 +59,10 @@ public static class CarryBuildTerrainForest
     // zone widths (see LakeGentleWeight) were narrowed so the two gentle openings stay clearly
     // separated by cliff, rather than merging into one large climbable arc now that they're closer
     // together.
-    const float StairsAngleDeg = 55f;
+    // 2026-08-29: moved closer to the bridge (55 -> 15, user request) -- shore distance to the
+    // bridge drops from ~19.2m to ~14.1m. Stays inside the merged inlet/stairs gentle arc
+    // (-10..55, see LakeGentleWeight) and clear of the river inlet's own current at ~-10.
+    const float StairsAngleDeg = 15f;
 
     // ---- Stone bridge: the actual START. Crosses the river perpendicular to its flow (long
     // axis in X), a short walk deep (Z), positioned just upstream of where the river widens
@@ -2896,37 +2899,95 @@ public static class CarryBuildTerrainForest
         log.AppendLine(fbxPath + " materials fixed: " + fixedCount);
     }
 
-    // ---- Stone staircase: the ONE official way back onto land from the lake. Positioned at
+    // ---- Lake exit SLOPE: the ONE official way back onto land from the lake. Positioned at
     // StairsAngleDeg, the only other angular window (besides the river inlet) where LakeFactor
-    // leaves a gentle grade -- everywhere else around the rim is cliff. Steps are old, mossy,
-    // and irregular (varied size/rotation/riser), not uniform blocks, per the reference photo's
-    // "long-abandoned, forest-reclaimed" feel. Climbs from the water up to the actual local rim
-    // height (not an arbitrary fixed height), so it always reaches real, walkable land. ----
+    // leaves a gentle grade -- everywhere else around the rim is cliff.
+    // 2026-08-29 REDESIGN (user: "階段だと一段上るごとにポーションがこぼれてしまう可能性が
+    // あるため、スロープに変更。スロープの位置は橋に近い位置にして"): replaced the discrete
+    // stacked-block staircase (each block a separate riser + its own BoxCollider -- climbing it
+    // meant the goblin's root literally stepped up by `riser` every 0.6m, jolting the carried pot
+    // each time) with thin flush paving slabs that follow the terrain's own already-smooth slope
+    // (see the LakeGentleWeight continuous-arc fix) with NO per-slab height jump and NO individual
+    // colliders -- purely decorative dressing on top of ONE continuous smooth ramp collider, so
+    // there is nothing to "step up" onto while carrying a full pot. Angle moved 55->15 (closer to
+    // the bridge, still inside the merged gentle arc and clear of the river current at the inlet). ----
     static void BuildStairs(GameObject root, Terrain terrain, StringBuilder log)
     {
-        var stairsRoot = new GameObject("LakeStairs");
+        var stairsRoot = new GameObject("LakeSlope");
         stairsRoot.transform.SetParent(root.transform, false);
-        var step = AssetDatabase.LoadAssetAtPath<GameObject>(Kenney + "cliff_blockQuarter_stone.fbx");
-        if (step == null) { log.AppendLine("Stairs: cliff_blockQuarter_stone.fbx not found, skipped."); return; }
+        var slab = AssetDatabase.LoadAssetAtPath<GameObject>(Kenney + "cliff_blockQuarter_stone.fbx");
+        if (slab == null) { log.AppendLine("LakeSlope: cliff_blockQuarter_stone.fbx not found, skipped."); return; }
 
         Vector2 center = new Vector2(LakeCenterX, LakeCenterZ);
         Vector2 shorePt = FindShoreAtAngle(StairsAngleDeg);
         Vector2 climbDir = (shorePt - center).normalized;
-        float climbCompassAngle = Mathf.Atan2(climbDir.x, climbDir.y) * Mathf.Rad2Deg;
-        float baseRotY = climbCompassAngle - 180f; // risers face back down toward the lake
 
-        // Land height: sample well past the shore, out on solid rim ground, so the stairs climb
-        // to wherever the actual gentle slope tops out (rather than an arbitrary fixed height).
-        Vector2 landPt = center + climbDir * (Vector2.Distance(shorePt, center) + 9f);
-        float landY = SampleWorldHeight(terrain, landPt.x, landPt.y);
+        // Path control points (XZ): starts straight out along climbDir from the shore (the
+        // underwater/near-shore grade), then bends toward the bridge's east embankment for the
+        // final approach onto dry, walkable ground.
+        // 2026-08-29 (user: "13~1も調整して一本のスロープにして...スクリプト側に組み込んで"):
+        // the bend section used to be hand-placed live in the Editor (angled slabs one at a time,
+        // eyeballed against the embankment) to reach the plateau smoothly; captured here as
+        // control points so the WHOLE slope -- straight run and bend alike -- rebuilds
+        // identically from script, all with the same real-terrain-sampled tilt (no more split
+        // between a "flat auto" section and a "hand-tilted" section). Tied to StairsAngleDeg=15
+        // and the bridge's current position -- re-measure (live terrain.SampleHeight scan) if
+        // either moves again.
+        // 2026-08-29 SECOND FIX (found by actually walking the goblin up it a second time --
+        // stuck dead at (4.46,-2.5,0.99), CollisionFlags.Sides, even after the terrain-carve fix
+        // above): the path was cutting straight through AbutmentCollider_East (BuildMeshyBridge's
+        // "block bypass" wall spanning X[-0.32,4.8] Z[1.8,8.2], there specifically to stop players
+        // walking/swimming around the bridge instead of over it) -- a real, working collider doing
+        // exactly its intended job, just one this path wasn't routed to avoid. Shortened the
+        // straight run and bent it wider east (past X=4.8) before Z enters the abutment's [1.8,8.2]
+        // band, going around the block instead of through it.
+        Vector2 bendStart = shorePt + climbDir * 8f; // X~4.2, Z~-0.3 -- still short of the abutment's Z=1.8 start
+        // 2026-08-29 THIRD FIX (found by actually walking the goblin up it a third time -- got
+        // stuck dead, pure CollisionFlags.Sides with NO ground contact, at the (6.5,1.5) turn):
+        // that single sharp corner turned the path ~65deg over a short arc -- with the 4.2m-wide
+        // ribbon's half-width (2.1m) bigger than the turn's own radius there, the inner-edge
+        // vertices crossed past each other and folded the mesh back on itself, so the goblin was
+        // literally walking into the BACK of a self-intersecting fold, not a real slope. Split into
+        // two gentler turns (adds one more waypoint) so no single corner turns sharply enough for
+        // the ribbon width to fold.
+        // 2026-08-29 FOURTH FIX (user: "スムーズにさかは登れるけど橋に上れない" -- the slope
+        // itself climbs fine, but its old endpoint (6.0,6.5) just sits on the ground beside
+        // BridgeEmbankment_1, ~0.7m below and to the side of the actual bridge deck -- there was
+        // never a connection onto the deck itself). Extended the path onto the deck's own east tip:
+        // WalkableColliderSeg_15 (the deck's last collider segment) has its walking surface measured
+        // live at world Y=1.37, X-range ~3.6-5.1, Z-range ~2-8 -- aimed the final stretch at
+        // (5.0, 5.0), just inside that footprint (X>4.84 keeps it past AbutmentCollider_East's edge
+        // the whole way, same reasoning as the second fix above). The climb-rate cap + terrain-carve
+        // logic below happily continues past where natural terrain tops out (~-0.2 here) since
+        // slabs only ever compare against the previous slab's height, not raw terrain, once terrain
+        // stops being the limiting factor -- it just keeps climbing at the capped rate until it
+        // reaches the deck.
+        var ctrlXZ = new[]
+        {
+            shorePt + climbDir * -0.5f,
+            bendStart,
+            new Vector2(5.4f, 0.6f),  // first, gentler turn -- starts curving east
+            new Vector2(6.6f, 2.4f),  // clears X=4.8 (the abutment's east edge); second turn, much shallower than before
+            new Vector2(6.3f, 5.3f),
+            // 2026-08-29 SIXTH FIX (found by walking the goblin up it a fifth time -- stuck again,
+            // right at (6.0,0.74,6.5)): that point used to be the OLD endpoint, kept here only to
+            // add path LENGTH for the climb -- but going (6.3,5.3)->(6.0,6.5)->(5.6,5.9) reverses
+            // Z direction almost 180deg (a hairpin), which folds the ribbon mesh the same way the
+            // THIRD fix already found once (self-intersecting inner edge at a too-sharp turn). Not
+            // actually needed anymore: the force-climb-toward-deck logic above reaches the target
+            // height by STEP COUNT, not by path length/shape, so a short direct run is enough --
+            // removed the backtrack entirely.
+            new Vector2(5.6f, 5.1f),
+            new Vector2(5.0f, 5.0f), // end: onto WalkableColliderSeg_15's own surface, the bridge deck's east tip
+        };
 
-        const float stepRiserLocal = 0.25f; // measured height of cliff_blockQuarter_stone at scale 1
-        float riser = 0.30f;
-        float yScale = riser / stepRiserLocal;
+        const float slabThicknessLocal = 0.25f; // measured height of cliff_blockQuarter_stone at scale 1
+        float slabThickness = 0.10f; // thin flush paving, not a riser -- was 0.30f (a real stair step height)
+        float yScale = slabThickness / slabThicknessLocal;
 
         // The FBX's own imported material reference resolved to Kenney's flat-green "grass.mat"
         // instead of "stone.mat" (a stale/incorrect name-matched link from a much earlier import),
-        // which made every step render as a flat green box. Force the correct stone material here,
+        // which made every slab render as a flat green box. Force the correct stone material here,
         // darkened and slightly green-tinted so the old flat Kenney toon-stone reads as aged/mossy
         // rather than clashing with the realistic PolyHaven rock around it.
         var kenneyStoneMat = AssetDatabase.LoadAssetAtPath<Material>(Kenney + "Materials/stone.mat");
@@ -2941,36 +3002,84 @@ public static class CarryBuildTerrainForest
             if (oldMossyStoneMat.HasProperty("_Smoothness")) oldMossyStoneMat.SetFloat("_Smoothness", 0.05f);
         }
 
+        // Resample the control polyline at a fixed step so both the straight run and the bend use
+        // one uniform placement loop (piecewise-linear is fine here -- the control points are
+        // already dense enough that a spline wouldn't visibly differ).
+        const float step = 0.65f;
+        var pathPts = new List<Vector2>();
+        for (int seg = 0; seg < ctrlXZ.Length - 1; seg++)
+        {
+            Vector2 a = ctrlXZ[seg], b = ctrlXZ[seg + 1];
+            float segLen = Vector2.Distance(a, b);
+            int subSteps = Mathf.Max(1, Mathf.RoundToInt(segLen / step));
+            for (int s = (seg == 0 ? 0 : 1); s <= subSteps; s++) // skip duplicate joint point between segments
+                pathPts.Add(Vector2.Lerp(a, b, s / (float)subSteps));
+        }
+
         var rng = new System.Random(4477);
         int i = 0;
-        int maxSteps = 26;
-        // 2026-08-29 FIX: this used to climb by a FIXED linear riser (y += riser each step),
-        // implicitly assuming the ground along climbDir rises at a constant ~0.3m/0.6m slope --
-        // true enough against the terrain shape this was originally tuned against, but after
-        // widening the inlet/stairs gentle zone into one continuous arc (see LakeGentleWeight) the
-        // real slope here is a smoothed curve (steep near the waterline, leveling out higher up),
-        // not a straight line -- the fixed-riser assumption buried every step by up to ~1.3m near
-        // the bottom. Each step's height is now sampled from the ACTUAL terrain at its own XZ
-        // instead of assumed, so it always sits on the real surface regardless of its shape.
+        var pathY = new List<float>(pathPts.Count); // captured per-point so the collider ribbon built below matches the visual slabs exactly
+        // Each slab's height is sampled from the ACTUAL terrain at its own XZ (not assumed/
+        // interpolated), so the paving always sits flush with whatever the real, already-smooth
+        // slope is doing at that point. Tilt is likewise computed from the real rise between
+        // consecutive samples (not a fixed value), so the straight run and the bend both read as
+        // one continuous grade instead of a flat section meeting an angled one.
+        // 2026-08-29 FIFTH FIX (user: "スムーズにさかは登れるけど橋に上れない" -- even after
+        // extending ctrlXZ to end on the deck's own tip, the built path only reached Y~-0.44,
+        // nowhere near the deck's measured Y=1.37): `y = Max(groundY-0.05, lastY)` only ever
+        // FOLLOWS terrain -- once the path went past where natural ground stops rising (it
+        // plateaus/dips back down well before the deck), lastY was already above groundY-0.05
+        // everywhere from there on, so Max() just picked lastY forever and the climb went
+        // perfectly flat for the entire tail, capped-rate or not. The cap was never the limiter
+        // here; there was simply nothing left telling it to keep climbing. Forces a climb toward
+        // the deck's own measured surface height over the final stretch of the path (still
+        // respecting the same per-step cap), instead of only ever reacting to terrain.
+        const float maxClimbDeg = 38f; // comfortably under CharacterController.slopeLimit=50deg (confirmed by actually walking the goblin up it)
+        float maxStepRise = step * Mathf.Tan(maxClimbDeg * Mathf.Deg2Rad);
+        const float deckTargetY = 1.30f; // WalkableColliderSeg_15's measured top (1.37) minus a small embed
+        // 2026-08-29: 10 -> 16 -- measured live that the force-climb window was starting ~4.2m
+        // below the deck target with only 10 steps * the 38deg-capped max rise (0.507m/step)
+        // available (5.07m) -- just short of the ~5.5m actually needed, so it plateaued at Y~0.86
+        // instead of reaching the deck's 1.30. 16 steps (8.1m of climb budget) reaches the target
+        // with room to spare and flattens out comfortably before the very end instead of arriving
+        // exactly on the last point.
+        const int forceClimbTailPoints = 16;
         float lastY = LakeWaterY - 0.2f;
-        while (i < maxSteps)
+        for (; i < pathPts.Count; i++)
         {
-            Vector2 p = shorePt + climbDir * (i * 0.6f - 0.5f);
+            Vector2 p = pathPts[i];
             float groundY = SampleWorldHeight(terrain, p.x, p.y);
-            float y = Mathf.Max(groundY - 0.08f, lastY + riser * 0.4f); // embed slightly into the ground, but never step DOWN from the previous stair
-            if (y > landY + 0.1f) break;
-            var inst = (GameObject)PrefabUtility.InstantiatePrefab(step, stairsRoot.transform);
-            inst.name = "LakeStair_" + i;
-            float wobble = ((float)rng.NextDouble() - 0.5f) * 10f;
+            float y = Mathf.Max(groundY - 0.05f, lastY); // flush embed; never lower than the previous slab (monotonic climb, but no forced jump)
+            if (pathPts.Count - 1 - i < forceClimbTailPoints)
+                y = Mathf.Max(y, Mathf.Min(deckTargetY, lastY + maxStepRise)); // keep pushing toward the deck at the capped rate, terrain permitting or not
+            // 2026-08-29 FIX (user tested by actually walking the goblin up it -- got stuck around
+            // slab 17): the raw terrain here rises much faster in one short stretch than it does on
+            // average (measured: slab 17->18 alone was a 1.34m rise over one 0.65m step, a ~64deg
+            // local grade) -- CharacterController.slopeLimit is 50deg, so the goblin just slid back
+            // down there regardless of how flush/gap-free the collider mesh was. Cap the climb rate
+            // to a comfortably-walkable ~38deg (well under the 50deg limit) so the built path can
+            // never locally out-climb what the goblin can actually walk, even where the raw ground
+            // underneath it is steeper -- exactly what a constructed ramp/walkway is for.
+            y = Mathf.Min(y, lastY + maxStepRise);
+            pathY.Add(y);
+
+            Vector2 tangent = (i < pathPts.Count - 1 ? pathPts[i + 1] - p : p - pathPts[i - 1]).normalized;
+            float headingDeg = Mathf.Atan2(tangent.x, tangent.y) * Mathf.Rad2Deg - 180f; // slabs face back down toward the lake
+            float tiltX = i == 0 ? 0f : Mathf.Clamp(Mathf.Atan2(y - lastY, step) * Mathf.Rad2Deg, 0f, 32f); // matches maxClimbDeg's steepest sections closely without a near-edge-on slab mesh
+
+            var inst = (GameObject)PrefabUtility.InstantiatePrefab(slab, stairsRoot.transform);
+            inst.name = "LakeSlopeSlab_" + i;
+            float wobble = ((float)rng.NextDouble() - 0.5f) * 8f;
             float scaleJ = 1f + ((float)rng.NextDouble() - 0.5f) * 0.25f;
-            // Widened 1.5 -> 3.2 (2026-08-29, user feedback "階段狭くない?") -- a single ~2m-wide
-            // stone per row read as a narrow ledge, awkward to climb carefully while carrying a
-            // full pot without spilling. ~4m actual tread width (3.2*scaleJ) is comfortable to walk
-            // up without hugging the edge.
+            // ~4m tread width (widened 2026-08-29 per "階段狭くない?") -- kept wide so the goblin
+            // never has to hug the edge while carrying a full pot.
             inst.transform.localScale = new Vector3(3.2f * scaleJ, yScale * (0.85f + (float)rng.NextDouble() * 0.3f), 1.5f * scaleJ);
-            inst.transform.position = new Vector3(p.x, y + ((float)rng.NextDouble() - 0.5f) * 0.04f, p.y);
-            inst.transform.rotation = Quaternion.Euler(0f, baseRotY + wobble, 0f);
-            inst.AddComponent<BoxCollider>(); // auto-fits to the mesh bounds
+            inst.transform.position = new Vector3(p.x, y, p.y);
+            inst.transform.rotation = Quaternion.Euler(tiltX, headingDeg + wobble, 0f);
+            // No BoxCollider here (deliberately) -- these are purely decorative flush paving. A
+            // discrete collider box per slab, even a thin one, still gives the CharacterController
+            // a hard edge to catch on between slabs; the one smooth ramp collider below is the
+            // only walking surface, exactly the "nothing to step up onto" the redesign needs.
             if (oldMossyStoneMat != null)
             {
                 foreach (var mr in inst.GetComponentsInChildren<MeshRenderer>())
@@ -2978,39 +3087,136 @@ public static class CarryBuildTerrainForest
             }
 
             lastY = y;
-            i++;
         }
 
-        // Supplementary smooth ramp Collider underneath the visual steps (permitted explicitly --
-        // guarantees reliable climbing regardless of how the individual auto-fit step boxes line
-        // up with each other; the visual stones stay irregular, only the collision is smoothed).
+        // 2026-08-29 FIX (found while actually walking the goblin up the slope, see the collider
+        // comment below): capping the climb rate to a walkable ~38deg (previous edit) means the
+        // ramp's own surface now sits BELOW the raw terrain in the one stretch where the real
+        // ground rises much faster (up to ~64deg locally) -- the goblin was walking into that
+        // still-steep hillside from the side (CollisionFlags.Sides, stuck dead) even though the
+        // ramp collider itself was perfectly smooth. Carve the terrain down to the ramp's own
+        // height in a corridor along the path (never raise -- a real ramp is cut INTO a hillside,
+        // not built up over it) so nothing is left for the goblin to collide with sideways.
+        {
+            var data = terrain.terrainData;
+            float originX = terrain.transform.position.x, originY = terrain.transform.position.y, originZ = terrain.transform.position.z;
+            float sizeX = data.size.x, sizeY = data.size.y, sizeZ = data.size.z;
+            int hr = data.heightmapResolution;
+            const float coreHalfWidth = 2.3f, outerHalfWidth = 4.5f; // core matches the ~4.2m tread; falloff blends back to the natural hillside
+            var heights = data.GetHeights(0, 0, hr, hr);
+
+            float minX = pathPts[0].x, maxX = pathPts[0].x, minZ = pathPts[0].y, maxZ = pathPts[0].y;
+            foreach (var pp in pathPts) { minX = Mathf.Min(minX, pp.x); maxX = Mathf.Max(maxX, pp.x); minZ = Mathf.Min(minZ, pp.y); maxZ = Mathf.Max(maxZ, pp.y); }
+            minX -= outerHalfWidth + 1f; maxX += outerHalfWidth + 1f; minZ -= outerHalfWidth + 1f; maxZ += outerHalfWidth + 1f;
+            int minXi = Mathf.Max(0, Mathf.FloorToInt((minX - originX) / sizeX * (hr - 1)));
+            int maxXi = Mathf.Min(hr - 1, Mathf.CeilToInt((maxX - originX) / sizeX * (hr - 1)));
+            int minZi = Mathf.Max(0, Mathf.FloorToInt((minZ - originZ) / sizeZ * (hr - 1)));
+            int maxZi = Mathf.Min(hr - 1, Mathf.CeilToInt((maxZ - originZ) / sizeZ * (hr - 1)));
+
+            int carved = 0;
+            for (int zi = minZi; zi <= maxZi; zi++)
+            {
+                float worldZ = originZ + (zi / (float)(hr - 1)) * sizeZ;
+                for (int xi = minXi; xi <= maxXi; xi++)
+                {
+                    float worldX = originX + (xi / (float)(hr - 1)) * sizeX;
+                    Vector2 p2 = new Vector2(worldX, worldZ);
+
+                    float bestDist = float.MaxValue, bestY = 0f;
+                    for (int pi = 1; pi < pathPts.Count; pi++)
+                    {
+                        Vector2 a = pathPts[pi - 1], b = pathPts[pi];
+                        Vector2 ab = b - a;
+                        float len2 = ab.sqrMagnitude;
+                        float t = len2 > 1e-6f ? Mathf.Clamp01(Vector2.Dot(p2 - a, ab) / len2) : 0f;
+                        Vector2 proj = a + ab * t;
+                        float d = Vector2.Distance(p2, proj);
+                        if (d < bestDist) { bestDist = d; bestY = Mathf.Lerp(pathY[pi - 1], pathY[pi], t); }
+                    }
+                    if (bestDist > outerHalfWidth) continue;
+
+                    float originalWorldY = originY + heights[zi, xi] * sizeY;
+                    float rampTargetY = bestY - 0.15f; // carve a bit below the ramp surface itself, not flush with it
+                    float weight = bestDist <= coreHalfWidth ? 1f : 0.5f * (1f + Mathf.Cos((bestDist - coreHalfWidth) / (outerHalfWidth - coreHalfWidth) * Mathf.PI));
+                    float targetY = Mathf.Lerp(originalWorldY, rampTargetY, weight);
+                    float newWorldY = Mathf.Min(targetY, originalWorldY); // carve only -- never raise terrain above what it already was
+                    if (newWorldY < originalWorldY - 0.02f) carved++;
+                    heights[zi, xi] = Mathf.Clamp01((newWorldY - originY) / sizeY);
+                }
+            }
+            data.SetHeights(0, 0, heights);
+            var tc = terrain.GetComponent<TerrainCollider>();
+            var tdRef = tc.terrainData; tc.terrainData = null; tc.terrainData = tdRef; // recook (see CLAUDE.md 既知の落とし穴 / Run()'s own stale-collider fix)
+            Physics.SyncTransforms();
+            log.AppendLine("LakeSlope: carved terrain under the ramp corridor, " + carved + " cells lowered.");
+        }
+
+        // The ONE walking surface: a single continuous ribbon MeshCollider following pathPts/pathY
+        // exactly (same points, same heights as the visual slabs -- built with the same AddRibbon
+        // helper the cliff wall/waterfalls already use for exactly this "no seams" reason).
+        // 2026-08-29 FIX (user: "現在は...この道を通って端に戻るのは不可能になっている"):
+        // the previous version chained 4 independent BoxColliders (one per ctrlXZ segment), each
+        // extended past its own segment's endpoints by a small margin to overlap its neighbor --
+        // that only guarantees overlap for a STRAIGHT continuation. At the actual bend (where the
+        // path turns from the straight climb to angle toward the embankment) the two segments'
+        // margins extend in genuinely different directions, leaving a real ~0.4-0.6m gap in the
+        // collision right at the turn (confirmed by measuring the boxes' own world endpoints) --
+        // exactly where a goblin climbing out would fall through. A single mesh has no seams to
+        // gap regardless of how sharply the path turns.
         if (i > 0)
         {
-            Vector2 startP = shorePt + climbDir * -0.5f;
-            Vector2 endP = shorePt + climbDir * ((i - 1) * 0.6f + 0.1f);
-            Vector3 startPos = new Vector3(startP.x, LakeWaterY - 0.2f, startP.y);
-            Vector3 endPos = new Vector3(endP.x, lastY, endP.y); // lastY: the actual (terrain-sampled) height of the final placed step, not the old linear i*riser assumption
-            var ramp = new GameObject("StairsRampCollider");
-            ramp.transform.SetParent(stairsRoot.transform, false);
-            ramp.transform.position = (startPos + endPos) * 0.5f;
-            ramp.transform.rotation = Quaternion.LookRotation((endPos - startPos).normalized);
-            var rampBox = ramp.AddComponent<BoxCollider>();
-            rampBox.size = new Vector3(4.2f, 0.35f, Vector3.Distance(startPos, endPos) + 0.6f); // widened to match the steps' new ~4m tread width (was 2.4f)
+            var lineL = new Vector3[pathPts.Count];
+            var lineR = new Vector3[pathPts.Count];
+            for (int pi = 0; pi < pathPts.Count; pi++)
+            {
+                Vector2 tangent = (pi < pathPts.Count - 1 ? pathPts[pi + 1] - pathPts[pi] : pathPts[pi] - pathPts[pi - 1]).normalized;
+                // Defensive half-width clamp against sharp turns (belt-and-suspenders alongside
+                // gentling ctrlXZ's own corners above): at a tight turn, a fixed 2.1m half-width can
+                // exceed the turn's own radius, crossing the inner-edge vertices and folding the
+                // ribbon mesh back on itself -- exactly what stranded the goblin on a "wall" that
+                // was actually the back of a self-intersecting fold (found by actually walking it up
+                // the slope). Shrinking toward tight turns guarantees the two edges never cross,
+                // regardless of what future control-point edits do to this path.
+                float turnDeg = 0f;
+                if (pi > 0 && pi < pathPts.Count - 1)
+                {
+                    Vector2 tIn = (pathPts[pi] - pathPts[pi - 1]).normalized;
+                    Vector2 tOut = (pathPts[pi + 1] - pathPts[pi]).normalized;
+                    turnDeg = Vector2.Angle(tIn, tOut);
+                }
+                float halfWidth = Mathf.Lerp(2.1f, 0.6f, Mathf.Clamp01(Mathf.InverseLerp(15f, 60f, turnDeg)));
+                Vector2 perp = new Vector2(-tangent.y, tangent.x) * halfWidth;
+                lineL[pi] = new Vector3(pathPts[pi].x - perp.x, pathY[pi], pathPts[pi].y - perp.y);
+                lineR[pi] = new Vector3(pathPts[pi].x + perp.x, pathY[pi], pathPts[pi].y + perp.y);
+            }
+            var rVerts = new List<Vector3>(); var rTris = new List<int>(); var rUVs = new List<Vector2>();
+            AddRibbon(rVerts, rTris, rUVs, lineL, lineR, 1f);
+            var rampMesh = new Mesh { name = "SlopeColliderMesh" };
+            rampMesh.SetVertices(rVerts); rampMesh.SetTriangles(rTris, 0);
+            rampMesh.RecalculateNormals(); rampMesh.RecalculateBounds();
+            var rampGo = new GameObject("SlopeCollider");
+            rampGo.transform.SetParent(stairsRoot.transform, false);
+            var rampCol = rampGo.AddComponent<MeshCollider>();
+            rampCol.sharedMesh = rampMesh;
+            rampCol.convex = false;
         }
-
-        // Moss/rock/root dressing flanking the stairs so they read as embedded in the cliff,
-        // not stuck on top of it, using the same proven (fixed-height) placement as the bridge.
+        // Moss/rock/root dressing flanking the slope so it reads as embedded in the bank, not
+        // stuck on top of it -- scattered by nearest-point-on-path distance (works for the curved
+        // bend the same as the straight run, unlike a single climbDir projection).
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
         var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var mossSets = LoadIndividualMossRocks();
         const float rootsTopLocal = 0.122f;
-        Vector2 sideDir = new Vector2(-climbDir.y, climbDir.x);
         for (int k = 0; k < 10; k++)
         {
-            float along = (float)rng.NextDouble() * (i * 0.6f + 3f);
-            float side = ((float)rng.NextDouble() - 0.5f) * 6f;
-            if (Mathf.Abs(side) < 2.2f) continue; // keep the steps themselves clear (widened along with the steps, was 1.1f)
-            Vector2 p = shorePt + climbDir * along + sideDir * side;
+            int pi = rng.Next(pathPts.Count);
+            Vector2 along = pathPts[pi];
+            Vector2 pathTangent = pi < pathPts.Count - 1
+                ? (pathPts[pi + 1] - along).normalized
+                : (along - pathPts[pi - 1]).normalized;
+            Vector2 side = new Vector2(-pathTangent.y, pathTangent.x) * (((float)rng.NextDouble() - 0.5f) * 2f) * 4f;
+            if (side.magnitude < 2.2f) continue; // keep the slabs themselves clear (widened along with them)
+            Vector2 p = along + side;
             float groundY = SampleWorldHeight(terrain, p.x, p.y);
             bool useRoot = rng.Next(3) == 0;
             var prefab = useRoot ? rootsPrefab : mossSets[rng.Next(mossSets.Length)];
@@ -3025,8 +3231,8 @@ public static class CarryBuildTerrainForest
             inst.transform.position = new Vector3(p.x, topY - topLocal * scale, p.y);
         }
 
-        log.AppendLine("Lake stairs built: " + i + " steps at angle=" + StairsAngleDeg.ToString("F0") +
-            ", shore=(" + shorePt.x.ToString("F1") + "," + shorePt.y.ToString("F1") + "), landY=" + landY.ToString("F2") + ".");
+        log.AppendLine("Lake slope built: " + i + " slabs at angle=" + StairsAngleDeg.ToString("F0") +
+            ", shore=(" + shorePt.x.ToString("F1") + "," + shorePt.y.ToString("F1") + "), end=" + ctrlXZ[ctrlXZ.Length - 1].ToString("F1") + ".");
     }
 
 

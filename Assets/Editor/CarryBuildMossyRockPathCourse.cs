@@ -61,6 +61,34 @@ public static class CarryBuildMossyRockPathCourse
         public bool mirrored;
     }
 
+    // 2026-08-29: exact final transforms captured live from the Editor after manual per-piece
+    // grounding tweaks (small tilts to sit flush with the terrain under each piece, done by hand
+    // in the Scene view -- the beam search itself only ever produces a pure-yaw rotation, never
+    // X/Z tilt). Keyed by placement-order index (0-based, matching the "_N" suffix in each
+    // instance's name). Applied in the placement loop below, position AND rotation together, so a
+    // future rebuild reproduces this exact hand-verified layout instead of the search's own
+    // (untilted, possibly-floating-or-clipping) raw output. Re-record via the same live-transform
+    // dump (see conversation) if the course is ever hand-adjusted again, or if the winning route
+    // changes enough that these piece types/indices no longer match.
+    class ManualOverride { public string pieceName; public bool mirrored; public Vector3 pos; public Quaternion rot; }
+    static readonly Dictionary<int, ManualOverride> ManualLayoutOverrides = new Dictionary<int, ManualOverride>
+    {
+        [0] = new ManualOverride { pieceName = "GentleStraight", mirrored = false,
+            pos = new Vector3(-0.4355f, 1.8286f, 6.7350f), rot = new Quaternion(-0.051649f, -0.989682f, -0.030119f, 0.130213f) },
+        [1] = new ManualOverride { pieceName = "GentleStraight", mirrored = false,
+            pos = new Vector3(-6.8300f, 1.7200f, 28.8900f), rot = new Quaternion(0.000000f, -0.203164f, 0.000000f, -0.979145f) },
+        [2] = new ManualOverride { pieceName = "GentleCurve_A", mirrored = true,
+            pos = new Vector3(-3.6100f, 1.6500f, 27.6400f), rot = new Quaternion(-0.009884f, 0.984780f, 0.025249f, -0.171679f) },
+        [3] = new ManualOverride { pieceName = "LongCurve", mirrored = false,
+            pos = new Vector3(-6.2000f, 1.0000f, 37.4000f), rot = new Quaternion(-0.063209f, 0.193858f, 0.009119f, 0.978949f) },
+        [4] = new ManualOverride { pieceName = "GentleStraight", mirrored = true,
+            pos = new Vector3(0.4000f, 2.7300f, 57.4700f), rot = new Quaternion(0.000000f, 0.966049f, 0.000000f, 0.258359f) },
+        [5] = new ManualOverride { pieceName = "GentleCurve_A", mirrored = false,
+            pos = new Vector3(0.2056f, 2.8793f, 69.0515f), rot = new Quaternion(0.060866f, 0.998057f, 0.000811f, 0.013297f) },
+        [6] = new ManualOverride { pieceName = "LongCurve", mirrored = true,
+            pos = new Vector3(6.7300f, 2.4500f, 77.8400f), rot = new Quaternion(0.000000f, -0.062461f, 0.000000f, 0.998048f) },
+    };
+
     // Mirrors a piece's LOCAL-space geometry across its own X axis (the direction perpendicular to
     // travel) -- paired with instantiating the prefab with localScale.x = -1, this gives every piece
     // a same-shape opposite-handed twin (confirmed to render correctly: Unity's renderer handles the
@@ -317,7 +345,30 @@ public static class CarryBuildMossyRockPathCourse
                 inst.transform.position = p.pos;
                 inst.transform.rotation = p.rot;
                 if (p.mirrored) inst.transform.localScale = new Vector3(-1f, 1f, 1f);
-                placed.Add((p.name, inst, asset.profile, p.rot, p.mirrored));
+                // 2026-08-29 (user: manually nudged/tilted some pieces in the Editor for grounding,
+                // then asked to "record the currently placed [layout] as the script" so a future
+                // rebuild doesn't silently discard those tweaks): applies the exact recorded
+                // position+rotation for whichever slot index has one, straight from the beam
+                // search's own output otherwise. Position AND rotation are overridden together
+                // (not just an added tilt) so a slot's placement always matches exactly what was
+                // last hand-verified in the Editor, regardless of small drifts in the search's own
+                // math on a future re-run. If the beam search ever picks a DIFFERENT piece TYPE for
+                // a given slot (route changed enough that the winning sequence itself differs), the
+                // override is skipped for that slot and a warning is logged instead of silently
+                // forcing a mismatched piece into someone else's saved transform.
+                if (ManualLayoutOverrides.TryGetValue(placed.Count, out var ov))
+                {
+                    if (ov.pieceName == p.name && ov.mirrored == p.mirrored)
+                    {
+                        inst.transform.SetPositionAndRotation(ov.pos, ov.rot);
+                    }
+                    else
+                    {
+                        log.AppendLine($"WARNING: ManualLayoutOverrides[{placed.Count}] expected {ov.pieceName}" +
+                            $"{(ov.mirrored ? "_Mirrored" : "")} but the beam search picked {p.name}{(p.mirrored ? "_Mirrored" : "")} this run -- override skipped, route changed enough to need re-recording.");
+                    }
+                }
+                placed.Add((p.name, inst, asset.profile, inst.transform.rotation, p.mirrored));
             }
 
             // ---- validation: joint gaps/kinks, water clearance, bank clearance ----
