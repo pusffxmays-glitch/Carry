@@ -229,7 +229,7 @@ public static class CarryBuildMossyRockPathCourse
                 if (nm == prevName) penalty += (nm == "WideCurve" || nm == "GentleCurve_A" ? 90f : 15f); // anti-repetition -- WideCurve/GentleCurve_A twice in a row means ~180-240deg combined turn
                 if (nm == "GentleStraight") penalty += 10f;
                 else if (nm == "WideCurve") penalty += 60f;
-                else if (nm == "GentleCurve_A") penalty += 60f;
+                else if (nm == "GentleCurve_A") penalty += 20f; // lowered from 60f (2026-08-29) -- at parity with WideCurve it never won against chains of free-malus LongCurve/GentleStraight corrections, so it was never once selected; still above GentleStraight's 10f since it's a much bigger single commitment (~-118deg)
                 return (penalty, maxOver);
             }
 
