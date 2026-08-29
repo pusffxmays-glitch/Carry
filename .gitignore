@@ -17,6 +17,14 @@
 # Carry/Debug/Capture Forest Stage Screenshots の出力先(QA確認用、コミット対象外)
 /ScreenshotsOut/
 
+# 検証用スクリーンショット (LFS で 50GB 超に膨らみ push 不能になった。コミット対象外)
+/Assets/Screenshots/
+/Assets/Screenshots.meta
+
+# Unity クラッシュ復旧シーンの残骸
+/Assets/_Recovery/
+/Assets/_Recovery.meta
+
 # IDE/エディタが自動生成するもの
 .vs/
 .vscode/
