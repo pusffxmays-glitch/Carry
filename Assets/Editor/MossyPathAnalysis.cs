@@ -100,8 +100,10 @@ public static class MossyPathAnalysis
         Vector2 entryDir = (XZ(nearEntryPos) - Vector2.zero).normalized; // from origin(entry) toward interior
         Vector2 exitDir = (XZ(exitPos) - XZ(nearExitPos)).normalized;
 
+        // Pass 1: bin membership (by T, along the whole-piece PCA axis -- fine for "how far along
+        // the path" grouping) and each bin's center point only. Width is deferred to pass 2.
         var bins = new List<Bin>();
-        float minWidth = float.MaxValue, maxWidth = 0f;
+        var binIdx = new List<List<int>>();
         for (int b = 0; b < Segments; b++)
         {
             float loT = tMin + length * b / Segments;
@@ -110,20 +112,65 @@ public static class MossyPathAnalysis
             if (idx.Count < 3) continue;
             float x = 0, z = 0;
             var ys = new List<float>();
-            var ws = new List<float>();
-            foreach (var i in idx)
-            {
-                x += verts[i].x; z += verts[i].z; ys.Add(verts[i].y);
-                float w = (verts[i].x - mean.x) * perp.x + (verts[i].z - mean.y) * perp.y;
-                ws.Add(w);
-            }
+            foreach (var i in idx) { x += verts[i].x; z += verts[i].z; ys.Add(verts[i].y); }
             x /= idx.Count; z /= idx.Count;
             ys.Sort();
             float topY = ys[Mathf.Clamp((int)(ys.Count * 0.85f), 0, ys.Count - 1)];
-            float width = ws.Max() - ws.Min();
+            binIdx.Add(idx);
+            bins.Add(new Bin { T = (loT + hiT) * 0.5f, Center = new Vector3(x, topY, z), Width = 0f, RawWidth = 0f });
+        }
+
+        // A bin near a tapering/curving tip can hold only a handful of vertices, so its raw
+        // (x,z) centroid is noisy -- confirmed directly: consecutive bins' centre-to-centre
+        // direction was seen swinging ~174deg -> 152deg step to step, far more than the piece's
+        // actual curvature over that short a span. That noise otherwise feeds straight into the
+        // local tangent/width/box-orientation math below, so smooth the centre line first (light
+        // 3-point moving average; T and RawWidth/Width aren't touched here, only Center).
+        var smoothed = new List<Vector3>(bins.Count);
+        for (int b = 0; b < bins.Count; b++)
+        {
+            Vector3 c0 = bins[Mathf.Max(0, b - 1)].Center;
+            Vector3 c1 = bins[b].Center;
+            Vector3 c2 = bins[Mathf.Min(bins.Count - 1, b + 1)].Center;
+            smoothed.Add((c0 + c1 + c2) / 3f);
+        }
+        for (int b = 0; b < bins.Count; b++) { var bin = bins[b]; bin.Center = smoothed[b]; bins[b] = bin; }
+
+        // Pass 2: width per bin, measured perpendicular to that BIN'S OWN local tangent (from its
+        // neighbouring bin centers) -- not the single whole-piece PCA axis used above for T-sorting.
+        // A piece that curves along its length (e.g. WideCurve, ~91deg total turn) has a local
+        // direction of travel near its ends that can differ sharply from that one global axis;
+        // projecting cross-section vertices onto the wrong (global) perpendicular measures width
+        // along a skewed axis and can overstate it substantially. Confirmed via Scene view: this
+        // alone (not the tip/taper fix, already handled by RawWidth) was letting a mid-taper
+        // collider segment on a curving mirrored piece fan out past the actual rock edge.
+        float minWidth = float.MaxValue, maxWidth = 0f;
+        for (int b = 0; b < bins.Count; b++)
+        {
+            Vector3 prevC = b > 0 ? bins[b - 1].Center : bins[b].Center;
+            Vector3 nextC = b < bins.Count - 1 ? bins[b + 1].Center : bins[b].Center;
+            Vector2 localTan = new Vector2(nextC.x - prevC.x, nextC.z - prevC.z);
+            if (localTan.sqrMagnitude < 1e-8f) localTan = primary;
+            localTan.Normalize();
+            Vector2 localPerp = new Vector2(-localTan.y, localTan.x);
+
+            float wMin = float.MaxValue, wMax = float.MinValue;
+            foreach (var i in binIdx[b])
+            {
+                float w = (verts[i].x - bins[b].Center.x) * localPerp.x + (verts[i].z - bins[b].Center.z) * localPerp.y;
+                wMin = Mathf.Min(wMin, w); wMax = Mathf.Max(wMax, w);
+            }
+            float width = wMax - wMin;
             minWidth = Mathf.Min(minWidth, width);
             maxWidth = Mathf.Max(maxWidth, width);
-            bins.Add(new Bin { T = (loT + hiT) * 0.5f, Center = new Vector3(x, topY, z), Width = width, RawWidth = width });
+            // Recenter on the width span's own midpoint, not the raw vertex-position average -- a
+            // skewed vertex distribution at this slice (typical on a tapering/curving connector
+            // piece) would otherwise leave the box's true footprint centered off to one side, so a
+            // box built symmetric around the average overshoots the mesh on one edge even though
+            // its total width is correct.
+            float mid = (wMin + wMax) * 0.5f;
+            Vector3 recenter = bins[b].Center + new Vector3(localPerp.x, 0f, localPerp.y) * mid;
+            var bin = bins[b]; bin.Center = recenter; bin.Width = width; bin.RawWidth = width; bins[b] = bin;
         }
 
         // Every piece tapers to a near-point tip at both connection ends (Meshy's jigsaw-style
@@ -189,7 +236,26 @@ public static class MossyPathAnalysis
         if (bins.Count < 2) return;
         const float thickness = 0.6f;
         const float overlap = 1.15f; // extend each segment's length slightly so adjacent boxes always overlap, never gap
-        const float widthMargin = 0.9f; // slight inset from the visual footprint edge
+        const float widthMargin = 0.92f; // slight inset from the visual footprint edge
+
+        // Each box physically spans from the midpoint with its PREVIOUS bin to the midpoint with
+        // its NEXT bin -- a wider T-range than the single point its own RawWidth was measured at.
+        // Near a taper (fastest-changing width in the whole piece) that mismatch is large: sizing
+        // the box by its own bin's width alone made it overshoot the true mesh at the box's
+        // narrower end while falling short of the true mesh at its wider end -- "sticks out AND
+        // isn't wide enough," simultaneously, exactly as reported. Fix: compute the true width at
+        // each of a box's own two boundary points (interpolated between adjacent bins) and use the
+        // SMALLER of the two for that whole box -- the tightest width that still never exceeds the
+        // real mesh anywhere along that specific box's own length. The very first/last boundary
+        // (the piece's true connector tip) is a mathematical point of ~zero width, but treating it
+        // as exactly 0 would collapse the tip box itself down to a hard-clamped sliver -- the OLD
+        // (bin-width-only) approach was already visually confirmed fine at the tip specifically, so
+        // keep that: use the tip bin's own RawWidth as its boundary rather than the true zero.
+        var boundaryWidth = new float[bins.Count + 1];
+        boundaryWidth[0] = bins[0].RawWidth;
+        boundaryWidth[bins.Count] = bins[bins.Count - 1].RawWidth;
+        for (int k = 1; k < bins.Count; k++)
+            boundaryWidth[k] = (bins[k - 1].RawWidth + bins[k].RawWidth) * 0.5f;
 
         for (int i = 0; i < bins.Count; i++)
         {
@@ -210,11 +276,8 @@ public static class MossyPathAnalysis
             go.transform.localRotation = Quaternion.LookRotation(new Vector3(dir.x, 0, dir.z).normalized, Vector3.up);
 
             var box = go.AddComponent<BoxCollider>();
-            // RawWidth (true measured mesh width), not the taper-fix-widened Width -- otherwise the
-            // collider at each piece's tapered tip is sized to the piece's INTERIOR width while the
-            // visual mesh there is still narrow, so the collider physically overhangs past the mesh
-            // edge at every joint (invisible ledge the goblin can stand on past the visible stone).
-            float width = Mathf.Max(0.4f, bins[i].RawWidth * widthMargin);
+            float segWidth = Mathf.Min(boundaryWidth[i], boundaryWidth[i + 1]);
+            float width = Mathf.Max(0.4f, segWidth * widthMargin);
             box.size = new Vector3(width, thickness, Mathf.Max(segLen * overlap, 0.3f));
             box.center = Vector3.zero;
         }

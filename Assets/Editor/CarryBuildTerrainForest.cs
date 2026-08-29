@@ -28,7 +28,10 @@ public static class CarryBuildTerrainForest
     // ---- Terrain extents. Wide enough that panning the camera never shows open sky
     // where the forest should be, and long enough behind the start to fit the lake. ----
     const float TerrainWidth = 100f;
-    const float TerrainLength = 190f;
+    // 2026-08-29: 190 -> 330 (+140m) to make room for Stage 2 ("毒沼"/poison swamp) beyond the
+    // Stage 1 course end (Z=110). See CarryBuildSwampTransition.cs / the swamp channel functions
+    // below for what lives in the new Z=110..250ish range.
+    const float TerrainLength = 330f;
     // Raised from 16 -- the new dramatic cliff rim (see CliffRimElevation) needs real headroom
     // above water (target cliff-top heights of ~+10 to +18m above LakeWaterY, i.e. up to world
     // Y~+22); 16m of range (world Y -8..+8) would have clamped/flattened the tops of anything
@@ -38,8 +41,36 @@ public static class CarryBuildTerrainForest
     const float OriginX = -TerrainWidth * 0.5f;
     const float OriginZ = -46f;
     const float OriginY = -8f;
-    const int HeightRes = 257;
+    // 2026-08-29: 257 -> 513 alongside the TerrainLength increase -- keeping HeightRes fixed while
+    // stretching the same terrain over 330m instead of 190m would have coarsened the heightmap
+    // cell size project-wide (0.74m/cell -> 1.29m/cell), softening all the fine cliff/shore detail
+    // already tuned in Stage 1. 513 keeps cell size at ~0.64m/cell (finer than before).
+    const int HeightRes = 513;
     const int AlphaRes = 257;
+
+    // ---- Stage 2 "毒沼" (poison swamp): a slow, wide bog channel that takes over from the river
+    // once it fades out (RiverHalfWidth -> 0 by RiverZ1=120). Deliberately its own noise/shape
+    // functions (lower frequency, wider, shallower) rather than just continuing the river's own
+    // formula, so it reads as a genuinely different kind of water, not "more river." Ramps in
+    // starting just before the river's own fade-out completes so there's no dry gap between them. ----
+    const float SwampZ0 = 108f;       // where the swamp channel starts ramping in (river is still ~30% width here)
+    const float SwampRampLen = 26f;   // full swamp width reached by SwampZ0+SwampRampLen (~Z=134)
+    const float SwampDepth = 2.2f;    // shallower than RiverDepth (3.6) -- a bog, not a deep channel
+    const float SwampHalfWidthBase = 20f; // typical open-water half-width once fully ramped in
+    const float SwampZ1 = 240f; // prototype's water extent -- leaves a ~44m margin before the new terrain edge (OriginZ+TerrainLength=284) for a future course-end/far-forest buffer
+    // Gradient dressing zone (tree species mix, ground texture, water color) -- wider than the
+    // channel's own ramp so the FOREST reads as thinning out before the water itself changes.
+    const float TransitionZ0 = 100f, TransitionZ1 = 170f;
+    static float SwampBlendT(float z) => Mathf.Clamp01(Mathf.InverseLerp(TransitionZ0, TransitionZ1, z));
+
+    static float SwampX(float z) => 10f * (Mathf.PerlinNoise(z * 0.007f, 341.9f) - 0.5f) * 2f; // slow, wide meander -- lower frequency than RiverX
+    static float SwampHalfWidth(float z)
+    {
+        if (z < SwampZ0) return 0f;
+        float rampT = Mathf.Clamp01(Mathf.InverseLerp(SwampZ0, SwampZ0 + SwampRampLen, z));
+        float widthNoise = Mathf.Lerp(0.75f, 1.25f, Mathf.PerlinNoise(z * 0.02f, 512.3f)); // lazy width variation along its length
+        return SwampHalfWidthBase * rampT * widthNoise;
+    }
 
     // ---- Lake: what the river flows INTO, behind the start bridge. Player faces away
     // from it (+Z); water flows toward it (-Z) -- current and progress point opposite ways.
@@ -49,7 +80,7 @@ public static class CarryBuildTerrainForest
     const float LakeCenterX = 0f;
     const float LakeCenterZ = -16f;
     const float LakeRadiusX = 24f;
-    const float LakeRadiusZ = 20f;
+    const float LakeRadiusZ = 10f;
     const float LakeDepth = 5.0f;
     const float LakeWaterY = -4.4f;
     const float InletAngleDeg = -10f; // direction from lake center toward the bridge/river inlet
@@ -59,7 +90,10 @@ public static class CarryBuildTerrainForest
     // zone widths (see LakeGentleWeight) were narrowed so the two gentle openings stay clearly
     // separated by cliff, rather than merging into one large climbable arc now that they're closer
     // together.
-    const float StairsAngleDeg = 55f;
+    // 2026-08-29: moved closer to the bridge (55 -> 15, user request) -- shore distance to the
+    // bridge drops from ~19.2m to ~14.1m. Stays inside the merged inlet/stairs gentle arc
+    // (-10..55, see LakeGentleWeight) and clear of the river inlet's own current at ~-10.
+    const float StairsAngleDeg = 15f;
 
     // ---- Stone bridge: the actual START. Crosses the river perpendicular to its flow (long
     // axis in X), a short walk deep (Z), positioned just upstream of where the river widens
@@ -300,8 +334,15 @@ public static class CarryBuildTerrainForest
     // that needs a representative water height (fall-trigger placement, sweep height).
     static float WaterYAt(float z)
     {
-        float rx = RiverX(z);
-        float waterY = GroundNoise(rx, z) - RiverDepth + 1.15f;
+        // Past the river's own fade-out, the swamp channel is the one carrying water -- pick
+        // whichever of the two is actually wider at this Z (their ramps overlap slightly around
+        // SwampZ0..RiverZ1 by design, see SwampZ0's comment, so this crossover is smooth).
+        float riverHW = RiverHalfWidth(z);
+        float swampHW = SwampHalfWidth(z);
+        bool useSwamp = swampHW > riverHW;
+        float cx = useSwamp ? SwampX(z) : RiverX(z);
+        float depth = useSwamp ? SwampDepth : RiverDepth;
+        float waterY = GroundNoise(cx, z) - depth + 1.15f;
         float lakeBlend = Mathf.Clamp01(Mathf.InverseLerp(RiverMouthWidenZ0, LakeCenterZ + 2f, z));
         return Mathf.Lerp(waterY, LakeWaterY, lakeBlend);
     }
@@ -416,9 +457,18 @@ public static class CarryBuildTerrainForest
         // Narrowed from the original (14/34 and 14/30) now that the stairs sit much closer to the
         // inlet (55deg vs -10deg) -- without this the two gentle arcs would overlap and merge into
         // one wide climbable stretch of shore instead of two distinct, cliff-separated openings.
-        float gentleInlet = 1f - Mathf.Clamp01(Mathf.InverseLerp(10f, 24f, AngleDiffDeg(angDeg, InletAngleDeg)));
-        float gentleStairs = 1f - Mathf.Clamp01(Mathf.InverseLerp(8f, 20f, AngleDiffDeg(angDeg, StairsAngleDeg)));
-        return Mathf.Max(gentleInlet, gentleStairs);
+        // 2026-08-29: replaced the old "two separate anchored pockets" (which left a narrow but
+        // absolute-height (15m) CliffRimElevation ridge between them) with ONE continuous gentle arc
+        // spanning InletAngleDeg..StairsAngleDeg. After shrinking LakeRadiusZ (20->10) that ridge's
+        // fixed real-world size no longer left room for a walkable route from the stairs back to the
+        // bridge -- widening the two pockets' falloff was tried first but even 36/34-wide pockets
+        // still left a ~60deg-steep 7m bump at the midpoint (angle ~22deg). The whole near/bridge-
+        // facing shore is one continuous bank now; the cliff-separated-opening design stays intact
+        // everywhere else around the lake (this only touches the arc between the two functional gaps
+        // that both already needed to be gentle).
+        float distFromSpan = angDeg >= InletAngleDeg && angDeg <= StairsAngleDeg ? 0f
+            : Mathf.Min(AngleDiffDeg(angDeg, InletAngleDeg), AngleDiffDeg(angDeg, StairsAngleDeg));
+        return 1f - Mathf.Clamp01(Mathf.InverseLerp(0f, 20f, distFromSpan));
     }
 
     // ---- Named shoreline "bank archetypes" -- deliberate, large-scale asymmetric headlands/coves
@@ -572,7 +622,11 @@ public static class CarryBuildTerrainForest
         float d = Mathf.Abs(worldX - rx);
         float riverCarve = RiverDepth * ChannelFactor(d, hw);
         float lakeCarve = LakeDepth * LakeFactor(worldX, worldZ);
-        float h = baseH - Mathf.Max(riverCarve, lakeCarve) + CliffRimElevation(worldX, worldZ);
+        float sx = SwampX(worldZ);
+        float shw = SwampHalfWidth(worldZ);
+        float sd = Mathf.Abs(worldX - sx);
+        float swampCarve = SwampDepth * ChannelFactor(sd, shw);
+        float h = baseH - Mathf.Max(riverCarve, Mathf.Max(lakeCarve, swampCarve)) + CliffRimElevation(worldX, worldZ);
 
         // Approach mound: raise (never lower) the ground right at the bridge's two ends so it
         // meets the deck without a step and the bridge's exposed underside/sides get buried.
@@ -787,7 +841,11 @@ public static class CarryBuildTerrainForest
 
                 float riverCloseness = hw > 0.01f ? Mathf.Clamp01(1f - d / (hw + BankFalloff)) : 0f;
                 float lakeCloseness = LakeFactor(worldX, worldZ);
-                float waterCloseness = Mathf.Max(riverCloseness, lakeCloseness);
+                float swHw = SwampHalfWidth(worldZ);
+                float swD = Mathf.Abs(worldX - SwampX(worldZ));
+                float swampCloseness = swHw > 0.01f ? Mathf.Clamp01(1f - swD / (swHw + BankFalloff * 1.6f)) : 0f; // wider soggy margin than the river's own bank
+                float waterCloseness = Mathf.Max(riverCloseness, Mathf.Max(lakeCloseness, swampCloseness));
+                float swampT = SwampBlendT(worldZ); // 0=forest floor, 1=full swamp -- shifts ground cover toward mud independent of literal water distance
 
                 // Threshold lowered from /28f -- moderate slopes (the rounded cliff-rim mounds
                 // around the lake, ~18-25deg) were staying dirt-dominant and, in direct sun, still
@@ -803,9 +861,12 @@ public static class CarryBuildTerrainForest
                 float mossZone = 1f - Mathf.Clamp01(Mathf.InverseLerp(0.35f, 0.65f, zoneNoise));
                 float leavesZone = Mathf.Clamp01(Mathf.InverseLerp(0.45f, 0.75f, zoneNoise));
 
-                float mossW = Mathf.Clamp01((mossZone * 0.6f + waterCloseness * 0.5f) * (1f - rockW));
-                float leavesW = Mathf.Clamp01(leavesZone * (1f - rockW) * (1f - waterCloseness * 0.6f) * 0.85f);
-                float mudW = Mathf.Clamp01(waterCloseness * (1f - rockW) * 0.4f);
+                float mossW = Mathf.Clamp01((mossZone * 0.6f + waterCloseness * 0.5f) * (1f - rockW) * (1f - swampT * 0.5f));
+                float leavesW = Mathf.Clamp01(leavesZone * (1f - rockW) * (1f - waterCloseness * 0.6f) * 0.85f * (1f - swampT * 0.8f));
+                // swampT independently pushes mud up (the whole transition zone reads as
+                // progressively boggier, not just the literal water's edge) -- per the "地面: 落ち葉/
+                // 苔テクスチャの重みをswampTに応じて泥テクスチャへシフト" plan.
+                float mudW = Mathf.Clamp01((waterCloseness * 0.4f + swampT * 0.55f) * (1f - rockW));
 
                 // Fine noise nudges the moss/leaves boundary so it isn't a clean zone edge.
                 float fineNoise = Mathf.PerlinNoise(worldX * 0.09f + 1000f, worldZ * 0.09f + 1000f);
@@ -930,9 +991,14 @@ public static class CarryBuildTerrainForest
     // Extends from deep forest all the way down past the bridge and into the lake (RiverWaterZ0
     // is deep inside the lake's radius) so it visually overlaps the lake water mesh with no gap
     // -- the river and lake read as one continuous body of water. ----
-    static void BuildWater(GameObject root, Terrain terrain, StringBuilder log)
+    // Builds one water ribbon mesh over [zFrom, zTo] and parents+names+materials it. Factored out
+    // 2026-08-29 so the river's own clear-blue water and the Stage 2 swamp's murky water can be two
+    // separate meshes/materials (a single mesh can't blend color along its length without a custom
+    // vertex-color shader) while sharing the exact same station-sampling logic. Called twice with
+    // overlapping Z ranges (see BuildWater) so there's no visible seam between them.
+    static GameObject BuildWaterRibbonMesh(GameObject root, string name, float zFrom, float zTo, Material mat)
     {
-        var mesh = new Mesh { name = "RiverWaterMesh" };
+        var mesh = new Mesh { name = name + "Mesh" };
         var verts = new List<Vector3>();
         var tris = new List<int>();
         var uvs = new List<Vector2>();
@@ -940,10 +1006,12 @@ public static class CarryBuildTerrainForest
         float step = 2f;
         int stationCount = 0;
         float v = 0f;
-        for (float z = RiverWaterZ0; z <= RiverZ1; z += step)
+        for (float z = zFrom; z <= zTo; z += step)
         {
-            float rx = RiverX(z);
-            float hw = RiverHalfWidth(z) * 0.82f;
+            float riverHWHere = RiverHalfWidth(z), swampHWHere = SwampHalfWidth(z);
+            bool useSwampHere = swampHWHere > riverHWHere;
+            float rx = useSwampHere ? SwampX(z) : RiverX(z);
+            float hw = Mathf.Max(riverHWHere, swampHWHere) * 0.82f;
             float waterY = WaterYAt(z);
 
             verts.Add(new Vector3(rx - hw, waterY, z));
@@ -966,18 +1034,34 @@ public static class CarryBuildTerrainForest
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
 
-        var go = new GameObject("RiverWater");
-        go.transform.SetParent(root.transform, false);
-        var mf = go.AddComponent<MeshFilter>();
-        mf.sharedMesh = mesh;
-        var mr = go.AddComponent<MeshRenderer>();
-        var mat = GetOrCreateMat("Mat_River", null, Vector2.one);
-        mat.color = new Color(0.14f, 0.30f, 0.28f, 0.72f);
-        if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", 0.85f);
-        SetTransparent(mat);
+        var rgo = new GameObject(name);
+        rgo.transform.SetParent(root.transform, false);
+        rgo.AddComponent<MeshFilter>().sharedMesh = mesh;
+        var mr = rgo.AddComponent<MeshRenderer>();
         mr.sharedMaterial = mat;
+        return rgo;
+    }
 
-        log.AppendLine("Water ribbon built, " + stationCount + " stations.");
+    static void BuildWater(GameObject root, Terrain terrain, StringBuilder log)
+    {
+        var riverMat = GetOrCreateMat("Mat_River", null, Vector2.one);
+        riverMat.color = new Color(0.14f, 0.30f, 0.28f, 0.72f);
+        if (riverMat.HasProperty("_Smoothness")) riverMat.SetFloat("_Smoothness", 0.85f);
+        SetTransparent(riverMat);
+
+        // 2026-08-29: murky/toxic swamp water, per the "毒沼" concept -- a duller, greener-yellow,
+        // less smooth (less mirror-like -- a stagnant bog, not clear moving water) material.
+        // Overlaps the river's own tail end (SwampZ0..RiverZ1) so the color itself blends across
+        // that stretch (both meshes render there) instead of cutting over at a hard line.
+        var swampMat = GetOrCreateMat("Mat_SwampWater", null, Vector2.one);
+        swampMat.color = new Color(0.22f, 0.26f, 0.10f, 0.88f);
+        if (swampMat.HasProperty("_Smoothness")) swampMat.SetFloat("_Smoothness", 0.35f);
+        SetTransparent(swampMat);
+
+        BuildWaterRibbonMesh(root, "RiverWater", RiverWaterZ0, RiverZ1, riverMat);
+        BuildWaterRibbonMesh(root, "SwampWater", SwampZ0, SwampZ1, swampMat);
+
+        log.AppendLine("Water ribbons built: river " + RiverWaterZ0 + ".." + RiverZ1 + ", swamp " + SwampZ0 + ".." + SwampZ1 + ".");
     }
 
     // ---- Lake water: irregular polygon fan, edge found via FindShoreAtAngle so it lines up
@@ -1307,66 +1391,16 @@ public static class CarryBuildTerrainForest
         // disk (Assets/ExternalAssets/PolyHaven/rock_face_01/, rock_face_02/) and are NOT deleted --
         // only their placement in this generator was removed. See ASSET_LICENSES.md 注記3 for the
         // updated status.
-        var coastalCliffPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "coastal_cliff_01/coastal_cliff_01_decimated.fbx");
-        float coastalCliffBottomY = GetPrefabBottomLocalY(coastalCliffPrefab);
-
-        // coastal_cliff_01: a genuinely wide (92m native) exposed cliff-strata band, used as the
-        // backdrop for the single most important viewpoint -- directly across the water from the
-        // bridge (180 deg). Scaled down to a still-substantial ~40m-wide band (not full native
-        // size, which would dwarf the whole lake) and embedded well into the existing terrain slope
-        // there so it reads as the terrain's own rock stratum showing through, not a dropped-in prop.
-        if (coastalCliffPrefab != null)
-        {
-            Vector2 shoreC = FindShoreAtAngle(180f);
-            Vector2 dirC = (shoreC - center).normalized;
-            float shoreRC = Vector2.Distance(shoreC, center);
-            Vector2 anchorC = center + dirC * (shoreRC * 1.28f);
-            float scaleC = 0.44f;
-            Vector2 tangentC = new Vector2(-dirC.y, dirC.x);
-            float halfWidthWorld = 92f * scaleC * 0.5f; // native width * scale
-
-            // This band is ~40m wide -- a single raycast/sample at its center can't guarantee the
-            // whole footprint is grounded (the far left/right extremities may sit over different
-            // local terrain than the center). Raycast at several points along its actual width span
-            // and anchor to the LOWEST hit, per CLAUDE.md 接地ルール #5 (wide assets need multi-point
-            // sampling, not one point).
-            float lowestY = float.MaxValue;
-            Vector3 lowestNormal = Vector3.up;
-            for (int wi = -3; wi <= 3; wi++)
-            {
-                float t = wi / 3f * halfWidthWorld * 0.85f; // stay a bit inside the true extremities
-                Vector2 samplePt = anchorC + tangentC * t;
-                TryGetTerrainSurface(terrain, samplePt.x, samplePt.y, out Vector3 hp, out Vector3 hn);
-                if (hp.y < lowestY) { lowestY = hp.y; lowestNormal = hn; }
-            }
-
-            var instC = PlaceCliffEmbedded(coastalCliffPrefab, wallRoot.transform, terrain, anchorC.x, anchorC.y, true, scaleC, 0.5f, "HeroCoastalCliffBand");
-            if (instC != null)
-            {
-                // Override Y with the span-wide lowest point (PlaceCliffEmbedded only sampled the
-                // center) so the whole width is guaranteed grounded, not just the center.
-                var p = instC.transform.position;
-                p.y = Mathf.Min(p.y, lowestY - coastalCliffBottomY * scaleC * 0.3f);
-                instC.transform.position = p;
-                placed++;
-            }
-
-            // The source asset is a naturally flat/plank-shaped scanned cliff STRIP (92m wide x only
-            // 11m tall) -- even fully grounded at its lowest point, its front (lake-facing) edge can
-            // still read as an overhang with visible open space beneath when viewed from near water
-            // level looking up (confirmed via a FALL_ang165 screenshot). Bridge the visual gap
-            // directly with a row of large boulders along its lower-front edge, each individually
-            // raycast-placed (not sharing one guessed height).
-            for (int bi = -2; bi <= 2; bi++)
-            {
-                if (boulder == null) continue;
-                float bt = bi / 2f * halfWidthWorld * 0.75f;
-                Vector2 bXZ = anchorC + tangentC * bt - dirC * (1f + (float)rng.NextDouble() * 1.5f); // pulled slightly toward the lake, in front of the band's base
-                float bScale = 2.0f + (float)rng.NextDouble() * 1.3f;
-                var bInst = PlaceBoulderEmbedded(boulder, wallRoot.transform, terrain, bXZ.x, bXZ.y, bScale, 0.4f, rng, "HeroCoastalCliffBase_" + bi);
-                if (bInst != null) placed++;
-            }
-        }
+        // coastal_cliff_01 ("HeroCoastalCliffBand" + its HeroCoastalCliffBase_* boulder row): a
+        // wide (92m native) exposed cliff-strata backdrop directly across the water from the
+        // bridge, previously placed here. 2026-08-29 REMOVED (explicit user request,
+        // "HeroCoastalCliffBandも邪魔なので消して"): after LakeRadiusZ was shrunk (20->10) it kept
+        // ending up in the way near the lake/slope area even after being pushed back once already
+        // (anchor multiplier 1.28->2.4, see git history). Rather than keep re-tuning a backdrop
+        // feature the smaller lake no longer has clean room for, the placement call is removed
+        // outright. The source FBX (coastal_cliff_01) is untouched on disk, so this can be
+        // reinstated (and re-tuned for the current lake size) later if wanted -- see git history
+        // (CarryBuildTerrainForest.cs, this comment's location) for the removed code.
 
         var coastRocksPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "coast_rocks_01/coast_rocks_01_decimated.fbx");
         if (coastRocksPrefab != null)
@@ -1677,7 +1711,7 @@ public static class CarryBuildTerrainForest
         var center = new Vector2(LakeCenterX, LakeCenterZ);
 
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
-        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var rootCluster2Prefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "root_cluster_02/root_cluster_02_decimated.fbx");
         float rootCluster2BottomY = GetPrefabBottomLocalY(rootCluster2Prefab);
         var boulder = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "boulder_01/boulder_01_2k.fbx");
@@ -1928,7 +1962,7 @@ public static class CarryBuildTerrainForest
         // throughout this stage, so nothing floats. Parented to bridgeRoot (unscaled), NOT the
         // visual wrapper, so their own uniform scale isn't distorted by the wrapper's non-uniform one. ----
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
-        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var mossSets = LoadIndividualMossRocks();
         const float rootsTopLocal = 0.122f;
         var embRng = new System.Random(3344);
@@ -2321,7 +2355,7 @@ public static class CarryBuildTerrainForest
         // measured-topLocal placement technique (proven not to float) so the bridge's footprint
         // reads as embedded in the bank rather than a prefab dropped on top of the terrain. ----
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
-        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var mossSets = LoadIndividualMossRocks();
         const float rootsTopLocal = 0.122f;
         var embRng = new System.Random(9911);
@@ -2887,37 +2921,95 @@ public static class CarryBuildTerrainForest
         log.AppendLine(fbxPath + " materials fixed: " + fixedCount);
     }
 
-    // ---- Stone staircase: the ONE official way back onto land from the lake. Positioned at
+    // ---- Lake exit SLOPE: the ONE official way back onto land from the lake. Positioned at
     // StairsAngleDeg, the only other angular window (besides the river inlet) where LakeFactor
-    // leaves a gentle grade -- everywhere else around the rim is cliff. Steps are old, mossy,
-    // and irregular (varied size/rotation/riser), not uniform blocks, per the reference photo's
-    // "long-abandoned, forest-reclaimed" feel. Climbs from the water up to the actual local rim
-    // height (not an arbitrary fixed height), so it always reaches real, walkable land. ----
+    // leaves a gentle grade -- everywhere else around the rim is cliff.
+    // 2026-08-29 REDESIGN (user: "階段だと一段上るごとにポーションがこぼれてしまう可能性が
+    // あるため、スロープに変更。スロープの位置は橋に近い位置にして"): replaced the discrete
+    // stacked-block staircase (each block a separate riser + its own BoxCollider -- climbing it
+    // meant the goblin's root literally stepped up by `riser` every 0.6m, jolting the carried pot
+    // each time) with thin flush paving slabs that follow the terrain's own already-smooth slope
+    // (see the LakeGentleWeight continuous-arc fix) with NO per-slab height jump and NO individual
+    // colliders -- purely decorative dressing on top of ONE continuous smooth ramp collider, so
+    // there is nothing to "step up" onto while carrying a full pot. Angle moved 55->15 (closer to
+    // the bridge, still inside the merged gentle arc and clear of the river current at the inlet). ----
     static void BuildStairs(GameObject root, Terrain terrain, StringBuilder log)
     {
-        var stairsRoot = new GameObject("LakeStairs");
+        var stairsRoot = new GameObject("LakeSlope");
         stairsRoot.transform.SetParent(root.transform, false);
-        var step = AssetDatabase.LoadAssetAtPath<GameObject>(Kenney + "cliff_blockQuarter_stone.fbx");
-        if (step == null) { log.AppendLine("Stairs: cliff_blockQuarter_stone.fbx not found, skipped."); return; }
+        var slab = AssetDatabase.LoadAssetAtPath<GameObject>(Kenney + "cliff_blockQuarter_stone.fbx");
+        if (slab == null) { log.AppendLine("LakeSlope: cliff_blockQuarter_stone.fbx not found, skipped."); return; }
 
         Vector2 center = new Vector2(LakeCenterX, LakeCenterZ);
         Vector2 shorePt = FindShoreAtAngle(StairsAngleDeg);
         Vector2 climbDir = (shorePt - center).normalized;
-        float climbCompassAngle = Mathf.Atan2(climbDir.x, climbDir.y) * Mathf.Rad2Deg;
-        float baseRotY = climbCompassAngle - 180f; // risers face back down toward the lake
 
-        // Land height: sample well past the shore, out on solid rim ground, so the stairs climb
-        // to wherever the actual gentle slope tops out (rather than an arbitrary fixed height).
-        Vector2 landPt = center + climbDir * (Vector2.Distance(shorePt, center) + 9f);
-        float landY = SampleWorldHeight(terrain, landPt.x, landPt.y);
+        // Path control points (XZ): starts straight out along climbDir from the shore (the
+        // underwater/near-shore grade), then bends toward the bridge's east embankment for the
+        // final approach onto dry, walkable ground.
+        // 2026-08-29 (user: "13~1も調整して一本のスロープにして...スクリプト側に組み込んで"):
+        // the bend section used to be hand-placed live in the Editor (angled slabs one at a time,
+        // eyeballed against the embankment) to reach the plateau smoothly; captured here as
+        // control points so the WHOLE slope -- straight run and bend alike -- rebuilds
+        // identically from script, all with the same real-terrain-sampled tilt (no more split
+        // between a "flat auto" section and a "hand-tilted" section). Tied to StairsAngleDeg=15
+        // and the bridge's current position -- re-measure (live terrain.SampleHeight scan) if
+        // either moves again.
+        // 2026-08-29 SECOND FIX (found by actually walking the goblin up it a second time --
+        // stuck dead at (4.46,-2.5,0.99), CollisionFlags.Sides, even after the terrain-carve fix
+        // above): the path was cutting straight through AbutmentCollider_East (BuildMeshyBridge's
+        // "block bypass" wall spanning X[-0.32,4.8] Z[1.8,8.2], there specifically to stop players
+        // walking/swimming around the bridge instead of over it) -- a real, working collider doing
+        // exactly its intended job, just one this path wasn't routed to avoid. Shortened the
+        // straight run and bent it wider east (past X=4.8) before Z enters the abutment's [1.8,8.2]
+        // band, going around the block instead of through it.
+        Vector2 bendStart = shorePt + climbDir * 8f; // X~4.2, Z~-0.3 -- still short of the abutment's Z=1.8 start
+        // 2026-08-29 THIRD FIX (found by actually walking the goblin up it a third time -- got
+        // stuck dead, pure CollisionFlags.Sides with NO ground contact, at the (6.5,1.5) turn):
+        // that single sharp corner turned the path ~65deg over a short arc -- with the 4.2m-wide
+        // ribbon's half-width (2.1m) bigger than the turn's own radius there, the inner-edge
+        // vertices crossed past each other and folded the mesh back on itself, so the goblin was
+        // literally walking into the BACK of a self-intersecting fold, not a real slope. Split into
+        // two gentler turns (adds one more waypoint) so no single corner turns sharply enough for
+        // the ribbon width to fold.
+        // 2026-08-29 FOURTH FIX (user: "スムーズにさかは登れるけど橋に上れない" -- the slope
+        // itself climbs fine, but its old endpoint (6.0,6.5) just sits on the ground beside
+        // BridgeEmbankment_1, ~0.7m below and to the side of the actual bridge deck -- there was
+        // never a connection onto the deck itself). Extended the path onto the deck's own east tip:
+        // WalkableColliderSeg_15 (the deck's last collider segment) has its walking surface measured
+        // live at world Y=1.37, X-range ~3.6-5.1, Z-range ~2-8 -- aimed the final stretch at
+        // (5.0, 5.0), just inside that footprint (X>4.84 keeps it past AbutmentCollider_East's edge
+        // the whole way, same reasoning as the second fix above). The climb-rate cap + terrain-carve
+        // logic below happily continues past where natural terrain tops out (~-0.2 here) since
+        // slabs only ever compare against the previous slab's height, not raw terrain, once terrain
+        // stops being the limiting factor -- it just keeps climbing at the capped rate until it
+        // reaches the deck.
+        var ctrlXZ = new[]
+        {
+            shorePt + climbDir * -0.5f,
+            bendStart,
+            new Vector2(5.4f, 0.6f),  // first, gentler turn -- starts curving east
+            new Vector2(6.6f, 2.4f),  // clears X=4.8 (the abutment's east edge); second turn, much shallower than before
+            new Vector2(6.3f, 5.3f),
+            // 2026-08-29 SIXTH FIX (found by walking the goblin up it a fifth time -- stuck again,
+            // right at (6.0,0.74,6.5)): that point used to be the OLD endpoint, kept here only to
+            // add path LENGTH for the climb -- but going (6.3,5.3)->(6.0,6.5)->(5.6,5.9) reverses
+            // Z direction almost 180deg (a hairpin), which folds the ribbon mesh the same way the
+            // THIRD fix already found once (self-intersecting inner edge at a too-sharp turn). Not
+            // actually needed anymore: the force-climb-toward-deck logic above reaches the target
+            // height by STEP COUNT, not by path length/shape, so a short direct run is enough --
+            // removed the backtrack entirely.
+            new Vector2(5.6f, 5.1f),
+            new Vector2(5.0f, 5.0f), // end: onto WalkableColliderSeg_15's own surface, the bridge deck's east tip
+        };
 
-        const float stepRiserLocal = 0.25f; // measured height of cliff_blockQuarter_stone at scale 1
-        float riser = 0.30f;
-        float yScale = riser / stepRiserLocal;
+        const float slabThicknessLocal = 0.25f; // measured height of cliff_blockQuarter_stone at scale 1
+        float slabThickness = 0.10f; // thin flush paving, not a riser -- was 0.30f (a real stair step height)
+        float yScale = slabThickness / slabThicknessLocal;
 
         // The FBX's own imported material reference resolved to Kenney's flat-green "grass.mat"
         // instead of "stone.mat" (a stale/incorrect name-matched link from a much earlier import),
-        // which made every step render as a flat green box. Force the correct stone material here,
+        // which made every slab render as a flat green box. Force the correct stone material here,
         // darkened and slightly green-tinted so the old flat Kenney toon-stone reads as aged/mossy
         // rather than clashing with the realistic PolyHaven rock around it.
         var kenneyStoneMat = AssetDatabase.LoadAssetAtPath<Material>(Kenney + "Materials/stone.mat");
@@ -2932,61 +3024,221 @@ public static class CarryBuildTerrainForest
             if (oldMossyStoneMat.HasProperty("_Smoothness")) oldMossyStoneMat.SetFloat("_Smoothness", 0.05f);
         }
 
+        // Resample the control polyline at a fixed step so both the straight run and the bend use
+        // one uniform placement loop (piecewise-linear is fine here -- the control points are
+        // already dense enough that a spline wouldn't visibly differ).
+        const float step = 0.65f;
+        var pathPts = new List<Vector2>();
+        for (int seg = 0; seg < ctrlXZ.Length - 1; seg++)
+        {
+            Vector2 a = ctrlXZ[seg], b = ctrlXZ[seg + 1];
+            float segLen = Vector2.Distance(a, b);
+            int subSteps = Mathf.Max(1, Mathf.RoundToInt(segLen / step));
+            for (int s = (seg == 0 ? 0 : 1); s <= subSteps; s++) // skip duplicate joint point between segments
+                pathPts.Add(Vector2.Lerp(a, b, s / (float)subSteps));
+        }
+
         var rng = new System.Random(4477);
         int i = 0;
-        int maxSteps = 26;
-        float y = LakeWaterY - 0.2f;
-        while (y < landY + 0.1f && i < maxSteps)
+        var pathY = new List<float>(pathPts.Count); // captured per-point so the collider ribbon built below matches the visual slabs exactly
+        // Each slab's height is sampled from the ACTUAL terrain at its own XZ (not assumed/
+        // interpolated), so the paving always sits flush with whatever the real, already-smooth
+        // slope is doing at that point. Tilt is likewise computed from the real rise between
+        // consecutive samples (not a fixed value), so the straight run and the bend both read as
+        // one continuous grade instead of a flat section meeting an angled one.
+        // 2026-08-29 FIFTH FIX (user: "スムーズにさかは登れるけど橋に上れない" -- even after
+        // extending ctrlXZ to end on the deck's own tip, the built path only reached Y~-0.44,
+        // nowhere near the deck's measured Y=1.37): `y = Max(groundY-0.05, lastY)` only ever
+        // FOLLOWS terrain -- once the path went past where natural ground stops rising (it
+        // plateaus/dips back down well before the deck), lastY was already above groundY-0.05
+        // everywhere from there on, so Max() just picked lastY forever and the climb went
+        // perfectly flat for the entire tail, capped-rate or not. The cap was never the limiter
+        // here; there was simply nothing left telling it to keep climbing. Forces a climb toward
+        // the deck's own measured surface height over the final stretch of the path (still
+        // respecting the same per-step cap), instead of only ever reacting to terrain.
+        const float maxClimbDeg = 38f; // comfortably under CharacterController.slopeLimit=50deg (confirmed by actually walking the goblin up it)
+        float maxStepRise = step * Mathf.Tan(maxClimbDeg * Mathf.Deg2Rad);
+        const float deckTargetY = 1.30f; // WalkableColliderSeg_15's measured top (1.37) minus a small embed
+        // 2026-08-29: 10 -> 16 -- measured live that the force-climb window was starting ~4.2m
+        // below the deck target with only 10 steps * the 38deg-capped max rise (0.507m/step)
+        // available (5.07m) -- just short of the ~5.5m actually needed, so it plateaued at Y~0.86
+        // instead of reaching the deck's 1.30. 16 steps (8.1m of climb budget) reaches the target
+        // with room to spare and flattens out comfortably before the very end instead of arriving
+        // exactly on the last point.
+        const int forceClimbTailPoints = 16;
+        float lastY = LakeWaterY - 0.2f;
+        for (; i < pathPts.Count; i++)
         {
-            Vector2 p = shorePt + climbDir * (i * 0.6f - 0.5f);
-            var inst = (GameObject)PrefabUtility.InstantiatePrefab(step, stairsRoot.transform);
-            inst.name = "LakeStair_" + i;
-            float wobble = ((float)rng.NextDouble() - 0.5f) * 10f;
+            Vector2 p = pathPts[i];
+            float groundY = SampleWorldHeight(terrain, p.x, p.y);
+            float y = Mathf.Max(groundY - 0.05f, lastY); // flush embed; never lower than the previous slab (monotonic climb, but no forced jump)
+            if (pathPts.Count - 1 - i < forceClimbTailPoints)
+                y = Mathf.Max(y, Mathf.Min(deckTargetY, lastY + maxStepRise)); // keep pushing toward the deck at the capped rate, terrain permitting or not
+            // 2026-08-29 FIX (user tested by actually walking the goblin up it -- got stuck around
+            // slab 17): the raw terrain here rises much faster in one short stretch than it does on
+            // average (measured: slab 17->18 alone was a 1.34m rise over one 0.65m step, a ~64deg
+            // local grade) -- CharacterController.slopeLimit is 50deg, so the goblin just slid back
+            // down there regardless of how flush/gap-free the collider mesh was. Cap the climb rate
+            // to a comfortably-walkable ~38deg (well under the 50deg limit) so the built path can
+            // never locally out-climb what the goblin can actually walk, even where the raw ground
+            // underneath it is steeper -- exactly what a constructed ramp/walkway is for.
+            y = Mathf.Min(y, lastY + maxStepRise);
+            pathY.Add(y);
+
+            Vector2 tangent = (i < pathPts.Count - 1 ? pathPts[i + 1] - p : p - pathPts[i - 1]).normalized;
+            float headingDeg = Mathf.Atan2(tangent.x, tangent.y) * Mathf.Rad2Deg - 180f; // slabs face back down toward the lake
+            float tiltX = i == 0 ? 0f : Mathf.Clamp(Mathf.Atan2(y - lastY, step) * Mathf.Rad2Deg, 0f, 32f); // matches maxClimbDeg's steepest sections closely without a near-edge-on slab mesh
+
+            var inst = (GameObject)PrefabUtility.InstantiatePrefab(slab, stairsRoot.transform);
+            inst.name = "LakeSlopeSlab_" + i;
+            float wobble = ((float)rng.NextDouble() - 0.5f) * 8f;
             float scaleJ = 1f + ((float)rng.NextDouble() - 0.5f) * 0.25f;
-            inst.transform.localScale = new Vector3(1.5f * scaleJ, yScale * (0.85f + (float)rng.NextDouble() * 0.3f), 1.5f * scaleJ);
-            inst.transform.position = new Vector3(p.x, y + ((float)rng.NextDouble() - 0.5f) * 0.04f, p.y);
-            inst.transform.rotation = Quaternion.Euler(0f, baseRotY + wobble, 0f);
-            inst.AddComponent<BoxCollider>(); // auto-fits to the mesh bounds
+            // ~4m tread width (widened 2026-08-29 per "階段狭くない?") -- kept wide so the goblin
+            // never has to hug the edge while carrying a full pot.
+            inst.transform.localScale = new Vector3(3.2f * scaleJ, yScale * (0.85f + (float)rng.NextDouble() * 0.3f), 1.5f * scaleJ);
+            inst.transform.position = new Vector3(p.x, y, p.y);
+            inst.transform.rotation = Quaternion.Euler(tiltX, headingDeg + wobble, 0f);
+            // No BoxCollider here (deliberately) -- these are purely decorative flush paving. A
+            // discrete collider box per slab, even a thin one, still gives the CharacterController
+            // a hard edge to catch on between slabs; the one smooth ramp collider below is the
+            // only walking surface, exactly the "nothing to step up onto" the redesign needs.
             if (oldMossyStoneMat != null)
             {
                 foreach (var mr in inst.GetComponentsInChildren<MeshRenderer>())
                     mr.sharedMaterial = oldMossyStoneMat;
             }
 
-            y += riser;
-            i++;
+            lastY = y;
         }
 
-        // Supplementary smooth ramp Collider underneath the visual steps (permitted explicitly --
-        // guarantees reliable climbing regardless of how the individual auto-fit step boxes line
-        // up with each other; the visual stones stay irregular, only the collision is smoothed).
+        // 2026-08-29 FIX (found while actually walking the goblin up the slope, see the collider
+        // comment below): capping the climb rate to a walkable ~38deg (previous edit) means the
+        // ramp's own surface now sits BELOW the raw terrain in the one stretch where the real
+        // ground rises much faster (up to ~64deg locally) -- the goblin was walking into that
+        // still-steep hillside from the side (CollisionFlags.Sides, stuck dead) even though the
+        // ramp collider itself was perfectly smooth. Carve the terrain down to the ramp's own
+        // height in a corridor along the path (never raise -- a real ramp is cut INTO a hillside,
+        // not built up over it) so nothing is left for the goblin to collide with sideways.
+        {
+            var data = terrain.terrainData;
+            float originX = terrain.transform.position.x, originY = terrain.transform.position.y, originZ = terrain.transform.position.z;
+            float sizeX = data.size.x, sizeY = data.size.y, sizeZ = data.size.z;
+            int hr = data.heightmapResolution;
+            const float coreHalfWidth = 2.3f, outerHalfWidth = 4.5f; // core matches the ~4.2m tread; falloff blends back to the natural hillside
+            var heights = data.GetHeights(0, 0, hr, hr);
+
+            float minX = pathPts[0].x, maxX = pathPts[0].x, minZ = pathPts[0].y, maxZ = pathPts[0].y;
+            foreach (var pp in pathPts) { minX = Mathf.Min(minX, pp.x); maxX = Mathf.Max(maxX, pp.x); minZ = Mathf.Min(minZ, pp.y); maxZ = Mathf.Max(maxZ, pp.y); }
+            minX -= outerHalfWidth + 1f; maxX += outerHalfWidth + 1f; minZ -= outerHalfWidth + 1f; maxZ += outerHalfWidth + 1f;
+            int minXi = Mathf.Max(0, Mathf.FloorToInt((minX - originX) / sizeX * (hr - 1)));
+            int maxXi = Mathf.Min(hr - 1, Mathf.CeilToInt((maxX - originX) / sizeX * (hr - 1)));
+            int minZi = Mathf.Max(0, Mathf.FloorToInt((minZ - originZ) / sizeZ * (hr - 1)));
+            int maxZi = Mathf.Min(hr - 1, Mathf.CeilToInt((maxZ - originZ) / sizeZ * (hr - 1)));
+
+            int carved = 0;
+            for (int zi = minZi; zi <= maxZi; zi++)
+            {
+                float worldZ = originZ + (zi / (float)(hr - 1)) * sizeZ;
+                for (int xi = minXi; xi <= maxXi; xi++)
+                {
+                    float worldX = originX + (xi / (float)(hr - 1)) * sizeX;
+                    Vector2 p2 = new Vector2(worldX, worldZ);
+
+                    float bestDist = float.MaxValue, bestY = 0f;
+                    for (int pi = 1; pi < pathPts.Count; pi++)
+                    {
+                        Vector2 a = pathPts[pi - 1], b = pathPts[pi];
+                        Vector2 ab = b - a;
+                        float len2 = ab.sqrMagnitude;
+                        float t = len2 > 1e-6f ? Mathf.Clamp01(Vector2.Dot(p2 - a, ab) / len2) : 0f;
+                        Vector2 proj = a + ab * t;
+                        float d = Vector2.Distance(p2, proj);
+                        if (d < bestDist) { bestDist = d; bestY = Mathf.Lerp(pathY[pi - 1], pathY[pi], t); }
+                    }
+                    if (bestDist > outerHalfWidth) continue;
+
+                    float originalWorldY = originY + heights[zi, xi] * sizeY;
+                    float rampTargetY = bestY - 0.15f; // carve a bit below the ramp surface itself, not flush with it
+                    float weight = bestDist <= coreHalfWidth ? 1f : 0.5f * (1f + Mathf.Cos((bestDist - coreHalfWidth) / (outerHalfWidth - coreHalfWidth) * Mathf.PI));
+                    float targetY = Mathf.Lerp(originalWorldY, rampTargetY, weight);
+                    float newWorldY = Mathf.Min(targetY, originalWorldY); // carve only -- never raise terrain above what it already was
+                    if (newWorldY < originalWorldY - 0.02f) carved++;
+                    heights[zi, xi] = Mathf.Clamp01((newWorldY - originY) / sizeY);
+                }
+            }
+            data.SetHeights(0, 0, heights);
+            var tc = terrain.GetComponent<TerrainCollider>();
+            var tdRef = tc.terrainData; tc.terrainData = null; tc.terrainData = tdRef; // recook (see CLAUDE.md 既知の落とし穴 / Run()'s own stale-collider fix)
+            Physics.SyncTransforms();
+            log.AppendLine("LakeSlope: carved terrain under the ramp corridor, " + carved + " cells lowered.");
+        }
+
+        // The ONE walking surface: a single continuous ribbon MeshCollider following pathPts/pathY
+        // exactly (same points, same heights as the visual slabs -- built with the same AddRibbon
+        // helper the cliff wall/waterfalls already use for exactly this "no seams" reason).
+        // 2026-08-29 FIX (user: "現在は...この道を通って端に戻るのは不可能になっている"):
+        // the previous version chained 4 independent BoxColliders (one per ctrlXZ segment), each
+        // extended past its own segment's endpoints by a small margin to overlap its neighbor --
+        // that only guarantees overlap for a STRAIGHT continuation. At the actual bend (where the
+        // path turns from the straight climb to angle toward the embankment) the two segments'
+        // margins extend in genuinely different directions, leaving a real ~0.4-0.6m gap in the
+        // collision right at the turn (confirmed by measuring the boxes' own world endpoints) --
+        // exactly where a goblin climbing out would fall through. A single mesh has no seams to
+        // gap regardless of how sharply the path turns.
         if (i > 0)
         {
-            Vector2 startP = shorePt + climbDir * -0.5f;
-            Vector2 endP = shorePt + climbDir * ((i - 1) * 0.6f + 0.1f);
-            Vector3 startPos = new Vector3(startP.x, LakeWaterY - 0.2f, startP.y);
-            Vector3 endPos = new Vector3(endP.x, LakeWaterY - 0.2f + i * riser, endP.y);
-            var ramp = new GameObject("StairsRampCollider");
-            ramp.transform.SetParent(stairsRoot.transform, false);
-            ramp.transform.position = (startPos + endPos) * 0.5f;
-            ramp.transform.rotation = Quaternion.LookRotation((endPos - startPos).normalized);
-            var rampBox = ramp.AddComponent<BoxCollider>();
-            rampBox.size = new Vector3(2.4f, 0.35f, Vector3.Distance(startPos, endPos) + 0.6f);
+            var lineL = new Vector3[pathPts.Count];
+            var lineR = new Vector3[pathPts.Count];
+            for (int pi = 0; pi < pathPts.Count; pi++)
+            {
+                Vector2 tangent = (pi < pathPts.Count - 1 ? pathPts[pi + 1] - pathPts[pi] : pathPts[pi] - pathPts[pi - 1]).normalized;
+                // Defensive half-width clamp against sharp turns (belt-and-suspenders alongside
+                // gentling ctrlXZ's own corners above): at a tight turn, a fixed 2.1m half-width can
+                // exceed the turn's own radius, crossing the inner-edge vertices and folding the
+                // ribbon mesh back on itself -- exactly what stranded the goblin on a "wall" that
+                // was actually the back of a self-intersecting fold (found by actually walking it up
+                // the slope). Shrinking toward tight turns guarantees the two edges never cross,
+                // regardless of what future control-point edits do to this path.
+                float turnDeg = 0f;
+                if (pi > 0 && pi < pathPts.Count - 1)
+                {
+                    Vector2 tIn = (pathPts[pi] - pathPts[pi - 1]).normalized;
+                    Vector2 tOut = (pathPts[pi + 1] - pathPts[pi]).normalized;
+                    turnDeg = Vector2.Angle(tIn, tOut);
+                }
+                float halfWidth = Mathf.Lerp(2.1f, 0.6f, Mathf.Clamp01(Mathf.InverseLerp(15f, 60f, turnDeg)));
+                Vector2 perp = new Vector2(-tangent.y, tangent.x) * halfWidth;
+                lineL[pi] = new Vector3(pathPts[pi].x - perp.x, pathY[pi], pathPts[pi].y - perp.y);
+                lineR[pi] = new Vector3(pathPts[pi].x + perp.x, pathY[pi], pathPts[pi].y + perp.y);
+            }
+            var rVerts = new List<Vector3>(); var rTris = new List<int>(); var rUVs = new List<Vector2>();
+            AddRibbon(rVerts, rTris, rUVs, lineL, lineR, 1f);
+            var rampMesh = new Mesh { name = "SlopeColliderMesh" };
+            rampMesh.SetVertices(rVerts); rampMesh.SetTriangles(rTris, 0);
+            rampMesh.RecalculateNormals(); rampMesh.RecalculateBounds();
+            var rampGo = new GameObject("SlopeCollider");
+            rampGo.transform.SetParent(stairsRoot.transform, false);
+            var rampCol = rampGo.AddComponent<MeshCollider>();
+            rampCol.sharedMesh = rampMesh;
+            rampCol.convex = false;
         }
-
-        // Moss/rock/root dressing flanking the stairs so they read as embedded in the cliff,
-        // not stuck on top of it, using the same proven (fixed-height) placement as the bridge.
+        // Moss/rock/root dressing flanking the slope so it reads as embedded in the bank, not
+        // stuck on top of it -- scattered by nearest-point-on-path distance (works for the curved
+        // bend the same as the straight run, unlike a single climbDir projection).
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
-        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var rootsPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var mossSets = LoadIndividualMossRocks();
         const float rootsTopLocal = 0.122f;
-        Vector2 sideDir = new Vector2(-climbDir.y, climbDir.x);
         for (int k = 0; k < 10; k++)
         {
-            float along = (float)rng.NextDouble() * (i * 0.6f + 3f);
-            float side = ((float)rng.NextDouble() - 0.5f) * 6f;
-            if (Mathf.Abs(side) < 1.1f) continue; // keep the steps themselves clear
-            Vector2 p = shorePt + climbDir * along + sideDir * side;
+            int pi = rng.Next(pathPts.Count);
+            Vector2 along = pathPts[pi];
+            Vector2 pathTangent = pi < pathPts.Count - 1
+                ? (pathPts[pi + 1] - along).normalized
+                : (along - pathPts[pi - 1]).normalized;
+            Vector2 side = new Vector2(-pathTangent.y, pathTangent.x) * (((float)rng.NextDouble() - 0.5f) * 2f) * 4f;
+            if (side.magnitude < 2.2f) continue; // keep the slabs themselves clear (widened along with them)
+            Vector2 p = along + side;
             float groundY = SampleWorldHeight(terrain, p.x, p.y);
             bool useRoot = rng.Next(3) == 0;
             var prefab = useRoot ? rootsPrefab : mossSets[rng.Next(mossSets.Length)];
@@ -3001,8 +3253,8 @@ public static class CarryBuildTerrainForest
             inst.transform.position = new Vector3(p.x, topY - topLocal * scale, p.y);
         }
 
-        log.AppendLine("Lake stairs built: " + i + " steps at angle=" + StairsAngleDeg.ToString("F0") +
-            ", shore=(" + shorePt.x.ToString("F1") + "," + shorePt.y.ToString("F1") + "), landY=" + landY.ToString("F2") + ".");
+        log.AppendLine("Lake slope built: " + i + " slabs at angle=" + StairsAngleDeg.ToString("F0") +
+            ", shore=(" + shorePt.x.ToString("F1") + "," + shorePt.y.ToString("F1") + "), end=" + ctrlXZ[ctrlXZ.Length - 1].ToString("F1") + ".");
     }
 
 
@@ -3016,7 +3268,7 @@ public static class CarryBuildTerrainForest
         var boulder = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "boulder_01/boulder_01_2k.fbx");
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
         var logPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "dead_tree_trunk_02/dead_tree_trunk_02_2k.fbx");
-        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var ruinSlab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/ExternalAssets/KenneyNatureKit/Models/FBX format/path_stone.fbx");
         var mossSets = LoadIndividualMossRocks();
         var dirtMat = GetOrCreateMat("Mat_DirtMound", AssetDatabase.LoadAssetAtPath<Texture2D>(PH + "mud_forest/mud_forest_diff_2k.jpg"), new Vector2(2f, 2f));
@@ -3289,12 +3541,44 @@ public static class CarryBuildTerrainForest
 
         var triggerGo = new GameObject("RiverTriggerVolume");
         triggerGo.transform.SetParent(riverRoot.transform, false);
+        // 2026-08-29: RiverZ1 -> SwampZ1 so falling through a collapsed Stage 2 foothold (see
+        // CollapsingFoothold.cs) out in the swamp still lands in this same trigger volume and gets
+        // swept back by RiverFlowController, same as falling anywhere on the Stage 1 river.
         float centerZ = (CourseZ0 + RiverZ1) * 0.5f;
         triggerGo.transform.position = new Vector3(0f, refWaterY - 1.3f, centerZ);
         var box = triggerGo.AddComponent<BoxCollider>();
         box.isTrigger = true;
         box.size = new Vector3(TerrainWidth - 4f, 2.4f, RiverZ1 - CourseZ0);
         triggerGo.AddComponent<RiverTriggerZone>();
+
+        // 2026-08-29 FOURTH PASS (found via live Play-mode foothold testing -- even a STABLE swamp
+        // foothold's goblin got swept away the instant it stood there): the original single
+        // fixed-height box referenced ONE water sample at the swamp's midpoint (z=174), but
+        // WaterYAt swings by over 2m across the swamp's length (measured live: -2.62 at z=110 vs.
+        // -0.48 at z=210). At most z positions that fixed box's ceiling ended up ABOVE the local
+        // foothold's underside (CarryBuildSwampFootholds sits footholds at WaterYAt(z)+0.55), so
+        // simply standing on a swamp foothold put the goblin's feet inside the "fell in water"
+        // trigger. Replaced with a chain of short segments, each sampling WaterYAt at its own z so
+        // the trigger's ceiling tracks the true local water surface everywhere along the swamp
+        // (fixed 0.25m clearance below the footholds' own underside), not just near the one
+        // reference point.
+        const float swampTriggerSegLen = 4f;
+        const float swampTriggerTopMargin = 0.15f; // stays 0.40m below the footholds' 0.55m water clearance -- extra headroom vs. the flat WaterYAt formula absorbs the small per-piece random roll/pitch tilt CarryBuildSwampFootholds applies, which can dip a long piece's lowest corner a few cm below its flat-formula height
+        const float swampTriggerHeight = 4f;
+        for (float segZ0 = RiverZ1; segZ0 < SwampZ1; segZ0 += swampTriggerSegLen)
+        {
+            float segZ1 = Mathf.Min(segZ0 + swampTriggerSegLen, SwampZ1);
+            float segCenterZ = (segZ0 + segZ1) * 0.5f;
+            float localWaterY = WaterYAt(segCenterZ);
+            var segGo = new GameObject("SwampTriggerVolume_" + Mathf.RoundToInt(segCenterZ));
+            segGo.transform.SetParent(riverRoot.transform, false);
+            float topY = localWaterY + swampTriggerTopMargin;
+            segGo.transform.position = new Vector3(0f, topY - swampTriggerHeight * 0.5f, segCenterZ);
+            var segBox = segGo.AddComponent<BoxCollider>();
+            segBox.isTrigger = true;
+            segBox.size = new Vector3(TerrainWidth - 4f, swampTriggerHeight, (segZ1 - segZ0) + 0.4f); // small Z overlap between segments so there's no seam gap
+            segGo.AddComponent<RiverTriggerZone>();
+        }
 
         var flowGo = new GameObject("RiverFlowController");
         flowGo.transform.SetParent(riverRoot.transform, false);
@@ -3555,6 +3839,8 @@ public static class CarryBuildTerrainForest
                 float rx = RiverX(jz);
                 float hw = RiverHalfWidth(jz);
                 if (hw > 0.01f && Mathf.Abs(jx - rx) < hw + BankFalloff + 2.5f + marginNoise) continue; // keep the channel + banks clear
+                float swHwHere = SwampHalfWidth(jz);
+                if (swHwHere > 0.01f && Mathf.Abs(jx - SwampX(jz)) < swHwHere + BankFalloff + 2.5f + marginNoise) continue; // keep the Stage 2 swamp channel clear too
                 float lakeF = LakeFactor(jx, jz);
                 if (lakeF > 0.08f) continue; // keep the lake and its shore clear
                 if (jz > BridgeZ0 - 3f && jz < BridgeZ1 + 3f && Mathf.Abs(jx - bridgeCenterX) < bridgeHalfSpanX) continue; // keep the (now wide) bridge crossing clear
@@ -3599,7 +3885,11 @@ public static class CarryBuildTerrainForest
                 float distToEdge = Mathf.Min(distToEdgeX, distToEdgeZ);
                 float edgeBoost = Mathf.Clamp01(Mathf.InverseLerp(30f, 6f, distToEdge)) * 0.22f;
 
-                if ((float)rng.NextDouble() > 0.58f + rimBoost + edgeBoost) continue; // thinned for the heavier realistic meshes (was 0.72 when most trees were cheap stylized ones)
+                // Stage 2 gradient: ordinary forest trees thin out as the swamp takes over (per
+                // "木: 通常の森の木の密度をswampTに応じて減らす") -- down to ~15% of normal density at
+                // full swamp, not zero, so it doesn't read as an abrupt empty clearing.
+                float swampDensityMul = 1f - SwampBlendT(jz) * 0.85f;
+                if ((float)rng.NextDouble() > (0.58f + rimBoost + edgeBoost) * swampDensityMul) continue; // thinned for the heavier realistic meshes (was 0.72 when most trees were cheap stylized ones)
 
                 // Every tree is now one of the realistic photoscan species -- no more style split
                 // between an "ordinary" cheap species and "special" realistic giants. isGiant now
@@ -4219,10 +4509,10 @@ public static class CarryBuildTerrainForest
         var detailRoot = new GameObject("GroundDetail");
         detailRoot.transform.SetParent(root.transform, false);
 
-        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var branches = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "dry_branches_medium_01/dry_branches_medium_01_2k.fbx");
         var mossRocks = LoadIndividualMossRocks(); // see LoadIndividualMossRocks() -- was rock_moss_set_01_2k.fbx directly (a 6-rock bundle placed as one rigid prop)
-        var rootCluster = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "root_cluster_01/root_cluster_01_1k.fbx");
+        var rootCluster = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "root_cluster_01/root_cluster_01_decimated.fbx");
         // fern_02/grass_medium_01/moss_01 removed from ground litter -- these small plants
         // were showing up visibly floating above the ground from some camera angles.
         // fir_sapling/pine_sapling_small ("Sapling_*") removed entirely per feedback.
@@ -4302,9 +4592,9 @@ public static class CarryBuildTerrainForest
         var clutterRoot = new GameObject("ForestFloorClutter");
         clutterRoot.transform.SetParent(root.transform, false);
 
-        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k.fbx");
+        var roots = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "pine_roots/pine_roots_2k_decimated.fbx");
         var branches = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "dry_branches_medium_01/dry_branches_medium_01_2k.fbx");
-        var barkDebris = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "bark_debris_01/bark_debris_01_2k.fbx");
+        var barkDebris = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "bark_debris_01/bark_debris_01_decimated.fbx");
         // see LoadIndividualMossRocks() for why this is no longer the raw rock_moss_set_01/02 FBX
         var boulder = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "boulder_01/boulder_01_2k.fbx");
         var logPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "dead_tree_trunk_02/dead_tree_trunk_02_2k.fbx");
@@ -4315,8 +4605,8 @@ public static class CarryBuildTerrainForest
         // vertical CENTER of the combined pack (measured via Blender), not at the base like the
         // other props here, so placement below anchors off the pack's measured bottom-Y instead of
         // a "topLocal" offset.
-        var shrub1 = SetupShrubPrefab(PH + "shrub_01/shrub_01_1k.fbx", "shrub_01", log);
-        var shrub2 = SetupShrubPrefab(PH + "shrub_02/shrub_02_1k.fbx", "shrub_02", log);
+        var shrub1 = SetupShrubPrefab(PH + "shrub_01/shrub_01_decimated.fbx", "shrub_01", log);
+        var shrub2 = SetupShrubPrefab(PH + "shrub_02/shrub_02_decimated.fbx", "shrub_02", log);
         const float shrub1BottomY = -0.105f;
         const float shrub2BottomY = -0.939f;
         var mossSets = LoadIndividualMossRocks();
