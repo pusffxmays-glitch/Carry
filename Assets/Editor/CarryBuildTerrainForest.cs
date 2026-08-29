@@ -1319,66 +1319,16 @@ public static class CarryBuildTerrainForest
         // disk (Assets/ExternalAssets/PolyHaven/rock_face_01/, rock_face_02/) and are NOT deleted --
         // only their placement in this generator was removed. See ASSET_LICENSES.md 注記3 for the
         // updated status.
-        var coastalCliffPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "coastal_cliff_01/coastal_cliff_01_decimated.fbx");
-        float coastalCliffBottomY = GetPrefabBottomLocalY(coastalCliffPrefab);
-
-        // coastal_cliff_01: a genuinely wide (92m native) exposed cliff-strata band, used as the
-        // backdrop for the single most important viewpoint -- directly across the water from the
-        // bridge (180 deg). Scaled down to a still-substantial ~40m-wide band (not full native
-        // size, which would dwarf the whole lake) and embedded well into the existing terrain slope
-        // there so it reads as the terrain's own rock stratum showing through, not a dropped-in prop.
-        if (coastalCliffPrefab != null)
-        {
-            Vector2 shoreC = FindShoreAtAngle(180f);
-            Vector2 dirC = (shoreC - center).normalized;
-            float shoreRC = Vector2.Distance(shoreC, center);
-            Vector2 anchorC = center + dirC * (shoreRC * 2.4f);
-            float scaleC = 0.44f;
-            Vector2 tangentC = new Vector2(-dirC.y, dirC.x);
-            float halfWidthWorld = 92f * scaleC * 0.5f; // native width * scale
-
-            // This band is ~40m wide -- a single raycast/sample at its center can't guarantee the
-            // whole footprint is grounded (the far left/right extremities may sit over different
-            // local terrain than the center). Raycast at several points along its actual width span
-            // and anchor to the LOWEST hit, per CLAUDE.md 接地ルール #5 (wide assets need multi-point
-            // sampling, not one point).
-            float lowestY = float.MaxValue;
-            Vector3 lowestNormal = Vector3.up;
-            for (int wi = -3; wi <= 3; wi++)
-            {
-                float t = wi / 3f * halfWidthWorld * 0.85f; // stay a bit inside the true extremities
-                Vector2 samplePt = anchorC + tangentC * t;
-                TryGetTerrainSurface(terrain, samplePt.x, samplePt.y, out Vector3 hp, out Vector3 hn);
-                if (hp.y < lowestY) { lowestY = hp.y; lowestNormal = hn; }
-            }
-
-            var instC = PlaceCliffEmbedded(coastalCliffPrefab, wallRoot.transform, terrain, anchorC.x, anchorC.y, true, scaleC, 0.5f, "HeroCoastalCliffBand");
-            if (instC != null)
-            {
-                // Override Y with the span-wide lowest point (PlaceCliffEmbedded only sampled the
-                // center) so the whole width is guaranteed grounded, not just the center.
-                var p = instC.transform.position;
-                p.y = Mathf.Min(p.y, lowestY - coastalCliffBottomY * scaleC * 0.3f);
-                instC.transform.position = p;
-                placed++;
-            }
-
-            // The source asset is a naturally flat/plank-shaped scanned cliff STRIP (92m wide x only
-            // 11m tall) -- even fully grounded at its lowest point, its front (lake-facing) edge can
-            // still read as an overhang with visible open space beneath when viewed from near water
-            // level looking up (confirmed via a FALL_ang165 screenshot). Bridge the visual gap
-            // directly with a row of large boulders along its lower-front edge, each individually
-            // raycast-placed (not sharing one guessed height).
-            for (int bi = -2; bi <= 2; bi++)
-            {
-                if (boulder == null) continue;
-                float bt = bi / 2f * halfWidthWorld * 0.75f;
-                Vector2 bXZ = anchorC + tangentC * bt - dirC * (1f + (float)rng.NextDouble() * 1.5f); // pulled slightly toward the lake, in front of the band's base
-                float bScale = 2.0f + (float)rng.NextDouble() * 1.3f;
-                var bInst = PlaceBoulderEmbedded(boulder, wallRoot.transform, terrain, bXZ.x, bXZ.y, bScale, 0.4f, rng, "HeroCoastalCliffBase_" + bi);
-                if (bInst != null) placed++;
-            }
-        }
+        // coastal_cliff_01 ("HeroCoastalCliffBand" + its HeroCoastalCliffBase_* boulder row): a
+        // wide (92m native) exposed cliff-strata backdrop directly across the water from the
+        // bridge, previously placed here. 2026-08-29 REMOVED (explicit user request,
+        // "HeroCoastalCliffBandも邪魔なので消して"): after LakeRadiusZ was shrunk (20->10) it kept
+        // ending up in the way near the lake/slope area even after being pushed back once already
+        // (anchor multiplier 1.28->2.4, see git history). Rather than keep re-tuning a backdrop
+        // feature the smaller lake no longer has clean room for, the placement call is removed
+        // outright. The source FBX (coastal_cliff_01) is untouched on disk, so this can be
+        // reinstated (and re-tuned for the current lake size) later if wanted -- see git history
+        // (CarryBuildTerrainForest.cs, this comment's location) for the removed code.
 
         var coastRocksPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PH + "coast_rocks_01/coast_rocks_01_decimated.fbx");
         if (coastRocksPrefab != null)
