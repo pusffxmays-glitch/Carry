@@ -49,7 +49,7 @@ public static class CarryBuildTerrainForest
     const float LakeCenterX = 0f;
     const float LakeCenterZ = -16f;
     const float LakeRadiusX = 24f;
-    const float LakeRadiusZ = 20f;
+    const float LakeRadiusZ = 10f;
     const float LakeDepth = 5.0f;
     const float LakeWaterY = -4.4f;
     const float InletAngleDeg = -10f; // direction from lake center toward the bridge/river inlet
@@ -416,9 +416,18 @@ public static class CarryBuildTerrainForest
         // Narrowed from the original (14/34 and 14/30) now that the stairs sit much closer to the
         // inlet (55deg vs -10deg) -- without this the two gentle arcs would overlap and merge into
         // one wide climbable stretch of shore instead of two distinct, cliff-separated openings.
-        float gentleInlet = 1f - Mathf.Clamp01(Mathf.InverseLerp(10f, 24f, AngleDiffDeg(angDeg, InletAngleDeg)));
-        float gentleStairs = 1f - Mathf.Clamp01(Mathf.InverseLerp(8f, 20f, AngleDiffDeg(angDeg, StairsAngleDeg)));
-        return Mathf.Max(gentleInlet, gentleStairs);
+        // 2026-08-29: replaced the old "two separate anchored pockets" (which left a narrow but
+        // absolute-height (15m) CliffRimElevation ridge between them) with ONE continuous gentle arc
+        // spanning InletAngleDeg..StairsAngleDeg. After shrinking LakeRadiusZ (20->10) that ridge's
+        // fixed real-world size no longer left room for a walkable route from the stairs back to the
+        // bridge -- widening the two pockets' falloff was tried first but even 36/34-wide pockets
+        // still left a ~60deg-steep 7m bump at the midpoint (angle ~22deg). The whole near/bridge-
+        // facing shore is one continuous bank now; the cliff-separated-opening design stays intact
+        // everywhere else around the lake (this only touches the arc between the two functional gaps
+        // that both already needed to be gentle).
+        float distFromSpan = angDeg >= InletAngleDeg && angDeg <= StairsAngleDeg ? 0f
+            : Mathf.Min(AngleDiffDeg(angDeg, InletAngleDeg), AngleDiffDeg(angDeg, StairsAngleDeg));
+        return 1f - Mathf.Clamp01(Mathf.InverseLerp(0f, 20f, distFromSpan));
     }
 
     // ---- Named shoreline "bank archetypes" -- deliberate, large-scale asymmetric headlands/coves
@@ -1320,7 +1329,7 @@ public static class CarryBuildTerrainForest
             Vector2 shoreC = FindShoreAtAngle(180f);
             Vector2 dirC = (shoreC - center).normalized;
             float shoreRC = Vector2.Distance(shoreC, center);
-            Vector2 anchorC = center + dirC * (shoreRC * 1.28f);
+            Vector2 anchorC = center + dirC * (shoreRC * 2.4f);
             float scaleC = 0.44f;
             Vector2 tangentC = new Vector2(-dirC.y, dirC.x);
             float halfWidthWorld = 92f * scaleC * 0.5f; // native width * scale
@@ -2935,15 +2944,30 @@ public static class CarryBuildTerrainForest
         var rng = new System.Random(4477);
         int i = 0;
         int maxSteps = 26;
-        float y = LakeWaterY - 0.2f;
-        while (y < landY + 0.1f && i < maxSteps)
+        // 2026-08-29 FIX: this used to climb by a FIXED linear riser (y += riser each step),
+        // implicitly assuming the ground along climbDir rises at a constant ~0.3m/0.6m slope --
+        // true enough against the terrain shape this was originally tuned against, but after
+        // widening the inlet/stairs gentle zone into one continuous arc (see LakeGentleWeight) the
+        // real slope here is a smoothed curve (steep near the waterline, leveling out higher up),
+        // not a straight line -- the fixed-riser assumption buried every step by up to ~1.3m near
+        // the bottom. Each step's height is now sampled from the ACTUAL terrain at its own XZ
+        // instead of assumed, so it always sits on the real surface regardless of its shape.
+        float lastY = LakeWaterY - 0.2f;
+        while (i < maxSteps)
         {
             Vector2 p = shorePt + climbDir * (i * 0.6f - 0.5f);
+            float groundY = SampleWorldHeight(terrain, p.x, p.y);
+            float y = Mathf.Max(groundY - 0.08f, lastY + riser * 0.4f); // embed slightly into the ground, but never step DOWN from the previous stair
+            if (y > landY + 0.1f) break;
             var inst = (GameObject)PrefabUtility.InstantiatePrefab(step, stairsRoot.transform);
             inst.name = "LakeStair_" + i;
             float wobble = ((float)rng.NextDouble() - 0.5f) * 10f;
             float scaleJ = 1f + ((float)rng.NextDouble() - 0.5f) * 0.25f;
-            inst.transform.localScale = new Vector3(1.5f * scaleJ, yScale * (0.85f + (float)rng.NextDouble() * 0.3f), 1.5f * scaleJ);
+            // Widened 1.5 -> 3.2 (2026-08-29, user feedback "階段狭くない?") -- a single ~2m-wide
+            // stone per row read as a narrow ledge, awkward to climb carefully while carrying a
+            // full pot without spilling. ~4m actual tread width (3.2*scaleJ) is comfortable to walk
+            // up without hugging the edge.
+            inst.transform.localScale = new Vector3(3.2f * scaleJ, yScale * (0.85f + (float)rng.NextDouble() * 0.3f), 1.5f * scaleJ);
             inst.transform.position = new Vector3(p.x, y + ((float)rng.NextDouble() - 0.5f) * 0.04f, p.y);
             inst.transform.rotation = Quaternion.Euler(0f, baseRotY + wobble, 0f);
             inst.AddComponent<BoxCollider>(); // auto-fits to the mesh bounds
@@ -2953,7 +2977,7 @@ public static class CarryBuildTerrainForest
                     mr.sharedMaterial = oldMossyStoneMat;
             }
 
-            y += riser;
+            lastY = y;
             i++;
         }
 
@@ -2965,13 +2989,13 @@ public static class CarryBuildTerrainForest
             Vector2 startP = shorePt + climbDir * -0.5f;
             Vector2 endP = shorePt + climbDir * ((i - 1) * 0.6f + 0.1f);
             Vector3 startPos = new Vector3(startP.x, LakeWaterY - 0.2f, startP.y);
-            Vector3 endPos = new Vector3(endP.x, LakeWaterY - 0.2f + i * riser, endP.y);
+            Vector3 endPos = new Vector3(endP.x, lastY, endP.y); // lastY: the actual (terrain-sampled) height of the final placed step, not the old linear i*riser assumption
             var ramp = new GameObject("StairsRampCollider");
             ramp.transform.SetParent(stairsRoot.transform, false);
             ramp.transform.position = (startPos + endPos) * 0.5f;
             ramp.transform.rotation = Quaternion.LookRotation((endPos - startPos).normalized);
             var rampBox = ramp.AddComponent<BoxCollider>();
-            rampBox.size = new Vector3(2.4f, 0.35f, Vector3.Distance(startPos, endPos) + 0.6f);
+            rampBox.size = new Vector3(4.2f, 0.35f, Vector3.Distance(startPos, endPos) + 0.6f); // widened to match the steps' new ~4m tread width (was 2.4f)
         }
 
         // Moss/rock/root dressing flanking the stairs so they read as embedded in the cliff,
@@ -2985,7 +3009,7 @@ public static class CarryBuildTerrainForest
         {
             float along = (float)rng.NextDouble() * (i * 0.6f + 3f);
             float side = ((float)rng.NextDouble() - 0.5f) * 6f;
-            if (Mathf.Abs(side) < 1.1f) continue; // keep the steps themselves clear
+            if (Mathf.Abs(side) < 2.2f) continue; // keep the steps themselves clear (widened along with the steps, was 1.1f)
             Vector2 p = shorePt + climbDir * along + sideDir * side;
             float groundY = SampleWorldHeight(terrain, p.x, p.y);
             bool useRoot = rng.Next(3) == 0;
