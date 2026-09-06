@@ -38,3 +38,16 @@ ProjectSettings/XRSettings.asset -text
 
 # バイナリ .asset (Unity TerrainData 等) は eol 変換禁止 (2026-08-16: CRLF 変換で破損したため)
 Assets/Stage/Terrain/ForestTerrainData.asset -text
+
+# ===== LFS に載せないもの =====
+# 検証用スクショは上の *.png ルールで LFS に流れ込み、アカウントの LFS 枠 10GB を
+# 2.79GB (58%) 消費して 2026-09-06 に 90% 警告を受けた。GitHub は LFS オブジェクトを
+# GC しないので、一度 push すると消せない。ここで filter を外し、万一 .gitignore を
+# すり抜けて add されても LFS 枠を食わないようにする。
+Assets/Screenshots/** -filter -diff -merge -text
+ScreenshotsOut/** -filter -diff -merge -text
+Assets/_Recovery/** -filter -diff -merge -text
+
+# フックは sh スクリプト。CRLF になると Git Bash が
+# "bad interpreter" で実行できなくなるので LF 固定。
+.githooks/** text eol=lf

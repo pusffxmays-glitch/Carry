@@ -1,0 +1,44 @@
+#!/bin/sh
+# LFS 枠を守るためのコミット前チェック。
+#
+# 背景: 2026-09-06 に GitHub から「LFS 10GB の 90% を使用」の警告が届いた。
+# 内訳の 2.79GB (58%) は Assets/Screenshots の検証用スクショだった。GitHub は
+# LFS オブジェクトをガベージコレクションしないため、一度 push すると
+# リポジトリを作り直すまで消えない。だから「入れない」しか防ぎ方がない。
+#
+# 有効化 (クローンごとに 1 回):
+#     git config core.hooksPath .githooks
+
+BLOCKED_PATHS='^(Assets/Screenshots/|ScreenshotsOut/|Assets/_Recovery/)'
+MAX_LFS_MB=60
+
+fail=0
+
+staged=$(git diff --cached --name-only --diff-filter=AM)
+[ -z "$staged" ] && exit 0
+
+blocked=$(printf '%s\n' "$staged" | grep -E "$BLOCKED_PATHS")
+if [ -n "$blocked" ]; then
+    echo "コミット中止: LFS 枠を食う検証用ファイルが含まれています。" >&2
+    printf '%s\n' "$blocked" | sed 's/^/    /' >&2
+    echo "" >&2
+    echo "これらは .gitignore 済みです。意図的に入れたい場合のみ --no-verify を使ってください。" >&2
+    fail=1
+fi
+
+# 巨大な新規バイナリの警告。LFS 追跡対象かどうかは check-attr で判定する。
+printf '%s\n' "$staged" | while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    case "$(git check-attr filter -- "$f")" in
+        *"filter: lfs") ;;
+        *) continue ;;
+    esac
+    size=$(wc -c < "$f" 2>/dev/null || echo 0)
+    mb=$((size / 1048576))
+    if [ "$mb" -ge "$MAX_LFS_MB" ]; then
+        echo "警告: ${mb}MB の LFS ファイル -- $f" >&2
+        echo "       本当に必要か、デシメート/圧縮できないか確認してください。" >&2
+    fi
+done
+
+exit $fail
