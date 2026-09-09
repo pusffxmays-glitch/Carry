@@ -38,3 +38,5 @@ ProjectSettings/XRSettings.asset -text
 
 # バイナリ .asset (Unity TerrainData 等) は eol 変換禁止 (2026-08-16: CRLF 変換で破損したため)
 Assets/Stage/Terrain/ForestTerrainData.asset -text
+Assets/Stage/Forest/SkyboxOptimized/ForestTerrain.asset -text
+Assets/Stage/Forest/Woodland/Terrain.asset -text
